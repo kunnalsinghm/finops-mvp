@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>FinOps Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<script src="/vendor/chart.js/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --border: #232838;
+    --text: #e6e9f0;
+    --muted: #8b93a7;
+    --accent: #6ea8fe;
+    --good: #4ade80;
+    --warn: #facc15;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 26px; font-weight: 600; margin-top: 6px; }
+  .grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .tier-ok { color: var(--good); }
+  .tier-50 { color: var(--good); }
+  .tier-80 { color: var(--warn); }
+  .tier-90 { color: var(--warn); }
+  .tier-exceeded { color: var(--bad); font-weight: 600; }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
+  code { background: #1c2130; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>FinOps Dashboard</h1>
+  <div class="sub">Free/local stack (Node + SQLite) · No cloud services required</div>
+
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>Access</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div>
+        <div style="color:var(--muted);font-size:12px;margin-bottom:6px;">Login (dashboard users)</div>
+        <input id="loginUsername" type="text" placeholder="username"
+          style="width:100%;padding:8px;margin-bottom:6px;background:#0b0e14;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;" />
+        <input id="loginPassword" type="password" placeholder="password"
+          style="width:100%;padding:8px;margin-bottom:6px;background:#0b0e14;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;" />
+        <button id="loginBtn" style="width:100%;padding:8px;background:var(--accent);border:none;border-radius:6px;color:#0b0e14;font-weight:600;cursor:pointer;">Log in</button>
+        <div id="loginStatus" style="color:var(--muted);font-size:12px;margin-top:6px;"></div>
+      </div>
+      <div>
+        <div style="color:var(--muted);font-size:12px;margin-bottom:6px;">Or paste an API key (for service/proxy access)</div>
+        <input id="apiKeyInput" type="text" placeholder="fk_..."
+          style="width:100%;padding:8px;background:#0b0e14;border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:monospace;font-size:12px;" />
+        <div style="color:var(--muted);font-size:11px;margin-top:6px;">Create one via <code>POST /api/keys</code> once logged in as admin.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cards" id="summaryCards"></div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Cost Over Time</h2>
+      <canvas id="timeChart" height="90"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Cost by Team</h2>
+      <canvas id="teamChart" height="90"></canvas>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Cost by Provider / Model</h2>
+      <table id="modelTable">
+        <thead><tr><th>Provider</th><th>Model</th><th>Events</th><th>Cost</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>Budget Status</h2>
+      <table id="budgetTable">
+        <thead><tr><th>Scope</th><th>Spent</th><th>Limit</th><th>Status</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Optimization Recommendations</h2>
+      <div id="recommendations"></div>
+    </div>
+    <div class="panel">
+      <h2>Recent Alerts</h2>
+      <div id="alerts"></div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>Shadow-Spend Reconciliation</h2>
+    <div style="color:var(--muted);font-size:12px;margin-bottom:10px;">
+      Upload a billing CSV from your provider (columns: <code>date,provider,cost</code>) to compare against what this platform tracked. Re-uploading a period replaces prior numbers for those days rather than stacking on top.
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <input id="reconcileFile" type="file" accept=".csv,text/csv"
+        style="flex:1;padding:6px;background:#0b0e14;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;" />
+      <button id="reconcileUploadBtn" style="padding:8px 16px;background:var(--accent);border:none;border-radius:6px;color:#0b0e14;font-weight:600;cursor:pointer;">Upload</button>
+    </div>
+    <div id="reconcileStatus" style="color:var(--muted);font-size:12px;margin-bottom:10px;"></div>
+    <table id="reconcileTable">
+      <thead><tr><th>Day</th><th>Provider</th><th>Reported</th><th>Tracked</th><th>Gap</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="footer">
+    Ingest events: <code>POST /api/ingest</code> · Proxy gateway: <code>POST /api/proxy/:provider</code> ·
+    Add pricing override: <code>POST /api/pricing/override</code> · Run <code>npm run seed</code> for sample data.
+    <br/>All requests except the very first key you create require an <code>X-API-Key</code> header.
+  </div>
+
+<script src="dashboard.js"></script>
+</body>
+</html>

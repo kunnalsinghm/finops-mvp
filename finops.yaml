@@ -1,0 +1,19 @@
+# finops.yaml - "FinOps as Code" (GitOps)
+#
+# Define budgets here and commit this file to your repo. Run
+# POST /api/gitops/sync to push these into the platform. If a budget is
+# removed from this file and synced again, it is removed from the platform
+# too - this prevents "configuration drift".
+
+budgets:
+  - scope_type: team
+    scope_value: growth
+    monthly_limit_usd: 50
+
+  - scope_type: team
+    scope_value: platform
+    monthly_limit_usd: 100
+
+  - scope_type: team
+    scope_value: research
+    monthly_limit_usd: 75
