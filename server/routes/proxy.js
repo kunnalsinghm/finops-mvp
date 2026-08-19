@@ -22,6 +22,7 @@ const {
   getFallback,
   logAlert,
 } = require("../governance");
+const { makeCacheKey, getCached, setCached } = require("../cache");
 
 const router = express.Router();
 
@@ -221,7 +222,35 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     return;
   }
 
-  // ================= NON-STREAMING PATH (unchanged) =================
+  // ================= NON-STREAMING PATH (with opt-in caching) =================
+  const cachingEnabled = req.header("X-Enable-Cache") === "true";
+  const cacheKey = cachingEnabled ? makeCacheKey(providerName, effectiveModel, outboundBody) : null;
+
+  if (cachingEnabled) {
+    const cachedResponse = getCached(cacheKey);
+    if (cachedResponse) {
+      // Log the event as a cache hit: cost_usd is 0 (nothing was actually
+      // spent), but we record what it WOULD have cost so savings are visible
+      // in reporting rather than just vanishing.
+      const { input_tokens, output_tokens } = endpoint.extractUsage(cachedResponse);
+      const { cost_usd: wouldHaveCost } = computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+      insertEvent.run({
+        event_time: new Date().toISOString(),
+        provider: providerName,
+        model: effectiveModel,
+        team, environment, git_branch: gitBranch, user_id: rateLimitKey,
+        input_tokens, output_tokens,
+        cost_usd: 0,
+        tagged: team && environment ? 1 : 0,
+        raw_json: JSON.stringify({ cacheHit: true, would_have_cost_usd: wouldHaveCost ?? 0 }),
+      });
+      res.set("X-FinOps-Cache", "HIT");
+      res.set("X-FinOps-Cost-USD", "0");
+      res.set("X-FinOps-Cache-Savings-USD", String(wouldHaveCost ?? 0));
+      return res.json(cachedResponse);
+    }
+  }
+
   try {
     const providerRes = await fetch(endpoint.url, {
       method: "POST",
@@ -234,6 +263,11 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       return res.status(providerRes.status).json(responseJson);
     }
 
+    if (cachingEnabled) {
+      const ttl = Number(req.header("X-Cache-TTL-Seconds")) || undefined;
+      setCached(cacheKey, responseJson, ttl);
+    }
+
     const { input_tokens, output_tokens } = endpoint.extractUsage(responseJson);
     const cost_usd = logUsageEvent({
       providerName, effectiveModel, team, environment, gitBranch, rateLimitKey,
@@ -241,6 +275,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     });
 
     res.set("X-FinOps-Cost-USD", String(cost_usd ?? 0));
+    if (cachingEnabled) res.set("X-FinOps-Cache", "MISS");
     if (degraded) res.set("X-FinOps-Degraded", "true");
     res.json(responseJson);
   } catch (err) {

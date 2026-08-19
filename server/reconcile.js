@@ -1,4 +1,4 @@
-// reconcile.js - Shadow AI / untracked spend detection via billing reconciliation
+﻿// reconcile.js - Shadow AI / untracked spend detection via billing reconciliation
 //
 // True network-level shadow-AI detection (catching API calls that never
 // touch our proxy at all) needs something outside a free/local tool's reach -
@@ -49,9 +49,10 @@ function importCsv(csvText) {
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split(",").map((c) => c.trim());
     const day = cols[dateIdx];
-    const provider = cols[providerIdx].toLowerCase();
+    const providerRaw = cols[providerIdx];
     const cost = parseFloat(cols[costIdx]);
-    if (!day || !provider || Number.isNaN(cost)) continue;
+    if (!day || !providerRaw || Number.isNaN(cost)) continue;
+    const provider = providerRaw.toLowerCase();
     parsedRows.push({ day, provider, cost });
   }
 

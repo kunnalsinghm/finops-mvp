@@ -4,6 +4,7 @@
 
 const express = require("express");
 const db = require("../db");
+const { logAudit } = require("../audit");
 
 const router = express.Router();
 

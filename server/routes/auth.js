@@ -4,8 +4,9 @@ const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../auth");
 const { createUser, verifyLogin, createSession, destroySession } = require("../users");
-
+const { logAudit } = require("../audit");
 const router = express.Router();
+
 
 // Bootstrap: first user can self-register as admin if NO users AND no API keys
 // exist yet. After that, only an admin can create more users.

@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const db = require("../db");
 const { requireAuth } = require("../auth");
 const { quarantineKey, approveKey } = require("../governance");
-
+const { logAudit } = require("../audit");
 const router = express.Router();
 
 function generateKey() {

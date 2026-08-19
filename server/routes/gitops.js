@@ -10,6 +10,7 @@ const path = require("path");
 const yaml = require("js-yaml");
 const db = require("../db");
 const { requireAuth } = require("../auth");
+const { logAudit } = require("../audit");
 
 const router = express.Router();
 const CONFIG_PATH = path.join(__dirname, "..", "..", "finops.yaml");

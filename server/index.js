@@ -19,6 +19,9 @@ const { router: gitopsRoute } = require("./routes/gitops");
 const authRoute = require("./routes/auth");
 const ssoRoute = require("./routes/sso");
 const reconcileRoute = require("./routes/reconcile");
+const auditRoute = require("./routes/audit");
+const cacheRoute = require("./routes/cache");
+const dataRoute = require("./routes/data");
 const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
 
 const app = express();
@@ -43,6 +46,9 @@ app.use("/api/gitops", gitopsRoute);
 app.use("/api/auth", authRoute);
 app.use("/api/sso", ssoRoute);
 app.use("/api/reconcile", reconcileRoute);
+app.use("/api/audit", auditRoute);
+app.use("/api/cache", cacheRoute);
+app.use("/api/data", dataRoute);
 
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 

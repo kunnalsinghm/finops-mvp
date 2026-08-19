@@ -12,8 +12,7 @@ const { DatabaseSync } = require("node:sqlite");
 const DATA_DIR = path.join(__dirname, "..", "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const DB_PATH = path.join(DATA_DIR, "finops.db");
-const db = new DatabaseSync(DB_PATH);
+const DB_PATH = process.env.FINOPS_DB_PATH || path.join(DATA_DIR, "finops.db");const db = new DatabaseSync(DB_PATH);
 
 db.exec("PRAGMA journal_mode = WAL;");
 
@@ -106,6 +105,16 @@ CREATE TABLE IF NOT EXISTS reconciliation_rows (
   provider TEXT NOT NULL,
   reported_cost_usd REAL NOT NULL,
   imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Immutable audit trail for config changes (distinct from alerts_log, which
+-- is system-generated: budget thresholds, circuit breaker triggers)
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  target TEXT,
+  details TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `);
 

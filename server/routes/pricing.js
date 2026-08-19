@@ -4,6 +4,7 @@ const express = require("express");
 const { setOverride, BASELINE_CATALOGUE } = require("../pricing");
 
 const router = express.Router();
+const { logAudit } = require("../audit");
 
 router.get("/catalogue", (req, res) => {
   res.json(BASELINE_CATALOGUE);
