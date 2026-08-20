@@ -103,12 +103,44 @@
       <input id="reconcileFile" type="file" accept=".csv,text/csv" style="flex:1;" />
       <button id="reconcileUploadBtn" class="primary">Upload</button>
     </div>
-    <div id="reconcileStatus" style="color:var(--text-muted);font-size:12px;margin-bottom:10px;"></div>
     <table id="reconcileTable">
       <thead><tr><th>Day</th><th>Provider</th><th>Reported</th><th>Tracked</th><th>Gap</th><th>Status</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
+
+  <div class="grid stagger-in" style="animation-delay:0.30s;">
+    <div class="panel">
+      <h2 class="panel-title">Cache &amp; Backups</h2>
+      <div class="tick-rule"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px;">
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Cache Hit Rate</div>
+          <div id="cacheHitRate" style="font-family:var(--font-data);font-size:20px;font-weight:600;margin-top:4px;">—</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Cached Entries</div>
+          <div id="cacheSize" style="font-family:var(--font-data);font-size:20px;font-weight:600;margin-top:4px;">—</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <button id="runBackupBtn" class="primary" style="flex:1;">Run Backup Now</button>
+        <button id="exportDataBtn" class="primary" style="flex:1;background:var(--surface-2);color:var(--text);border:1px solid var(--border);">Export Data (CSV)</button>
+      </div>
+      <div id="backupStatus" style="color:var(--text-muted);font-size:12px;margin-bottom:10px;"></div>
+      <table id="backupTable">
+        <thead><tr><th>Backup</th><th>Size</th><th>Created</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2 class="panel-title">Audit Log</h2>
+      <div class="tick-rule"></div>
+      <div id="auditLog"></div>
+    </div>
+  </div>
+
+  <div class="footer">
 
   <div class="footer">
     Ingest: <code>POST /api/ingest</code> &middot; Proxy: <code>POST /api/proxy/:provider</code> &middot;

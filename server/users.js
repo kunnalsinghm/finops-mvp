@@ -59,4 +59,19 @@ function destroySession(token) {
   sessions.delete(token);
 }
 
-module.exports = { createUser, verifyLogin, createSession, getSession, destroySession };
+// Admin-triggered password reset. No email/SMTP dependency for a self-hosted
+// personal tool - the admin sets a temporary password directly and shares it
+// with the user out of band. All existing sessions for that user are
+// invalidated so a compromised session doesn't survive the reset.
+function resetPassword(username, newPassword) {
+  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+  if (!user) throw new Error("User not found");
+  const { hash, salt } = hashPassword(newPassword);
+  db.prepare("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?").run(hash, salt, username);
+
+  for (const [token, session] of sessions.entries()) {
+    if (session.username === username) sessions.delete(token);
+  }
+}
+
+module.exports = { createUser, verifyLogin, createSession, getSession, destroySession, resetPassword };

@@ -23,6 +23,7 @@ const {
   logAlert,
 } = require("../governance");
 const { makeCacheKey, getCached, setCached } = require("../cache");
+const { checkAnomaly } = require("../anomaly");
 
 const router = express.Router();
 
@@ -56,6 +57,11 @@ const insertEvent = db.prepare(`
 
 function logUsageEvent({ providerName, effectiveModel, team, environment, gitBranch, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel }) {
   const { cost_usd } = computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+
+  // Anomaly check BEFORE insertion, same reasoning as ingest.js - comparing
+  // against the prior baseline, not one diluted by the event being checked.
+  checkAnomaly({ provider: providerName, model: effectiveModel, cost_usd: cost_usd ?? 0, team });
+
   insertEvent.run({
     event_time: new Date().toISOString(),
     provider: providerName,
@@ -171,7 +177,6 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
 
   let outboundBody = { ...req.body, model: effectiveModel };
   if (isStreaming && providerName === "openai") {
-    // Forces OpenAI to send exact usage in the final SSE chunk instead of us estimating.
     outboundBody.stream_options = { ...(outboundBody.stream_options || {}), include_usage: true };
   }
 
@@ -200,7 +205,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       for await (const chunk of providerRes.body) {
         const text = decoder.decode(chunk, { stream: true });
         fullBuffer += text;
-        res.write(chunk); // pass through to client in real time, unmodified
+        res.write(chunk);
       }
       res.end();
 
@@ -229,9 +234,6 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   if (cachingEnabled) {
     const cachedResponse = getCached(cacheKey);
     if (cachedResponse) {
-      // Log the event as a cache hit: cost_usd is 0 (nothing was actually
-      // spent), but we record what it WOULD have cost so savings are visible
-      // in reporting rather than just vanishing.
       const { input_tokens, output_tokens } = endpoint.extractUsage(cachedResponse);
       const { cost_usd: wouldHaveCost } = computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
       insertEvent.run({

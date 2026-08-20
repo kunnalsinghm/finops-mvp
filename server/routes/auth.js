@@ -3,7 +3,7 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../auth");
-const { createUser, verifyLogin, createSession, destroySession } = require("../users");
+const { createUser, verifyLogin, createSession, destroySession, resetPassword } = require("../users");
 const { logAudit } = require("../audit");
 const { loginRateLimit, resetLoginAttempts } = require("../loginRateLimit");
 
@@ -64,6 +64,21 @@ router.post("/logout", (req, res) => {
   const token = req.header("X-Session-Token");
   if (token) destroySession(token);
   res.json({ ok: true });
+});
+
+// Admin-only: reset another user's password.
+router.post("/users/:username/reset-password", requireAuth("manage_keys"), (req, res) => {
+  const { newPassword } = req.body || {};
+  if (!newPassword || newPassword.length < 8) {
+    return res.status(400).json({ error: "newPassword is required and must be at least 8 characters" });
+  }
+  try {
+    resetPassword(req.params.username, newPassword);
+    logAudit(req.apiKey.key_id, "user.password_reset", req.params.username, {});
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
 });
 
 module.exports = router;

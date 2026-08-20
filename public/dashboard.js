@@ -318,6 +318,100 @@ document.getElementById("reconcileUploadBtn").addEventListener("click", async ()
 /* Main load                                                          */
 /* ---------------------------------------------------------------- */
 async function loadDashboard() {
+  /* ---------------------------------------------------------------- */
+/* Cache stats, backups, audit log (admin-gated - fail gracefully)   */
+/* ---------------------------------------------------------------- */
+async function loadCacheStats() {
+  try {
+    const stats = await getJSON("/api/cache/stats");
+    document.getElementById("cacheHitRate").textContent = `${stats.hit_rate_pct}%`;
+    document.getElementById("cacheSize").textContent = stats.current_size;
+  } catch {
+    document.getElementById("cacheHitRate").textContent = "—";
+    document.getElementById("cacheSize").textContent = "—";
+  }
+}
+
+function renderBackupTable(rows) {
+  const tbody = document.querySelector("#backupTable tbody");
+  if (!rows || !rows.length) {
+    tbody.innerHTML = `<tr><td colspan="3" style="color:var(--text-faint);font-family:var(--font-ui);">No backups yet, or admin access required to view.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .slice(0, 5)
+    .map((b) => `<tr>
+        <td style="font-family:var(--font-ui);font-size:12px;">${b.name}</td>
+        <td>${(b.sizeBytes / 1024).toFixed(1)} KB</td>
+        <td style="font-size:11px;">${new Date(b.createdAt).toLocaleString()}</td>
+      </tr>`)
+    .join("");
+}
+
+async function loadBackups() {
+  try {
+    const rows = await getJSON("/api/backup");
+    renderBackupTable(rows);
+  } catch {
+    renderBackupTable([]);
+  }
+}
+
+document.getElementById("runBackupBtn").addEventListener("click", async () => {
+  const status = document.getElementById("backupStatus");
+  status.textContent = "Running backup…";
+  try {
+    const res = await fetch("/api/backup/run", { method: "POST", headers: authHeaders() });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || "Backup failed");
+    status.innerHTML = `<span style="color:var(--good);">Backup created.</span>`;
+    loadBackups();
+  } catch (err) {
+    status.innerHTML = `<span style="color:var(--danger);">${err.message}</span>`;
+  }
+});
+
+document.getElementById("exportDataBtn").addEventListener("click", () => {
+  fetch("/api/data/export?format=csv", { headers: authHeaders() })
+    .then((res) => {
+      if (!res.ok) throw new Error("Export failed - check you're logged in.");
+      return res.blob();
+    })
+    .then((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "finops_usage_export.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    })
+    .catch((err) => alert(err.message));
+});
+
+function renderAuditLog(rows) {
+  const el = document.getElementById("auditLog");
+  if (!rows || !rows.length) {
+    el.innerHTML = `<div style="color:var(--text-faint);font-size:13px;">No audit entries yet, or admin access required to view.</div>`;
+    return;
+  }
+  el.innerHTML = rows
+    .slice(0, 10)
+    .map((a) => `<div style="border-bottom:1px solid var(--border);padding:8px 0;font-size:13px;">
+        <span style="color:var(--signal);font-family:var(--font-data);font-size:11.5px;">${a.action}</span>
+        <span style="color:var(--text-muted);"> by ${a.actor}${a.target ? ` &rarr; ${a.target}` : ""}</span>
+        <div style="color:var(--text-faint);font-size:11px;font-family:var(--font-data);margin-top:2px;">${a.created_at}</div>
+      </div>`)
+    .join("");
+}
+
+async function loadAuditLog() {
+  try {
+    const rows = await getJSON("/api/audit?limit=10");
+    renderAuditLog(rows);
+  } catch {
+    renderAuditLog([]);
+  }
+}
   try {
     const [summary, untagged, byTime, byTeam, byModel, budgetStatus, recommendations, alerts] = await Promise.all([
       getJSON("/api/costs/summary"),
@@ -337,6 +431,9 @@ async function loadDashboard() {
     renderRecommendations(recommendations);
     renderAlerts(alerts);
     loadReconcileReport();
+    loadCacheStats();
+    loadBackups();
+    loadAuditLog();
   } catch (err) {
     document.getElementById("summaryCards").innerHTML =
       `<div class="card"><div class="label">Error</div><div class="value" style="font-size:14px;color:var(--danger);font-family:var(--font-ui);">${err.message}</div></div>`;
