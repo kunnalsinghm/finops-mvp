@@ -5,3 +5,6 @@ data/*.db-wal
 .env
 
 test/*.db
+
+logs/
+data/backups/

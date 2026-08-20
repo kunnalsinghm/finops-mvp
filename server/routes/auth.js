@@ -5,8 +5,9 @@ const db = require("../db");
 const { requireAuth } = require("../auth");
 const { createUser, verifyLogin, createSession, destroySession } = require("../users");
 const { logAudit } = require("../audit");
-const router = express.Router();
+const { loginRateLimit, resetLoginAttempts } = require("../loginRateLimit");
 
+const router = express.Router();
 
 // Bootstrap: first user can self-register as admin if NO users AND no API keys
 // exist yet. After that, only an admin can create more users.
@@ -28,6 +29,7 @@ router.post("/register", (req, res) => {
     return requireAuth("manage_keys")(req, res, () => {
       try {
         createUser({ username, password, role });
+        logAudit(req.apiKey.key_id, "user.create", username, { role });
         res.status(201).json({ ok: true, username, role });
       } catch (err) {
         res.status(400).json({ error: err.message.includes("UNIQUE") ? "username already exists" : err.message });
@@ -37,13 +39,14 @@ router.post("/register", (req, res) => {
 
   try {
     createUser({ username, password, role: "admin" }); // bootstrap user is always admin
+    logAudit(username, "user.create", username, { role: "admin", note: "bootstrap" });
     res.status(201).json({ ok: true, username, role: "admin", note: "bootstrap admin account created" });
   } catch (err) {
     res.status(400).json({ error: err.message.includes("UNIQUE") ? "username already exists" : err.message });
   }
 });
 
-router.post("/login", (req, res) => {
+router.post("/login", loginRateLimit, (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: "username and password are required" });
@@ -52,6 +55,7 @@ router.post("/login", (req, res) => {
   if (!user) {
     return res.status(401).json({ error: "Invalid username or password" });
   }
+  resetLoginAttempts(req);
   const token = createSession(user);
   res.json({ token, username: user.username, role: user.role });
 });

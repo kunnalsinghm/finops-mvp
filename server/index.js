@@ -1,11 +1,14 @@
-// server/index.js - entrypoint. Run with: npm start
+// server/index.js - entrypoint. Run with: npm start (or npm run serve for auto-restart)
 
 require("dotenv").config();
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 
-require("./db"); // ensures schema exists on boot
+require("./db");
+const logger = require("./logger");
+const { runBackup } = require("./backup");
 
 const ingestRoute = require("./routes/ingest");
 const costsRoute = require("./routes/costs");
@@ -22,15 +25,28 @@ const reconcileRoute = require("./routes/reconcile");
 const auditRoute = require("./routes/audit");
 const cacheRoute = require("./routes/cache");
 const dataRoute = require("./routes/data");
+const backupRoute = require("./routes/backup");
 const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'"],
+        imgSrc: ["'self'", "data:"],
+        connectSrc: ["'self'"],
+      },
+    },
+  })
+);
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
-// Static dashboard (plain HTML/JS, no build step)
 app.use(express.static(path.join(__dirname, "..", "public")));
 app.use("/vendor/chart.js", express.static(path.join(__dirname, "..", "node_modules", "chart.js", "dist")));
 
@@ -49,16 +65,29 @@ app.use("/api/reconcile", reconcileRoute);
 app.use("/api/audit", auditRoute);
 app.use("/api/cache", cacheRoute);
 app.use("/api/data", dataRoute);
+app.use("/api/backup", backupRoute);
 
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 app.listen(PORT, () => {
-  console.log(`FinOps platform running at http://localhost:${PORT}`);
+  logger.info(`FinOps platform running at http://localhost:${PORT}`);
   console.log(`Dashboard:    http://localhost:${PORT}`);
 });
 
-// Background alert checks every 5 minutes (progressive budget alerts + burn rate)
+process.on("uncaughtException", (err) => {
+  logger.error("Uncaught exception", { error: err.message, stack: err.stack });
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  logger.error("Unhandled promise rejection", { reason: String(reason) });
+});
+
 setInterval(() => {
-  checkBudgetAlerts().catch((e) => console.error("Budget alert check failed:", e.message));
-  checkBurnRate().catch((e) => console.error("Burn-rate check failed:", e.message));
+  checkBudgetAlerts().catch((e) => logger.error("Budget alert check failed", { error: e.message }));
+  checkBurnRate().catch((e) => logger.error("Burn-rate check failed", { error: e.message }));
 }, 5 * 60 * 1000);
+
+runBackup();
+setInterval(() => {
+  runBackup();
+}, 6 * 60 * 60 * 1000);
