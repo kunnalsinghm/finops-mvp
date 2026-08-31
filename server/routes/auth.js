@@ -1,13 +1,13 @@
-﻿// routes/auth.js - human user registration + login (session-based)
+// routes/auth.js - human user registration + login (session-based)
 
 const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../auth");
-const { createUser, verifyLogin, createSession, destroySession } = require("../users");
+const { createUser, verifyLogin, createSession, destroySession, resetPassword } = require("../users");
 const { logAudit } = require("../audit");
-const { checkLoginAllowed, recordFailure, recordSuccess, MAX_ATTEMPTS } = require("../login-limiter");
-const router = express.Router();
+const { loginRateLimit, resetLoginAttempts } = require("../loginRateLimit");
 
+const router = express.Router();
 
 // Bootstrap: first user can self-register as admin if NO users AND no API keys
 // exist yet. After that, only an admin can create more users.
@@ -29,6 +29,7 @@ router.post("/register", (req, res) => {
     return requireAuth("manage_keys")(req, res, () => {
       try {
         createUser({ username, password, role });
+        logAudit(req.apiKey.key_id, "user.create", username, { role });
         res.status(201).json({ ok: true, username, role });
       } catch (err) {
         res.status(400).json({ error: err.message.includes("UNIQUE") ? "username already exists" : err.message });
@@ -38,34 +39,23 @@ router.post("/register", (req, res) => {
 
   try {
     createUser({ username, password, role: "admin" }); // bootstrap user is always admin
+    logAudit(username, "user.create", username, { role: "admin", note: "bootstrap" });
     res.status(201).json({ ok: true, username, role: "admin", note: "bootstrap admin account created" });
   } catch (err) {
     res.status(400).json({ error: err.message.includes("UNIQUE") ? "username already exists" : err.message });
   }
 });
 
-router.post("/login", (req, res) => {
+router.post("/login", loginRateLimit, (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: "username and password are required" });
   }
-
-  const ip = req.ip || req.connection?.remoteAddress || "unknown";
-  const gate = checkLoginAllowed(ip, username);
-  if (!gate.allowed) {
-    return res.status(429).json({
-      error: `Too many failed login attempts. Try again in ${gate.retryAfterSec}s.`,
-      retryAfterSec: gate.retryAfterSec,
-    });
-  }
-
   const user = verifyLogin(username, password);
   if (!user) {
-    recordFailure(ip, username);
     return res.status(401).json({ error: "Invalid username or password" });
   }
-
-  recordSuccess(ip, username);
+  resetLoginAttempts(req);
   const token = createSession(user);
   res.json({ token, username: user.username, role: user.role });
 });
@@ -74,6 +64,21 @@ router.post("/logout", (req, res) => {
   const token = req.header("X-Session-Token");
   if (token) destroySession(token);
   res.json({ ok: true });
+});
+
+// Admin-only: reset another user's password.
+router.post("/users/:username/reset-password", requireAuth("manage_keys"), (req, res) => {
+  const { newPassword } = req.body || {};
+  if (!newPassword || newPassword.length < 8) {
+    return res.status(400).json({ error: "newPassword is required and must be at least 8 characters" });
+  }
+  try {
+    resetPassword(req.params.username, newPassword);
+    logAudit(req.apiKey.key_id, "user.password_reset", req.params.username, {});
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
 });
 
 module.exports = router;
