@@ -9,7 +9,7 @@
 const db = require("./db");
 const { logAudit } = require("./audit");
 
-function exportUsageEvents({ from, to, format = "json" } = {}) {
+function getUsageEventsRaw({ from, to } = {}) {
   let query = "SELECT * FROM usage_events WHERE 1=1";
   const params = [];
   if (from) {
@@ -21,8 +21,11 @@ function exportUsageEvents({ from, to, format = "json" } = {}) {
     params.push(to);
   }
   query += " ORDER BY event_time ASC";
+  return db.prepare(query).all(...params);
+}
 
-  const rows = db.prepare(query).all(...params);
+function exportUsageEvents({ from, to, format = "json" } = {}) {
+  const rows = getUsageEventsRaw({ from, to });
 
   if (format === "csv") {
     if (!rows.length) return "";
@@ -59,4 +62,4 @@ function purgeUsageEvents(beforeIsoDate, actor) {
   return count;
 }
 
-module.exports = { exportUsageEvents, purgeUsageEvents };
+module.exports = { exportUsageEvents, purgeUsageEvents, getUsageEventsRaw, csvEscape };
