@@ -1,4 +1,4 @@
-// backup.js - automatic SQLite backups with retention.
+﻿// backup.js - automatic SQLite backups with retention.
 
 const fs = require("fs");
 const path = require("path");
@@ -37,13 +37,12 @@ function pruneOldBackups() {
   const files = fs
     .readdirSync(BACKUP_DIR)
     .filter((f) => f.startsWith("finops-") && f.endsWith(".db"))
-    .map((f) => ({ name: f, path: path.join(BACKUP_DIR, f), mtime: fs.statSync(path.join(BACKUP_DIR, f)).mtimeMs }))
-    .sort((a, b) => b.mtime - a.mtime);
+    .sort((a, b) => b.localeCompare(a)); // newest first - filename embeds an ISO timestamp, so string sort is reliable (mtime is not, e.g. after a git checkout)
 
   const toDelete = files.slice(RETENTION_COUNT);
   for (const f of toDelete) {
-    fs.unlinkSync(f.path);
-    logger.info("Pruned old backup", { file: f.name });
+    fs.unlinkSync(path.join(BACKUP_DIR, f));
+    logger.info("Pruned old backup", { file: f });
   }
 }
 
