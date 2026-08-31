@@ -23,6 +23,7 @@ const {
   logAlert,
 } = require("../governance");
 const { makeCacheKey, getCached, setCached } = require("../cache");
+const { findSemanticMatch, setSemanticCache, extractPromptText } = require("../semanticCache");
 const { checkAnomaly } = require("../anomaly");
 
 const router = express.Router();
@@ -253,6 +254,35 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     }
   }
 
+  // ---- Semantic cache (opt-in, checked only on an exact-match miss) ----
+  // Exact match always takes priority - it's cheap and guaranteed-correct.
+  // A semantic hit returns a response to a SIMILAR, not identical, prompt.
+  const semanticEnabled = req.header("X-Enable-Semantic-Cache") === "true";
+  const promptText = semanticEnabled ? extractPromptText(outboundBody) : null;
+
+  if (semanticEnabled && promptText) {
+    const match = await findSemanticMatch(providerName, effectiveModel, promptText);
+    if (match) {
+      const { input_tokens, output_tokens } = endpoint.extractUsage(match.value);
+      const { cost_usd: wouldHaveCost } = computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+      insertEvent.run({
+        event_time: new Date().toISOString(),
+        provider: providerName,
+        model: effectiveModel,
+        team, environment, git_branch: gitBranch, user_id: rateLimitKey,
+        input_tokens, output_tokens,
+        cost_usd: 0,
+        tagged: team && environment ? 1 : 0,
+        raw_json: JSON.stringify({ semanticCacheHit: true, similarity: match.similarity, would_have_cost_usd: wouldHaveCost ?? 0 }),
+      });
+      res.set("X-FinOps-Cache", "SEMANTIC-HIT");
+      res.set("X-FinOps-Cache-Similarity", match.similarity.toFixed(4));
+      res.set("X-FinOps-Cost-USD", "0");
+      res.set("X-FinOps-Cache-Savings-USD", String(wouldHaveCost ?? 0));
+      return res.json(match.value);
+    }
+  }
+
   try {
     const providerRes = await fetch(endpoint.url, {
       method: "POST",
@@ -268,6 +298,13 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     if (cachingEnabled) {
       const ttl = Number(req.header("X-Cache-TTL-Seconds")) || undefined;
       setCached(cacheKey, responseJson, ttl);
+    }
+
+    if (semanticEnabled && promptText) {
+      const ttl = Number(req.header("X-Cache-TTL-Seconds")) || undefined;
+      setSemanticCache(providerName, effectiveModel, promptText, responseJson, ttl).catch((err) => {
+        console.warn(`[semanticCache] Failed to store entry: ${err.message}`);
+      });
     }
 
     const { input_tokens, output_tokens } = endpoint.extractUsage(responseJson);

@@ -24,6 +24,7 @@ const ssoRoute = require("./routes/sso");
 const reconcileRoute = require("./routes/reconcile");
 const auditRoute = require("./routes/audit");
 const cacheRoute = require("./routes/cache");
+const semanticCacheRoute = require("./routes/semanticCache");
 const dataRoute = require("./routes/data");
 const backupRoute = require("./routes/backup");
 const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
@@ -64,6 +65,7 @@ app.use("/api/sso", ssoRoute);
 app.use("/api/reconcile", reconcileRoute);
 app.use("/api/audit", auditRoute);
 app.use("/api/cache", cacheRoute);
+app.use("/api/semantic-cache", semanticCacheRoute);
 app.use("/api/data", dataRoute);
 app.use("/api/backup", backupRoute);
 
