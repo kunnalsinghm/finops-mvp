@@ -8,6 +8,7 @@ process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-governance-${process.pid
 const dbPath = process.env.FINOPS_DB_PATH;
 
 test.after(() => {
+  try { db.close(); } catch {}
   for (const suffix of ["", "-shm", "-wal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch {}
   }

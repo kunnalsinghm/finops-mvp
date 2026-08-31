@@ -6,8 +6,10 @@ const fs = require("node:fs");
 
 process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-pricing-${process.pid}.db`);
 const dbPath = process.env.FINOPS_DB_PATH;
+const db = require("../server/db");
 
 test.after(() => {
+  try { db.close(); } catch {}
   for (const suffix of ["", "-shm", "-wal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch {}
   }
