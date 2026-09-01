@@ -3,25 +3,7 @@
 // Falls back to logging only if no webhook URL is configured.
 
 const db = require("./db");
-const { logAlert } = require("./governance");
-
-const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || "";
-
-async function sendSlack(message) {
-  logAlert("budget", message); // always log locally regardless of Slack config
-
-  if (!SLACK_WEBHOOK_URL) return; // no-op if not configured - see .env.example
-
-  try {
-    await fetch(SLACK_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: message }),
-    });
-  } catch (err) {
-    console.error("Failed to deliver Slack alert:", err.message);
-  }
-}
+const { deliverAlert } = require("./alertDelivery");
 
 const hasFiredStmt = db.prepare(
   "SELECT 1 FROM budget_alert_state WHERE budget_id = ? AND month = ? AND tier = ?"
@@ -56,7 +38,7 @@ async function checkBudgetAlerts() {
       const already = hasFiredStmt.get(b.id, month, tier);
       if (already) continue;
       markFiredStmt.run(b.id, month, tier);
-      await sendSlack(
+      await deliverAlert(
         `:warning: Budget alert - *${b.scope_type}:${b.scope_value}* has reached *${tier}* of its $${b.monthly_limit_usd} monthly budget (spent $${spend.spend.toFixed(2)}).`
       );
     }
@@ -88,11 +70,11 @@ async function checkBurnRate() {
       const already = hasFiredStmt.get(b.id, month, tier);
       if (already) continue;
       markFiredStmt.run(b.id, month, tier);
-      await sendSlack(
+      await deliverAlert(
         `:fire: Burn-rate alert - *${b.scope_type}:${b.scope_value}* is on pace to spend ~$${projected.toFixed(2)} this month, ${Math.round(overrunPct * 100)}% over its $${b.monthly_limit_usd} budget.`
       );
     }
   }
 }
 
-module.exports = { checkBudgetAlerts, checkBurnRate, sendSlack };
+module.exports = { checkBudgetAlerts, checkBurnRate };
