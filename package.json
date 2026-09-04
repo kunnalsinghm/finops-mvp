@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "finops-mvp",
   "version": "0.2.0",
   "description": "API FinOps & Spend Management Platform - self-hosted",
@@ -21,5 +21,6 @@
     "js-yaml": "^4.1.0",
     "nodemailer": "^9.1.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "author": "Vidhi Sharma & kunal.sm"
 }

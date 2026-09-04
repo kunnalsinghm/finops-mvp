@@ -1,5 +1,7 @@
 ﻿# FinOps — Self-Hosted AI API Cost Management Platform
 
+**Developed and maintained by Vidhi Sharma and kunal.sm**
+
 A self-hosted platform for tracking, governing, and optimizing spend on LLM APIs (OpenAI, Anthropic) — built entirely on free, local tooling. Real-time cost metering, budget enforcement, RBAC, shadow-spend detection, and a themeable dashboard UI, with no cloud services, paid tiers, or signups required to run it.
 
 Runs on `localhost:4000` from VS Code with three commands: `npm install`, `npm run seed`, `npm start` (or `npm run serve` for crash auto-restart).
@@ -147,3 +149,4 @@ The server binds to `127.0.0.1` (this machine only) by default, specifically so 
 ## License
 
 MIT
+
