@@ -1,4 +1,4 @@
-// server/index.js - entrypoint. Run with: npm start (or npm run serve for auto-restart)
+﻿// server/index.js - entrypoint. Run with: npm start (or npm run serve for auto-restart)
 
 require("dotenv").config();
 const path = require("path");
@@ -31,6 +31,14 @@ const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+
+// Bind to localhost only by default. Without an explicit host, Node's
+// app.listen(PORT, ...) binds 0.0.0.0 (every network interface) - combined
+// with auth-bootstrap mode (full admin access until the first API key/user
+// exists), that means anyone reachable on your LAN/tunnel gets free admin
+// access on a fresh install. Set FINOPS_HOST=0.0.0.0 to explicitly opt in
+// to wider exposure once you understand the risk.
+const HOST = process.env.FINOPS_HOST || "127.0.0.1";
 
 app.use(
   helmet({
@@ -71,9 +79,17 @@ app.use("/api/backup", backupRoute);
 
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
-app.listen(PORT, () => {
-  logger.info(`FinOps platform running at http://localhost:${PORT}`);
-  console.log(`Dashboard:    http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  logger.info(`FinOps platform running at http://${HOST}:${PORT}`);
+  console.log(`Dashboard:    http://${HOST}:${PORT}`);
+  if (HOST === "0.0.0.0") {
+    logger.warn(
+      "FINOPS_HOST=0.0.0.0 - this server is reachable from other devices on your network (LAN, port-forward, tunnel), not just this machine."
+    );
+    console.warn(
+      "[WARN] Server bound to 0.0.0.0 - reachable beyond localhost. Unset FINOPS_HOST (or set it to 127.0.0.1) to restrict access to this machine only."
+    );
+  }
 });
 
 process.on("uncaughtException", (err) => {

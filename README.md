@@ -1,4 +1,4 @@
-# FinOps — Self-Hosted AI API Cost Management Platform
+﻿# FinOps — Self-Hosted AI API Cost Management Platform
 
 A self-hosted platform for tracking, governing, and optimizing spend on LLM APIs (OpenAI, Anthropic) — built entirely on free, local tooling. Real-time cost metering, budget enforcement, RBAC, shadow-spend detection, and a themeable dashboard UI, with no cloud services, paid tiers, or signups required to run it.
 
@@ -22,7 +22,7 @@ npm run serve      # starts with auto-restart on crash (recommended)
 # or: npm start    # starts without the supervisor
 ```
 
-Open `http://localhost:4000`. On first run, auth is unlocked (bootstrap mode) until you create your first API key or user account.
+Open `http://localhost:4000`. On first run, auth is unlocked (bootstrap mode) until you create your first API key or user account — see "Bootstrap mode" below before exposing this beyond your own machine.
 
 ```bash
 curl -X POST http://localhost:4000/api/auth/register -H "Content-Type: application/json" -d '{"username":"you","password":"a-real-password"}'
@@ -48,14 +48,15 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - Token-bucket rate limiting per API key
 - Circuit breaker: teams over budget auto-degrade to a cheaper same-provider model instead of being blocked
 - Quarantine mode: flagged keys capped to 1 req/min pending admin approval
+- Single-request anomaly detection: flags any one event costing more than 5x the 30-day rolling average for that provider/model — catches a runaway call immediately, rather than waiting for month-end budget totals to reflect it
 
-### Caching
-- Opt-in (`X-Enable-Cache: true`) exact-match request caching — identical provider+model+message requests return a cached response instead of re-calling the provider, with tracked cost savings
-- Honest scope note: exact-match only, not semantic/embedding-based matching
+### Caching — two independent, opt-in tiers
+- **Exact-match** (`X-Enable-Cache: true`): identical provider+model+message requests return a cached response instead of re-calling the provider, with tracked cost savings
+- **Semantic/near-duplicate** (`X-Enable-Semantic-Cache: true`): catches *reworded* prompts that mean the same thing. Local zero-dependency word-overlap mode by default, or real OpenAI embeddings if `FINOPS_EMBEDDING_API_KEY` is set (falls back to local mode if the embedding call fails). Kept as a separate opt-in from exact-match since a semantic hit returns a response to a *different* prompt than what was actually asked — a bigger trust assumption than exact-match, so it needs its own explicit flag
 
 ### Budgeting & alerts
 - Multi-tier budgets (team/project/key), progressive alerts (50/80/90/100%), burn-rate alerts
-- Optional Slack delivery via Incoming Webhook; always logged locally
+- Delivery via Slack Incoming Webhook, a generic webhook (Discord/Teams/ntfy.sh/PagerDuty-compatible — posts `{ text, timestamp }`), and/or SMTP email; always logged locally regardless of whether any delivery channel is configured
 
 ### Optimization engine
 - Rule-based model-switch recommendations, each with an explicit caveat: cost-only estimate, quality unverified, test via shadow A/B first
@@ -73,6 +74,7 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 ### Audit & data governance
 - Immutable audit trail for all administrative actions (budget changes, key lifecycle, pricing overrides)
 - Data export (JSON/CSV) and explicit-cutoff retention purging via `/api/data`
+- FOCUS-spec export (`/api/data/export/focus`) — aligns usage-event export with the FinOps Open Cost & Usage Specification, for feeding into external BI/reporting tools that expect FOCUS-shaped data
 
 ### Reliability & operations
 - **Security:** Helmet security headers (CSP, X-Frame-Options, etc.), IP-based login rate limiting (10 attempts / 15 min)
@@ -84,7 +86,8 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - `finops.yaml` defines budgets declaratively; `POST /api/gitops/sync` pushes them in and removes any budget no longer in the file
 
 ### Testing
-- 26 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), RBAC, recommendations, and reconciliation — including edge cases like malformed CSV input
+- 60 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
+- `scripts/mock-provider.js` — a tiny local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (governance, caching, semantic caching, cost logging) can be exercised end-to-end at zero real API cost. Point `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` at it in `.env`
 
 ### Client SDK
 - `sdk/finops-client.js` — a zero-dependency wrapper for calling the proxy without hand-managing headers, supporting both standard and streaming requests
@@ -111,15 +114,22 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 | POST | `/api/reconcile/upload` | Import a billing CSV |
 | GET | `/api/reconcile/report` | Shadow-spend comparison report |
 | GET | `/api/audit` | Audit trail (admin only) |
-| GET | `/api/cache/stats` \| POST `/clear` | Cache statistics / manual clear |
+| GET | `/api/cache/stats` \| POST `/clear` | Exact-match cache statistics / manual clear |
+| GET | `/api/semantic-cache/stats` \| POST `/clear` | Semantic cache statistics / manual clear |
 | GET | `/api/data/export` | Export usage events (JSON/CSV) |
+| GET | `/api/data/export/focus` | FOCUS-spec export (JSON/CSV) |
 | DELETE | `/api/data/purge` | Retention purge (explicit cutoff required) |
 | GET | `/api/backup` \| POST `/run` | List / trigger backups |
 
 ## Configuration
 
-Copy `.env.example` to `.env`:
+Copy `.env.example` to `.env`. One var worth understanding before you touch it: `FINOPS_HOST` (see "Bootstrap mode" below).
 
+## Bootstrap mode
+
+On a fresh install, before you've created your first API key or user, **every request is served as admin** — this is deliberate local-dev convenience, so there's no setup friction before you have credentials. Once you create a key or user, this window closes automatically and normal auth is enforced from then on.
+
+The server binds to `127.0.0.1` (this machine only) by default, specifically so that bootstrap window can't be reached from anywhere else. If you set `FINOPS_HOST=0.0.0.0` to make the server reachable from other devices on your network (or a tunnel/port-forward), the bootstrap window becomes reachable from those devices too, until you create your first key/user — the server logs a loud one-time `[WARN]` on boot and on first bootstrap-mode access so this is never silent. Don't set `FINOPS_HOST=0.0.0.0` until you've created a real key or user, unless you're on a fully trusted private network.
 
 ## What's tested vs. what needs your own verification
 

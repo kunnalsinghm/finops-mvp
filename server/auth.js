@@ -1,4 +1,4 @@
-// auth.js - simple API-key based auth + RBAC (Admin, Budget-Manager, Developer, Viewer)
+﻿// auth.js - simple API-key based auth + RBAC (Admin, Budget-Manager, Developer, Viewer)
 //
 // This is intentionally simple (no SAML/OIDC yet by default - see
 // server/sso.js for a spec-compliant OIDC client you can wire up with your
@@ -8,6 +8,13 @@
 
 const db = require("./db");
 const { getSession } = require("./users");
+const logger = require("./logger");
+
+// Fires once per process, the first time a request is served under
+// bootstrap mode, so wide-open access is never silent - see the HOST/
+// bootstrap notes in server/index.js and the README's "Bootstrap mode"
+// section for the full context.
+let warnedBootstrapAccess = false;
 
 const ROLE_PERMISSIONS = {
   admin: ["read", "write", "manage_keys", "manage_budgets", "approve_quarantine"],
@@ -45,6 +52,12 @@ function requireAuth(permission) {
     const anyKeys = db.prepare("SELECT COUNT(*) AS n FROM api_keys").get();
     const anyUsers = db.prepare("SELECT COUNT(*) AS n FROM users").get();
     if (anyKeys.n === 0 && anyUsers.n === 0) {
+      if (!warnedBootstrapAccess) {
+        warnedBootstrapAccess = true;
+        logger.warn(
+          "No API keys or users exist yet - every request is being served as admin under bootstrap mode. Create your first key or user (POST /api/auth/register) to close this window."
+        );
+      }
       req.apiKey = { role: "admin", key_id: "bootstrap", label: "bootstrap (no keys/users created yet)" };
       return next();
     }
