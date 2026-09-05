@@ -1,4 +1,4 @@
-// recommend.js - Smart Optimization Engine (Phase 1: rule-based, not ML-based)
+﻿// recommend.js - Smart Optimization Engine (Phase 1: rule-based, not ML-based)
 //
 // IMPORTANT DESIGN NOTE: every recommendation here is explicitly framed as
 // "consider testing" rather than "you should switch" - a true quality/eval
@@ -10,15 +10,11 @@
 
 const db = require("./db");
 const { computeCost } = require("./pricing");
+const { CHEAPER_ALTERNATIVES } = require("./modelAlternatives");
+const { getShadowStatsForPair, MIN_SAMPLES_FOR_CONFIDENCE, SIMILARITY_CONFIDENCE_THRESHOLD } = require("./shadowTest");
 
-// Pairs of (expensive model -> cheaper same-provider alternative) worth testing.
-// Deliberately conservative: same provider only, so behavior/quality is more
-// likely to be comparable than a cross-provider switch.
-const CHEAPER_ALTERNATIVES = {
-  "openai/gpt-4o": { provider: "openai", model: "gpt-4o-mini" },
-  "anthropic/claude-opus": { provider: "anthropic", model: "claude-sonnet" },
-  "anthropic/claude-sonnet": { provider: "anthropic", model: "claude-haiku" },
-};
+// Pairs of (expensive model -> cheaper same-provider alternative) worth testing
+// now live in modelAlternatives.js (shared with shadowTest.js).
 
 function getModelSwitchRecommendations({ days = 30 } = {}) {
   const rows = db
@@ -53,14 +49,34 @@ function getModelSwitchRecommendations({ days = 30 } = {}) {
 
     if (savings <= 0.01) continue;
 
+    // If this exact (current -> suggested) pair has been shadow-tested on
+    // real traffic (see shadowTest.js), replace the "unverified" guess with
+    // an actual measured confidence - including the honest case where the
+    // cheaper model's outputs turned out to diverge too much to recommend.
+    const shadowStats = getShadowStatsForPair(row.provider, row.model, alt.model);
+    let confidence = "unverified";
+    let caveat =
+      "Cost-only estimate. Output quality has NOT been evaluated - test on a sample of real traffic (shadow A/B) before switching production workloads. Enable via X-Enable-Shadow-Test on the proxy.";
+
+    if (shadowStats.successful_count >= MIN_SAMPLES_FOR_CONFIDENCE) {
+      const simPct = Math.round(shadowStats.avg_similarity * 100);
+      if (shadowStats.avg_similarity >= SIMILARITY_CONFIDENCE_THRESHOLD) {
+        confidence = "shadow-tested-similar";
+        caveat = `Shadow-tested on ${shadowStats.successful_count} real requests: ${simPct}% average output similarity, ${shadowStats.avg_length_delta_pct >= 0 ? "+" : ""}${shadowStats.avg_length_delta_pct}% length delta vs. the current model. Similarity is a heuristic (word overlap), not a substitute for your own quality judgment - but this is no longer an unverified guess.`;
+      } else {
+        confidence = "shadow-tested-diverges";
+        caveat = `Shadow-tested on ${shadowStats.successful_count} real requests: only ${simPct}% average output similarity - this cheaper model's responses meaningfully differ from the current one. Switching is NOT recommended without manual review of sample outputs.`;
+      }
+    }
+
     recommendations.push({
       current: { provider: row.provider, model: row.model, cost_usd: round2(row.total_cost), event_count: row.event_count },
       suggested: { provider: alt.provider, model: alt.model, estimated_cost_usd: round2(altCost.cost_usd) },
       estimated_savings_usd: round2(savings),
       estimated_savings_pct: Math.round(savingsPct),
-      confidence: "unverified",
-      caveat:
-        "Cost-only estimate. Output quality has NOT been evaluated - test on a sample of real traffic (shadow A/B) before switching production workloads.",
+      confidence,
+      caveat,
+      shadow_test: shadowStats.sample_count > 0 ? shadowStats : null,
     });
   }
 

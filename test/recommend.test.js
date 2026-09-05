@@ -16,6 +16,7 @@ test.after(() => {
 
 const db = require("../server/db");
 const { getModelSwitchRecommendations, getCachingOpportunities } = require("../server/recommend");
+const { runShadowTest } = require("../server/shadowTest");
 
 function insertEvent({ provider, model, input_tokens, output_tokens, cost_usd, daysAgo = 0 }) {
   const d = new Date();
@@ -70,4 +71,68 @@ test("getCachingOpportunities does not flag low-volume usage", () => {
   const opportunities = getCachingOpportunities({ days: 30 });
   const found = opportunities.find((o) => o.model === "titan-text-express");
   assert.equal(found, undefined);
+});
+
+test("getModelSwitchRecommendations upgrades confidence to shadow-tested-similar once enough high-similarity shadow samples exist", async (t) => {
+  for (let i = 0; i < 20; i++) {
+    insertEvent({ provider: "anthropic", model: "claude-opus", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5 });
+  }
+
+  t.mock.method(global, "fetch", async () => ({
+    ok: true,
+    json: async () => ({ content: [{ type: "text", text: "the same answer every time" }], usage: { input_tokens: 50, output_tokens: 20 } }),
+  }));
+
+  for (let i = 0; i < 6; i++) {
+    await runShadowTest({
+      providerName: "anthropic",
+      primaryModel: "claude-opus",
+      primaryRequestBody: { model: "claude-opus", messages: [] },
+      primaryResponseJson: { content: [{ type: "text", text: "the same answer every time" }] },
+      primaryCostUsd: 0.5,
+      providerKey: "sk-ant-test",
+      team: "eng",
+      endpoint: { url: "https://x.test", authHeader: () => ({}), extractUsage: () => ({ input_tokens: 50, output_tokens: 20 }) },
+      sampleRate: 1.0,
+    });
+  }
+
+  const recs = getModelSwitchRecommendations({ days: 30 });
+  const rec = recs.find((r) => r.current.model === "claude-opus");
+  assert.ok(rec, "expected a recommendation for claude-opus");
+  assert.equal(rec.confidence, "shadow-tested-similar");
+  assert.match(rec.caveat, /Shadow-tested on \d+ real requests/);
+  assert.ok(rec.shadow_test);
+  assert.ok(rec.shadow_test.avg_similarity > 0.8);
+});
+
+test("getModelSwitchRecommendations flags shadow-tested-diverges when shadow-tested outputs don't match well", async (t) => {
+  for (let i = 0; i < 20; i++) {
+    insertEvent({ provider: "anthropic", model: "claude-sonnet", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5 });
+  }
+
+  t.mock.method(global, "fetch", async () => ({
+    ok: true,
+    json: async () => ({ content: [{ type: "text", text: "completely different unrelated topic about weather patterns" }], usage: { input_tokens: 50, output_tokens: 20 } }),
+  }));
+
+  for (let i = 0; i < 6; i++) {
+    await runShadowTest({
+      providerName: "anthropic",
+      primaryModel: "claude-sonnet",
+      primaryRequestBody: { model: "claude-sonnet", messages: [] },
+      primaryResponseJson: { content: [{ type: "text", text: "the quarterly financial report has been finalized" }] },
+      primaryCostUsd: 0.5,
+      providerKey: "sk-ant-test",
+      team: "eng",
+      endpoint: { url: "https://x.test", authHeader: () => ({}), extractUsage: () => ({ input_tokens: 50, output_tokens: 20 }) },
+      sampleRate: 1.0,
+    });
+  }
+
+  const recs = getModelSwitchRecommendations({ days: 30 });
+  const rec = recs.find((r) => r.current.model === "claude-sonnet");
+  assert.ok(rec, "expected a recommendation for claude-sonnet");
+  assert.equal(rec.confidence, "shadow-tested-diverges");
+  assert.match(rec.caveat, /NOT recommended/);
 });

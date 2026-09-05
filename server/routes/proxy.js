@@ -1,4 +1,4 @@
-// routes/proxy.js - Gateway Proxy (Phase 2), now with streaming (SSE) support
+﻿// routes/proxy.js - Gateway Proxy (Phase 2), now with streaming (SSE) support
 //
 // Non-streaming requests work exactly as before. For streaming requests
 // (body.stream === true):
@@ -25,6 +25,7 @@ const {
 const { makeCacheKey, getCached, setCached } = require("../cache");
 const { findSemanticMatch, setSemanticCache, extractPromptText } = require("../semanticCache");
 const { checkAnomaly } = require("../anomaly");
+const { runShadowTest, DEFAULT_SAMPLE_RATE } = require("../shadowTest");
 
 const router = express.Router();
 
@@ -317,6 +318,26 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     if (cachingEnabled) res.set("X-FinOps-Cache", "MISS");
     if (degraded) res.set("X-FinOps-Degraded", "true");
     res.json(responseJson);
+
+    // ---- Shadow A/B testing (opt-in, fires AFTER the client already has
+    // its response - see shadowTest.js for why this is fire-and-forget) ----
+    if (req.header("X-Enable-Shadow-Test") === "true") {
+      const sampleRateHeader = Number(req.header("X-Shadow-Test-Sample-Rate"));
+      const sampleRate = Number.isFinite(sampleRateHeader) ? sampleRateHeader : DEFAULT_SAMPLE_RATE;
+      runShadowTest({
+        providerName,
+        primaryModel: effectiveModel,
+        primaryRequestBody: outboundBody,
+        primaryResponseJson: responseJson,
+        primaryCostUsd: cost_usd ?? 0,
+        providerKey,
+        team,
+        endpoint,
+        sampleRate,
+      }).catch((err) => {
+        console.warn(`[shadowTest] Unexpected failure: ${err.message}`);
+      });
+    }
   } catch (err) {
     res.status(502).json({ error: "Upstream provider request failed", detail: err.message });
   }

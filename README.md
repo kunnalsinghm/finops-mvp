@@ -61,7 +61,8 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - Delivery via Slack Incoming Webhook, a generic webhook (Discord/Teams/ntfy.sh/PagerDuty-compatible — posts `{ text, timestamp }`), and/or SMTP email; always logged locally regardless of whether any delivery channel is configured
 
 ### Optimization engine
-- Rule-based model-switch recommendations, each with an explicit caveat: cost-only estimate, quality unverified, test via shadow A/B first
+- Rule-based model-switch recommendations, each starting with an explicit caveat: cost-only estimate, quality unverified
+- **Shadow A/B testing** (opt-in via `X-Enable-Shadow-Test: true` on the proxy): a sample of real traffic is also sent to the recommended cheaper model, purely to compare — never affects what's returned to the client, fires only after the real response is already sent, non-streaming requests only. Once a specific (current → suggested) model pair has enough successful samples (`FINOPS_SHADOW_TEST_MIN_SAMPLES`, default 5), `/api/recommendations` stops saying "unverified" and reports a real measured confidence instead: `shadow-tested-similar` (average output similarity above `FINOPS_SHADOW_TEST_SIMILARITY_THRESHOLD`, default 0.8) or `shadow-tested-diverges` (below it — switching is actively discouraged in this case, not just unverified). Similarity is local word-overlap cosine similarity (same technique as the semantic cache's local mode) — a useful signal, not a substitute for reading sample outputs yourself. Control the added cost with `X-Shadow-Test-Sample-Rate` (0–1) since every shadow-tested request calls two models instead of one
 - Caching-opportunity heuristic for repeated/templated prompt patterns
 
 ### Shadow-spend reconciliation
@@ -88,7 +89,7 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - `finops.yaml` defines budgets declaratively; `POST /api/gitops/sync` pushes them in and removes any budget no longer in the file
 
 ### Testing
-- 60 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
+- 73 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, shadow A/B testing, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
 - `scripts/mock-provider.js` — a tiny local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (governance, caching, semantic caching, cost logging) can be exercised end-to-end at zero real API cost. Point `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` at it in `.env`
 
 ### Client SDK
@@ -109,7 +110,9 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 | POST | `/api/keys/:id/quarantine` \| `/approve` \| `/revoke` | Key governance actions |
 | GET | `/api/alerts` | Alert log |
 | POST | `/api/alerts/check-now` | Manually trigger budget/burn-rate checks |
-| GET | `/api/recommendations` | Optimization suggestions |
+| GET | `/api/recommendations` | Optimization suggestions (model-switch confidence includes real shadow-test results once enough samples exist) |
+| GET | `/api/shadow-test/summary` | Aggregated shadow A/B test results per model pair |
+| GET | `/api/shadow-test/comparisons` | Recent raw shadow-test rows, including failures |
 | POST | `/api/gitops/sync` | Sync budgets from `finops.yaml` |
 | POST | `/api/auth/register` \| `/login` \| `/logout` | Human user accounts |
 | GET | `/api/sso/login` \| `/callback` | OIDC SSO flow |
@@ -141,7 +144,8 @@ The server binds to `127.0.0.1` (this machine only) by default, specifically so 
 
 ## Known gaps
 
-- No true output-quality evaluation layer for recommendations (cost-only, by design)
+- Shadow A/B testing (see Optimization engine above) covers non-streaming proxy requests only; a streaming request is never eligible for shadow testing
+- Shadow-test similarity is local word-overlap cosine similarity (lexical), not true semantic/human quality judgment — a signal, not a substitute for reading sample outputs
 - Single-process, single-tenant, local-only — no multi-region/hosted deployment
 - SQLite backups are file copies, not point-in-time/incremental
 - No payment/billing infrastructure (this tracks *other* API spend — it doesn't bill anyone for using it)
@@ -149,4 +153,3 @@ The server binds to `127.0.0.1` (this machine only) by default, specifically so 
 ## License
 
 MIT
-

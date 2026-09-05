@@ -1,4 +1,4 @@
-// db.js - SQLite storage layer (free, embedded, zero-config).
+﻿// db.js - SQLite storage layer (free, embedded, zero-config).
 // Uses Node's BUILT-IN node:sqlite module (no native compilation, no Visual
 // Studio Build Tools needed on Windows - it ships inside Node itself since
 // Node 22.5+). Swap this module out later for Postgres/ClickHouse without
@@ -116,6 +116,33 @@ CREATE TABLE IF NOT EXISTS audit_log (
   details TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Shadow A/B test results: when a proxy request opts in (X-Enable-Shadow-Test),
+-- the same prompt is also sent to a cheaper same-provider alternative model
+-- (see modelAlternatives.js) AFTER the real response is already returned to
+-- the client, purely for evaluation. Costs here are real (both models were
+-- actually called) but are intentionally NOT written to usage_events/budgets -
+-- this is evaluation traffic the operator chose to run, not production spend,
+-- and mixing the two would distort dashboards and could trip budget alerts
+-- for a test the operator initiated.
+CREATE TABLE IF NOT EXISTS shadow_comparisons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  provider TEXT NOT NULL,
+  primary_model TEXT NOT NULL,
+  shadow_model TEXT NOT NULL,
+  team TEXT,
+  primary_cost_usd REAL NOT NULL,
+  shadow_cost_usd REAL,
+  similarity REAL,
+  primary_length INTEGER,
+  shadow_length INTEGER,
+  length_delta_pct REAL,
+  shadow_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_pair ON shadow_comparisons(provider, primary_model, shadow_model);
+CREATE INDEX IF NOT EXISTS idx_shadow_time ON shadow_comparisons(created_at);
 `);
 
 module.exports = db;
