@@ -27,6 +27,7 @@ const { findSemanticMatch, setSemanticCache, extractPromptText } = require("../s
 const { checkAnomaly } = require("../anomaly");
 const { runShadowTest, DEFAULT_SAMPLE_RATE } = require("../shadowTest");
 const { redactValue } = require("../piiRedaction");
+const { detectPromptInjection } = require("../promptInjection");
 
 const router = express.Router();
 
@@ -187,6 +188,23 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   let outboundBody = { ...req.body, model: effectiveModel };
   if (isStreaming && providerName === "openai") {
     outboundBody.stream_options = { ...(outboundBody.stream_options || {}), include_usage: true };
+  }
+
+  // --- Prompt-injection detection: runs BEFORE PII redaction below - a
+  // request that's about to be blocked shouldn't first pay the cost of
+  // being redacted. Blocks outright (unlike PII redaction's redact-and-
+  // continue) so a blocked request never reaches, or costs money against,
+  // a real provider. See promptInjection.js header for the full reasoning.
+  const injectionCheck = detectPromptInjection(extractPromptText(outboundBody));
+  if (injectionCheck.flagged) {
+    logAlert(
+      "prompt-injection",
+      `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - matched: ${injectionCheck.matched.join(", ")}`
+    );
+    return res.status(400).json({
+      error: "Request blocked: possible prompt injection detected.",
+      matched_patterns: injectionCheck.matched,
+    });
   }
 
   // --- PII redaction: on by default, applied to the actual outbound body ---
@@ -379,4 +397,3 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
 });
 
 module.exports = router;
-

@@ -46,6 +46,10 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - Team/environment/git-branch tagging — missing tags warn, not reject
 - Dashboards: cost over time, cost by team, cost by provider/model, untagged spend
 
+### Content safety & data protection
+- **PII redaction** (on by default, opt out per-request via `X-Disable-PII-Redaction: true`): regex-based detection of email, SSN, credit card (Luhn-validated), phone, and IP address patterns. Redacts the *request* before it's sent upstream, cached, or persisted — the response is left untouched, since that's what the caller is paying for. Redact-and-continue, not block — mangling a request that could otherwise succeed is worse than the risk here. Applied at both the proxy and ingest
+- **Prompt-injection detection** (always on, not opt-out): rule-based pattern matching (not ML) against known jailbreak/injection phrasings ("ignore previous instructions", "reveal your system prompt", DAN-style persona overrides, etc.). Unlike PII redaction, this **blocks** the request (HTTP 400) rather than continuing — a detected injection attempt getting through even partially defeats the point. Runs *before* PII redaction at both surfaces, so a request that's about to be rejected doesn't first pay the cost of being redacted. Applied at both the proxy (before any upstream call — a blocked request never costs money against a real provider) and ingest (scans the entire raw body, since it's persisted verbatim and a payload in any field could be replayed into a real prompt later by some downstream feature). Both surfaces log to the alerts log with which named pattern(s) matched
+
 ### Governance (enforced live in the proxy)
 - Token-bucket rate limiting per API key
 - Circuit breaker: teams over budget auto-degrade to a cheaper same-provider model instead of being blocked
@@ -89,7 +93,7 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - `finops.yaml` defines budgets declaratively; `POST /api/gitops/sync` pushes them in and removes any budget no longer in the file
 
 ### Testing
-- 73 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, shadow A/B testing, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
+- 101 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, PII redaction, prompt-injection detection, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, shadow A/B testing, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
 - `scripts/mock-provider.js` — a tiny local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (governance, caching, semantic caching, cost logging) can be exercised end-to-end at zero real API cost. Point `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` at it in `.env`
 
 ### Client SDK
@@ -144,6 +148,7 @@ The server binds to `127.0.0.1` (this machine only) by default, specifically so 
 
 ## Known gaps
 
+- PII redaction and prompt-injection detection are both pattern-based, not ML classifiers — PII redaction will miss creative obfuscation and can occasionally false-positive (e.g. a 16-digit order ID that happens to pass Luhn); prompt-injection detection catches known common phrasings only and will not catch a novel or deliberately obfuscated attempt (base64, unicode homoglyphs, translation-based smuggling are explicitly out of scope for v1). Neither is a compliance guarantee on its own
 - Shadow A/B testing (see Optimization engine above) covers non-streaming proxy requests only; a streaming request is never eligible for shadow testing
 - Shadow-test similarity is local word-overlap cosine similarity (lexical), not true semantic/human quality judgment — a signal, not a substitute for reading sample outputs
 - Single-process, single-tenant, local-only — no multi-region/hosted deployment

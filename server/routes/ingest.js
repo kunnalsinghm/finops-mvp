@@ -13,6 +13,7 @@ const { checkRateLimit } = require("../governance");
 const { checkAnomaly } = require("../anomaly");
 const { redactValue } = require("../piiRedaction");
 const { logAlert } = require("../governance");
+const { detectPromptInjection } = require("../promptInjection");
 
 const router = express.Router();
 
@@ -51,6 +52,24 @@ router.post("/", requireAuth("write"), (req, res) => {
 
   if (!provider || !model) {
     return res.status(400).json({ error: "provider and model are required fields" });
+  }
+
+  // Prompt-injection scan across the ENTIRE raw body, not just recognized
+  // fields - runs BEFORE PII redaction below (a request that's about to be
+  // blocked shouldn't first pay the cost of being redacted). ingest.js never
+  // calls an LLM itself, but raw_json persists the whole body verbatim, so
+  // a payload planted in any field (a custom field, even provider/model)
+  // could be replayed into a real prompt later by some downstream feature.
+  const injectionCheck = detectPromptInjection(JSON.stringify(body));
+  if (injectionCheck.flagged) {
+    logAlert(
+      "prompt-injection",
+      `Blocked ingest event from key '${req.apiKey.key_id}' - matched: ${injectionCheck.matched.join(", ")}`
+    );
+    return res.status(400).json({
+      error: "Request blocked: possible prompt injection detected.",
+      matched_patterns: injectionCheck.matched,
+    });
   }
 
   const { cost_usd, rate_found } = computeCost({ provider, model, input_tokens, output_tokens });
