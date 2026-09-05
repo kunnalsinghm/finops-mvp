@@ -26,6 +26,7 @@ const { makeCacheKey, getCached, setCached } = require("../cache");
 const { findSemanticMatch, setSemanticCache, extractPromptText } = require("../semanticCache");
 const { checkAnomaly } = require("../anomaly");
 const { runShadowTest, DEFAULT_SAMPLE_RATE } = require("../shadowTest");
+const { redactValue } = require("../piiRedaction");
 
 const router = express.Router();
 
@@ -57,7 +58,7 @@ const insertEvent = db.prepare(`
      @input_tokens, @output_tokens, @cost_usd, @tagged, @raw_json)
 `);
 
-function logUsageEvent({ providerName, effectiveModel, team, environment, gitBranch, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel }) {
+function logUsageEvent({ providerName, effectiveModel, team, environment, gitBranch, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings }) {
   const { cost_usd } = computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
 
   // Anomaly check BEFORE insertion, same reasoning as ingest.js - comparing
@@ -76,7 +77,13 @@ function logUsageEvent({ providerName, effectiveModel, team, environment, gitBra
     output_tokens,
     cost_usd: cost_usd ?? 0,
     tagged: team && environment ? 1 : 0,
-    raw_json: JSON.stringify({ degraded, requestedModel, effectiveModel, streamed: true }),
+    raw_json: JSON.stringify({
+      degraded,
+      requestedModel,
+      effectiveModel,
+      streamed: true,
+      ...(piiFindings && Object.keys(piiFindings).length > 0 ? { piiRedacted: piiFindings } : {}),
+    }),
   });
   return cost_usd;
 }
@@ -182,6 +189,32 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     outboundBody.stream_options = { ...(outboundBody.stream_options || {}), include_usage: true };
   }
 
+  // --- PII redaction: on by default, applied to the actual outbound body ---
+  // Unlike caching/shadow-testing (opt-in), this runs unless explicitly
+  // disabled - the failure mode of "PII silently leaves your infra or gets
+  // written to your own DB" is worse than the failure mode of "a request
+  // gets redacted when it didn't strictly need to be". Redaction happens
+  // BEFORE the request is sent upstream (so PII never reaches the provider)
+  // and before it's used for cache keys/values or logged - everything
+  // downstream (fetch call, cache, semantic cache, shadow test, raw_json)
+  // sees the redacted version. Opt out per-request with
+  // X-Disable-PII-Redaction: true (e.g. a support-bot use case that
+  // legitimately needs to send a customer's real email to the model).
+  let piiFindings = {};
+  if (req.header("X-Disable-PII-Redaction") !== "true") {
+    const { value, counts, hasPII } = redactValue(outboundBody);
+    outboundBody = value;
+    piiFindings = counts;
+    if (hasPII) {
+      logAlert(
+        "pii-redaction",
+        `Redacted PII in proxy request - team:${team || "untagged"} - ${Object.entries(counts)
+          .map(([k, v]) => `${k.toLowerCase()}:${v}`)
+          .join(", ")}`
+      );
+    }
+  }
+
   // ================= STREAMING PATH =================
   if (isStreaming) {
     try {
@@ -200,6 +233,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
       if (degraded) res.setHeader("X-FinOps-Degraded", "true");
+      if (Object.keys(piiFindings).length > 0) res.setHeader("X-FinOps-PII-Redacted", "true");
 
       let fullBuffer = "";
       const decoder = new TextDecoder();
@@ -217,7 +251,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       logUsageEvent({
         providerName, effectiveModel, team, environment, gitBranch, rateLimitKey,
         input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
-        degraded, requestedModel,
+        degraded, requestedModel, piiFindings,
       });
     } catch (err) {
       if (!res.headersSent) {
@@ -311,12 +345,13 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     const { input_tokens, output_tokens } = endpoint.extractUsage(responseJson);
     const cost_usd = logUsageEvent({
       providerName, effectiveModel, team, environment, gitBranch, rateLimitKey,
-      input_tokens, output_tokens, degraded, requestedModel,
+      input_tokens, output_tokens, degraded, requestedModel, piiFindings,
     });
 
     res.set("X-FinOps-Cost-USD", String(cost_usd ?? 0));
     if (cachingEnabled) res.set("X-FinOps-Cache", "MISS");
     if (degraded) res.set("X-FinOps-Degraded", "true");
+    if (Object.keys(piiFindings).length > 0) res.set("X-FinOps-PII-Redacted", "true");
     res.json(responseJson);
 
     // ---- Shadow A/B testing (opt-in, fires AFTER the client already has
@@ -344,3 +379,4 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
 });
 
 module.exports = router;
+

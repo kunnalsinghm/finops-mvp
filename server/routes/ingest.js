@@ -1,4 +1,4 @@
-// routes/ingest.js - Log Integrator webhook receiver (Phase 1 of the roadmap)
+﻿// routes/ingest.js - Log Integrator webhook receiver (Phase 1 of the roadmap)
 //
 // Accepts usage events from client SDKs, CI jobs, or manual curl/webhook calls.
 // Tagging policy default is WARN, not reject (see blueprint gap notes) - an
@@ -11,6 +11,8 @@ const { computeCost } = require("../pricing");
 const { requireAuth } = require("../auth");
 const { checkRateLimit } = require("../governance");
 const { checkAnomaly } = require("../anomaly");
+const { redactValue } = require("../piiRedaction");
+const { logAlert } = require("../governance");
 
 const router = express.Router();
 
@@ -55,6 +57,26 @@ router.post("/", requireAuth("write"), (req, res) => {
 
   const tagged = Boolean(team && environment) ? 1 : 0;
 
+  // PII redaction on the stored copy of the raw payload - same on-by-default
+  // stance as the proxy (see piiRedaction.js and routes/proxy.js for the
+  // full reasoning). The ingest webhook accepts an arbitrary client-supplied
+  // body, and that whole body gets persisted verbatim into raw_json - so
+  // this is exactly the "stored logs" surface a client could accidentally
+  // leak PII into (e.g. a free-text field, a custom metadata field).
+  let storedBody = body;
+  if (req.header("X-Disable-PII-Redaction") !== "true") {
+    const { value, counts, hasPII } = redactValue(body);
+    storedBody = value;
+    if (hasPII) {
+      logAlert(
+        "pii-redaction",
+        `Redacted PII in ingest payload - team:${team || "untagged"} - ${Object.entries(counts)
+          .map(([k, v]) => `${k.toLowerCase()}:${v}`)
+          .join(", ")}`
+      );
+    }
+  }
+
   const row = {
     event_time: event_time || new Date().toISOString(),
     provider,
@@ -67,7 +89,7 @@ router.post("/", requireAuth("write"), (req, res) => {
     output_tokens,
     cost_usd: cost_usd ?? 0,
     tagged,
-    raw_json: JSON.stringify(body),
+    raw_json: JSON.stringify(storedBody),
   };
 
   // Anomaly check runs against the baseline BEFORE this event is inserted,
