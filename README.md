@@ -45,6 +45,7 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - Per-event cost from a local pricing catalogue with manual overrides
 - Team/environment/git-branch tagging — missing tags warn, not reject
 - Dashboards: cost over time, cost by team, cost by provider/model, untagged spend
+- **Spend forecasting**: a simple moving-average projection (`GET /api/costs/forecast`) — averages recent daily spend (default: last 7 days) and extends it forward (default: 30 days). Deliberately not trend-aware or seasonal — a plain average, not linear regression, since sparse/bursty daily usage data would make a "smarter" model mostly overfit noise rather than add real signal. Refuses to forecast (`available: false`) with fewer than 3 days of data rather than returning a falsely-precise number off 1–2 noisy days
 
 ### Content safety & data protection
 - **PII redaction** (on by default, opt out per-request via `X-Disable-PII-Redaction: true`): regex-based detection of email, SSN, credit card (Luhn-validated), phone, and IP address patterns. Redacts the *request* before it's sent upstream, cached, or persisted — the response is left untouched, since that's what the caller is paying for. Redact-and-continue, not block — mangling a request that could otherwise succeed is worse than the risk here. Applied at both the proxy and ingest
@@ -95,7 +96,7 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - `finops.yaml` defines budgets declaratively; `POST /api/gitops/sync` pushes them in and removes any budget no longer in the file
 
 ### Testing
-- 119 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, PII redaction, prompt-injection detection, model allow-listing, token quotas, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, shadow A/B testing, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
+- 125 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, PII redaction, prompt-injection detection, model allow-listing, token quotas, spend forecasting, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, shadow A/B testing, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
 - `scripts/mock-provider.js` — a tiny local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (governance, caching, semantic caching, cost logging) can be exercised end-to-end at zero real API cost. Point `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` at it in `.env`
 
 ### Client SDK
@@ -108,6 +109,7 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 | POST | `/api/ingest` | Record a usage event |
 | POST | `/api/proxy/:provider` | Proxy a request to `openai`/`anthropic` (streaming + opt-in caching supported) |
 | GET | `/api/costs/summary` \| `/by-team` \| `/by-model` \| `/over-time` \| `/untagged` | Cost dashboards |
+| GET | `/api/costs/forecast` | Simple moving-average spend projection (`?lookback_days=&horizon_days=`) |
 | GET/POST | `/api/budgets` | List / create budgets |
 | GET | `/api/budgets/status` | Budgets with spend-to-date and alert tier |
 | GET | `/api/pricing/catalogue` | View baseline pricing |
