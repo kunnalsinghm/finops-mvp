@@ -12,7 +12,8 @@ const { DatabaseSync } = require("node:sqlite");
 const DATA_DIR = path.join(__dirname, "..", "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const DB_PATH = process.env.FINOPS_DB_PATH || path.join(DATA_DIR, "finops.db");const db = new DatabaseSync(DB_PATH);
+const DB_PATH = process.env.FINOPS_DB_PATH || path.join(DATA_DIR, "finops.db");
+const db = new DatabaseSync(DB_PATH);
 
 db.exec("PRAGMA journal_mode = WAL;");
 
@@ -143,6 +144,22 @@ CREATE TABLE IF NOT EXISTS shadow_comparisons (
 
 CREATE INDEX IF NOT EXISTS idx_shadow_pair ON shadow_comparisons(provider, primary_model, shadow_model);
 CREATE INDEX IF NOT EXISTS idx_shadow_time ON shadow_comparisons(created_at);
+
+-- Model allow-listing: restrict specific teams/keys to a pre-approved list
+-- of models. A key/team with zero rows here is UNRESTRICTED - this is an
+-- opt-in allow-list, not a default-deny system. See modelAllowlist.js for
+-- full enforcement logic (most-specific-wins between key and team scope).
+CREATE TABLE IF NOT EXISTS model_allowlist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope_type TEXT NOT NULL,   -- 'key' | 'team'
+  scope_value TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(scope_type, scope_value, provider, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_allowlist_scope ON model_allowlist(scope_type, scope_value);
 `);
 
 module.exports = db;

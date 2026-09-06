@@ -55,6 +55,7 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - Circuit breaker: teams over budget auto-degrade to a cheaper same-provider model instead of being blocked
 - Quarantine mode: flagged keys capped to 1 req/min pending admin approval
 - Single-request anomaly detection: flags any one event costing more than 5x the 30-day rolling average for that provider/model — catches a runaway call immediately, rather than waiting for month-end budget totals to reflect it
+- **Model allow-listing**: restrict specific keys/teams to a pre-approved list of models (e.g. "this key can only use `gpt-4o-mini`"). Off by default per scope — a key/team with no allow-list rows is completely unrestricted; only adding at least one entry activates the restriction for that key/team. When a key has its own entries, those take full precedence over its team's list (most-specific-wins, not a union). Checked before the budget/circuit-breaker logic, so a disallowed model is rejected before any spend calculation happens. Manage via `/api/model-allowlist`
 
 ### Caching — two independent, opt-in tiers
 - **Exact-match** (`X-Enable-Cache: true`): identical provider+model+message requests return a cached response instead of re-calling the provider, with tracked cost savings
@@ -93,7 +94,7 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 - `finops.yaml` defines budgets declaratively; `POST /api/gitops/sync` pushes them in and removes any budget no longer in the file
 
 ### Testing
-- 101 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, PII redaction, prompt-injection detection, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, shadow A/B testing, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
+- 109 automated tests (`npm test`) covering pricing math, governance (rate limiting/quarantine/circuit breaker), anomaly detection, PII redaction, prompt-injection detection, model allow-listing, RBAC, alert delivery (mocked webhook/SMTP calls), recommendations, shadow A/B testing, reconciliation, semantic caching, and FOCUS export — including edge cases like malformed CSV input
 - `scripts/mock-provider.js` — a tiny local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (governance, caching, semantic caching, cost logging) can be exercised end-to-end at zero real API cost. Point `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` at it in `.env`
 
 ### Client SDK
@@ -114,6 +115,9 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 | POST | `/api/keys/:id/quarantine` \| `/approve` \| `/revoke` | Key governance actions |
 | GET | `/api/alerts` | Alert log |
 | POST | `/api/alerts/check-now` | Manually trigger budget/burn-rate checks |
+| GET | `/api/model-allowlist` | List allow-list entries (optionally filter by `?scope_type=&scope_value=`) |
+| POST | `/api/model-allowlist` | Add an entry (admin only) |
+| DELETE | `/api/model-allowlist/:id` | Remove an entry (admin only) |
 | GET | `/api/recommendations` | Optimization suggestions (model-switch confidence includes real shadow-test results once enough samples exist) |
 | GET | `/api/shadow-test/summary` | Aggregated shadow A/B test results per model pair |
 | GET | `/api/shadow-test/comparisons` | Recent raw shadow-test rows, including failures |

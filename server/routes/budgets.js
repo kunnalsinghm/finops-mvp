@@ -1,19 +1,20 @@
-// routes/budgets.js - Multi-tier budgets + progressive threshold status
+﻿// routes/budgets.js - Multi-tier budgets + progressive threshold status
 // (Slack/Email/PagerDuty delivery is a Phase-2+ integration - this gives you
 // the underlying threshold math and an endpoint the dashboard/cron can poll.)
 
 const express = require("express");
 const db = require("../db");
 const { logAudit } = require("../audit");
+const { requireAuth } = require("../auth");
 
 const router = express.Router();
 
-router.get("/", (req, res) => {
+router.get("/", requireAuth("read"), (req, res) => {
   const budgets = db.prepare("SELECT * FROM budgets ORDER BY id DESC").all();
   res.json(budgets);
 });
 
-router.post("/", (req, res) => {
+router.post("/", requireAuth("manage_budgets"), (req, res) => {
   const { scope_type, scope_value, monthly_limit_usd } = req.body || {};
   if (!scope_type || !scope_value || !monthly_limit_usd) {
     return res
@@ -25,11 +26,12 @@ router.post("/", (req, res) => {
       "INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)"
     )
     .run(scope_type, scope_value, monthly_limit_usd);
+  logAudit(req.apiKey.key_id, "budget.create", scope_value, { scope_type, monthly_limit_usd });
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
 // Status: spend-to-date this month per budget, with alert-tier classification
-router.get("/status", (req, res) => {
+router.get("/status", requireAuth("read"), (req, res) => {
   const budgets = db.prepare("SELECT * FROM budgets").all();
 
   const results = budgets.map((b) => {

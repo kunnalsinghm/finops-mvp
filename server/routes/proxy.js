@@ -28,6 +28,7 @@ const { checkAnomaly } = require("../anomaly");
 const { runShadowTest, DEFAULT_SAMPLE_RATE } = require("../shadowTest");
 const { redactValue } = require("../piiRedaction");
 const { detectPromptInjection } = require("../promptInjection");
+const { checkModelAllowed } = require("../modelAllowlist");
 
 const router = express.Router();
 
@@ -166,6 +167,23 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   let requestedModel = req.body?.model;
   let effectiveModel = requestedModel;
   let degraded = false;
+
+  // --- Model allow-listing: checked BEFORE the budget/circuit-breaker
+  // logic below - no point computing this month's spend for a request
+  // that's about to be rejected for model-access reasons anyway. Checked
+  // against the REQUESTED model, not any later fallback - see
+  // modelAllowlist.js for the full key-vs-team precedence rules.
+  const allowlistCheck = checkModelAllowed({ keyId: rateLimitKey, team, provider: providerName, model: requestedModel });
+  if (!allowlistCheck.allowed) {
+    logAlert(
+      "model-allowlist",
+      `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - '${providerName}/${requestedModel}' is not on the ${allowlistCheck.scope}-level allow-list`
+    );
+    return res.status(403).json({
+      error: `Model '${requestedModel}' is not allowed for this ${allowlistCheck.scope}.`,
+      allowed_models: allowlistCheck.allowedModels,
+    });
+  }
 
   if (team) {
     const budget = db.prepare("SELECT * FROM budgets WHERE scope_type = 'team' AND scope_value = ?").get(team);
