@@ -160,6 +160,24 @@ CREATE TABLE IF NOT EXISTS model_allowlist (
 );
 
 CREATE INDEX IF NOT EXISTS idx_allowlist_scope ON model_allowlist(scope_type, scope_value);
+
+-- Token quotas: cap raw input+output TOKEN consumption (not request count,
+-- not dollar cost) per key/team over a daily or weekly calendar window.
+-- A key/team with zero rows here is UNRESTRICTED. A key/team can have both
+-- a daily AND a weekly row simultaneously - exceeding either blocks.
+-- See tokenQuota.js for full enforcement logic (most-specific-wins between
+-- key and team scope, same as model_allowlist).
+CREATE TABLE IF NOT EXISTS token_quotas (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope_type TEXT NOT NULL,   -- 'key' | 'team'
+  scope_value TEXT NOT NULL,
+  period TEXT NOT NULL,       -- 'daily' | 'weekly'
+  token_limit INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(scope_type, scope_value, period)
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_quota_scope ON token_quotas(scope_type, scope_value);
 `);
 
 module.exports = db;

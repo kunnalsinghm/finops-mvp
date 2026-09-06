@@ -29,6 +29,7 @@ const { runShadowTest, DEFAULT_SAMPLE_RATE } = require("../shadowTest");
 const { redactValue } = require("../piiRedaction");
 const { detectPromptInjection } = require("../promptInjection");
 const { checkModelAllowed } = require("../modelAllowlist");
+const { checkTokenQuota } = require("../tokenQuota");
 
 const router = express.Router();
 
@@ -182,6 +183,23 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     return res.status(403).json({
       error: `Model '${requestedModel}' is not allowed for this ${allowlistCheck.scope}.`,
       allowed_models: allowlistCheck.allowedModels,
+    });
+  }
+
+  // --- Token quota: checked using consumption SO FAR (not including this
+  // request, since its own token cost isn't known until the response comes
+  // back) - see tokenQuota.js header for the full reasoning and the
+  // documented tradeoff this implies.
+  const quotaCheck = checkTokenQuota({ keyId: rateLimitKey, team });
+  if (!quotaCheck.allowed) {
+    const v = quotaCheck.violations[0];
+    logAlert(
+      "token-quota",
+      `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - ${quotaCheck.scope}-level ${v.period} token quota exceeded (${v.used}/${v.limit})`
+    );
+    return res.status(429).json({
+      error: `Token quota exceeded for this ${quotaCheck.scope}.`,
+      violations: quotaCheck.violations,
     });
   }
 

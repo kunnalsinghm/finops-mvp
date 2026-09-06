@@ -29,6 +29,7 @@ const dataRoute = require("./routes/data");
 const backupRoute = require("./routes/backup");
 const shadowTestRoute = require("./routes/shadowTest");
 const modelAllowlistRoute = require("./routes/modelAllowlist");
+const tokenQuotaRoute = require("./routes/tokenQuota");
 const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
 
 const app = express();
@@ -80,6 +81,7 @@ app.use("/api/data", dataRoute);
 app.use("/api/backup", backupRoute);
 app.use("/api/shadow-test", shadowTestRoute);
 app.use("/api/model-allowlist", modelAllowlistRoute);
+app.use("/api/token-quotas", tokenQuotaRoute);
 
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
