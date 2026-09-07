@@ -16,7 +16,7 @@ const { getShadowStatsForPair, MIN_SAMPLES_FOR_CONFIDENCE, SIMILARITY_CONFIDENCE
 // Pairs of (expensive model -> cheaper same-provider alternative) worth testing
 // now live in modelAlternatives.js (shared with shadowTest.js).
 
-function getModelSwitchRecommendations({ days = 30 } = {}) {
+async function getModelSwitchRecommendations({ days = 30 } = {}) {
   const rows = db
     .prepare(
       `SELECT provider, model, SUM(cost_usd) AS total_cost,
@@ -35,7 +35,7 @@ function getModelSwitchRecommendations({ days = 30 } = {}) {
     const alt = CHEAPER_ALTERNATIVES[key];
     if (!alt || row.total_cost < 1) continue; // skip trivial spend
 
-    const altCost = computeCost({
+    const altCost = await computeCost({
       provider: alt.provider,
       model: alt.model,
       input_tokens: row.input_tokens,
@@ -53,7 +53,7 @@ function getModelSwitchRecommendations({ days = 30 } = {}) {
     // real traffic (see shadowTest.js), replace the "unverified" guess with
     // an actual measured confidence - including the honest case where the
     // cheaper model's outputs turned out to diverge too much to recommend.
-    const shadowStats = getShadowStatsForPair(row.provider, row.model, alt.model);
+    const shadowStats = await getShadowStatsForPair(row.provider, row.model, alt.model);
     let confidence = "unverified";
     let caveat =
       "Cost-only estimate. Output quality has NOT been evaluated - test on a sample of real traffic (shadow A/B) before switching production workloads. Enable via X-Enable-Shadow-Test on the proxy.";
@@ -86,7 +86,7 @@ function getModelSwitchRecommendations({ days = 30 } = {}) {
 // Caching opportunity heuristic: flags providers/models with high call volume
 // but low token variance per call, which often indicates repeated/templated
 // prompts that could benefit from semantic or provider-native prompt caching.
-function getCachingOpportunities({ days = 30 } = {}) {
+async function getCachingOpportunities({ days = 30 } = {}) {
   const rows = db
     .prepare(
       `SELECT provider, model, input_tokens

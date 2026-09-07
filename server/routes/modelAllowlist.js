@@ -9,12 +9,12 @@ const { addAllowlistEntry, removeAllowlistEntry, listAllowlistEntries } = requir
 
 const router = express.Router();
 
-router.get("/", requireAuth("read"), (req, res) => {
+router.get("/", requireAuth("read"), async (req, res) => {
   const { scope_type, scope_value } = req.query;
-  res.json(listAllowlistEntries({ scope_type, scope_value }));
+  res.json(await listAllowlistEntries({ scope_type, scope_value }));
 });
 
-router.post("/", requireAuth("manage_keys"), (req, res) => {
+router.post("/", requireAuth("manage_keys"), async (req, res) => {
   const { scope_type, scope_value, provider, model } = req.body || {};
   if (!scope_type || !scope_value || !provider || !model) {
     return res.status(400).json({ error: "scope_type, scope_value, provider, and model are all required" });
@@ -23,8 +23,8 @@ router.post("/", requireAuth("manage_keys"), (req, res) => {
     return res.status(400).json({ error: "scope_type must be 'key' or 'team'" });
   }
   try {
-    const id = addAllowlistEntry({ scope_type, scope_value, provider, model });
-    logAudit(req.apiKey.key_id, "model_allowlist.add", scope_value, { scope_type, provider, model });
+    const id = await addAllowlistEntry({ scope_type, scope_value, provider, model });
+    await logAudit(req.apiKey.key_id, "model_allowlist.add", scope_value, { scope_type, provider, model });
     res.status(201).json({ id, scope_type, scope_value, provider, model });
   } catch (err) {
     if (err.message && err.message.includes("UNIQUE")) {
@@ -34,10 +34,10 @@ router.post("/", requireAuth("manage_keys"), (req, res) => {
   }
 });
 
-router.delete("/:id", requireAuth("manage_keys"), (req, res) => {
-  const removed = removeAllowlistEntry(req.params.id);
+router.delete("/:id", requireAuth("manage_keys"), async (req, res) => {
+  const removed = await removeAllowlistEntry(req.params.id);
   if (!removed) return res.status(404).json({ error: "No allow-list entry with that id" });
-  logAudit(req.apiKey.key_id, "model_allowlist.remove", req.params.id, {});
+  await logAudit(req.apiKey.key_id, "model_allowlist.remove", req.params.id, {});
   res.json({ ok: true });
 });
 

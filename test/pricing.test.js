@@ -17,29 +17,29 @@ test.after(() => {
 
 const { computeCost, setOverride, getRate } = require("../server/pricing");
 
-test("computeCost returns correct cost for a known baseline model", () => {
-  const result = computeCost({ provider: "anthropic", model: "claude-sonnet", input_tokens: 1000, output_tokens: 500 });
+test("computeCost returns correct cost for a known baseline model", async () => {
+  const result = await computeCost({ provider: "anthropic", model: "claude-sonnet", input_tokens: 1000, output_tokens: 500 });
   assert.equal(result.rate_found, true);
   assert.equal(result.cost_usd, 0.0105);
 });
 
-test("computeCost returns rate_found:false for an unknown model", () => {
-  const result = computeCost({ provider: "openai", model: "totally-made-up-model", input_tokens: 100, output_tokens: 50 });
+test("computeCost returns rate_found:false for an unknown model", async () => {
+  const result = await computeCost({ provider: "openai", model: "totally-made-up-model", input_tokens: 100, output_tokens: 50 });
   assert.equal(result.rate_found, false);
   assert.equal(result.cost_usd, null);
 });
 
-test("setOverride takes priority over the baseline catalogue", () => {
-  setOverride({ provider: "openai", model: "gpt-4o", input_per_1k: 1, output_per_1k: 2 });
-  const rate = getRate("openai", "gpt-4o");
+test("setOverride takes priority over the baseline catalogue", async () => {
+  await setOverride({ provider: "openai", model: "gpt-4o", input_per_1k: 1, output_per_1k: 2 });
+  const rate = await getRate("openai", "gpt-4o");
   assert.equal(rate.source, "override");
   assert.equal(rate.input_per_1k, 1);
 
-  const result = computeCost({ provider: "openai", model: "gpt-4o", input_tokens: 1000, output_tokens: 1000 });
+  const result = await computeCost({ provider: "openai", model: "gpt-4o", input_tokens: 1000, output_tokens: 1000 });
   assert.equal(result.cost_usd, 3);
 });
 
-test("computeCost handles zero tokens without error", () => {
-  const result = computeCost({ provider: "anthropic", model: "claude-haiku", input_tokens: 0, output_tokens: 0 });
+test("computeCost handles zero tokens without error", async () => {
+  const result = await computeCost({ provider: "anthropic", model: "claude-haiku", input_tokens: 0, output_tokens: 0 });
   assert.equal(result.cost_usd, 0);
 });

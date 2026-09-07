@@ -85,10 +85,10 @@ router.get("/summary", requireAuth("read"), (req, res) => {
 // the full reasoning and caveats. Returns available:false rather than a
 // 4xx error when there isn't enough data yet, since "no forecast yet" is a
 // normal state for a new install, not a client error.
-router.get("/forecast", requireAuth("read"), (req, res) => {
+router.get("/forecast", requireAuth("read"), async (req, res) => {
   const lookbackDays = Number(req.query.lookback_days) || 7;
   const horizonDays = Number(req.query.horizon_days) || 30;
-  const forecast = forecastSpend({ lookbackDays, horizonDays });
+  const forecast = await forecastSpend({ lookbackDays, horizonDays });
   if (!forecast) {
     return res.json({
       available: false,

@@ -20,7 +20,7 @@ const MIN_SAMPLE_SIZE = 10;
 // normal variance.
 const ANOMALY_MULTIPLIER = 5;
 
-function checkAnomaly({ provider, model, cost_usd, team }) {
+async function checkAnomaly({ provider, model, cost_usd, team }) {
   if (!cost_usd || cost_usd <= 0) return null;
 
   const baseline = db
@@ -36,7 +36,7 @@ function checkAnomaly({ provider, model, cost_usd, team }) {
 
   if (cost_usd > baseline.avg_cost * ANOMALY_MULTIPLIER) {
     const message = `Cost anomaly: a single ${provider}/${model} request cost $${cost_usd.toFixed(4)} - ${Math.round(cost_usd / baseline.avg_cost)}x the recent average of $${baseline.avg_cost.toFixed(4)}${team ? ` (team: ${team})` : ""}.`;
-    logAlert("anomaly", message);
+    await logAlert("anomaly", message);
     return { flagged: true, message, multiplier: Math.round(cost_usd / baseline.avg_cost) };
   }
 

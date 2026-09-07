@@ -12,7 +12,7 @@ const attempts = new Map(); // ip -> { count, windowStart, logged }
 const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_ATTEMPTS = 10; // per window, per IP
 
-function loginRateLimit(req, res, next) {
+async function loginRateLimit(req, res, next) {
   const ip = req.ip || req.connection?.remoteAddress || "unknown";
   const now = Date.now();
 
@@ -30,11 +30,18 @@ function loginRateLimit(req, res, next) {
     // Log once per lockout window, not on every blocked request while
     // locked - otherwise a persistent attacker fills audit_log with
     // thousands of near-identical rows for a single lockout event.
+    // Express 4 doesn't auto-catch async middleware rejections, so this is
+    // wrapped in try/catch - a failed audit write should never prevent the
+    // actual rate-limit response from going out.
     if (!entry.logged) {
-      logAudit("system", "auth.login_rate_limited", ip, {
-        attempts: entry.count,
-        windowMinutes: WINDOW_MS / 60000,
-      });
+      try {
+        await logAudit("system", "auth.login_rate_limited", ip, {
+          attempts: entry.count,
+          windowMinutes: WINDOW_MS / 60000,
+        });
+      } catch (err) {
+        console.error("Failed to write login-rate-limit audit entry:", err.message);
+      }
       entry.logged = true;
     }
 

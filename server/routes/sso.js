@@ -40,7 +40,7 @@ router.get("/callback", async (req, res) => {
     const claims = decodeIdTokenUnsafe(tokens.id_token);
     const email = claims.email || claims.preferred_username || claims.sub;
 
-    const sessionToken = loginOrProvisionSsoUser(email);
+    const sessionToken = await loginOrProvisionSsoUser(email);
 
     // Redirect back to the dashboard with the session token in the URL
     // fragment (not sent to the server on the next request, unlike a query

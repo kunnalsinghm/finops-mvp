@@ -10,12 +10,12 @@ const { addQuota, removeQuota, listQuotas } = require("../tokenQuota");
 
 const router = express.Router();
 
-router.get("/", requireAuth("read"), (req, res) => {
+router.get("/", requireAuth("read"), async (req, res) => {
   const { scope_type, scope_value } = req.query;
-  res.json(listQuotas({ scope_type, scope_value }));
+  res.json(await listQuotas({ scope_type, scope_value }));
 });
 
-router.post("/", requireAuth("manage_budgets"), (req, res) => {
+router.post("/", requireAuth("manage_budgets"), async (req, res) => {
   const { scope_type, scope_value, period, token_limit } = req.body || {};
   if (!scope_type || !scope_value || !period || !token_limit) {
     return res.status(400).json({ error: "scope_type, scope_value, period, and token_limit are all required" });
@@ -27,8 +27,8 @@ router.post("/", requireAuth("manage_budgets"), (req, res) => {
     return res.status(400).json({ error: "period must be 'daily' or 'weekly'" });
   }
   try {
-    const id = addQuota({ scope_type, scope_value, period, token_limit });
-    logAudit(req.apiKey.key_id, "token_quota.add", scope_value, { scope_type, period, token_limit });
+    const id = await addQuota({ scope_type, scope_value, period, token_limit });
+    await logAudit(req.apiKey.key_id, "token_quota.add", scope_value, { scope_type, period, token_limit });
     res.status(201).json({ id, scope_type, scope_value, period, token_limit });
   } catch (err) {
     if (err.message && err.message.includes("UNIQUE")) {
@@ -38,10 +38,10 @@ router.post("/", requireAuth("manage_budgets"), (req, res) => {
   }
 });
 
-router.delete("/:id", requireAuth("manage_budgets"), (req, res) => {
-  const removed = removeQuota(req.params.id);
+router.delete("/:id", requireAuth("manage_budgets"), async (req, res) => {
+  const removed = await removeQuota(req.params.id);
   if (!removed) return res.status(404).json({ error: "No quota with that id" });
-  logAudit(req.apiKey.key_id, "token_quota.remove", req.params.id, {});
+  await logAudit(req.apiKey.key_id, "token_quota.remove", req.params.id, {});
   res.json({ ok: true });
 });
 

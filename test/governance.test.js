@@ -40,19 +40,19 @@ test("checkRateLimit blocks once capacity is exhausted", () => {
   assert.ok(blocked.retryAfterSec > 0);
 });
 
-test("quarantineKey marks a key quarantined and isQuarantined reflects it", () => {
+test("quarantineKey marks a key quarantined and isQuarantined reflects it", async () => {
   db.prepare("INSERT INTO api_keys (key_id, label, role) VALUES (?, ?, ?)").run("qk_1", "test", "developer");
-  assert.equal(isQuarantined("qk_1"), false);
-  quarantineKey("qk_1", "suspicious activity");
-  assert.equal(isQuarantined("qk_1"), true);
+  assert.equal(await isQuarantined("qk_1"), false);
+  await quarantineKey("qk_1", "suspicious activity");
+  assert.equal(await isQuarantined("qk_1"), true);
 });
 
-test("approveKey lifts quarantine status", () => {
+test("approveKey lifts quarantine status", async () => {
   db.prepare("INSERT INTO api_keys (key_id, label, role) VALUES (?, ?, ?)").run("qk_2", "test2", "developer");
-  quarantineKey("qk_2", "test");
-  assert.equal(isQuarantined("qk_2"), true);
-  approveKey("qk_2");
-  assert.equal(isQuarantined("qk_2"), false);
+  await quarantineKey("qk_2", "test");
+  assert.equal(await isQuarantined("qk_2"), true);
+  await approveKey("qk_2");
+  assert.equal(await isQuarantined("qk_2"), false);
 });
 
 test("checkQuarantineAllowance permits first request then blocks within 60s window", () => {

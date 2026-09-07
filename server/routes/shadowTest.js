@@ -8,14 +8,14 @@ const { getShadowTestSummary, getShadowComparisons } = require("../shadowTest");
 
 const router = express.Router();
 
-router.get("/summary", requireAuth("read"), (req, res) => {
+router.get("/summary", requireAuth("read"), async (req, res) => {
   const days = Number(req.query.days) || 90;
-  res.json(getShadowTestSummary({ days }));
+  res.json(await getShadowTestSummary({ days }));
 });
 
-router.get("/comparisons", requireAuth("read"), (req, res) => {
+router.get("/comparisons", requireAuth("read"), async (req, res) => {
   const limit = Number(req.query.limit) || 50;
-  res.json(getShadowComparisons({ limit }));
+  res.json(await getShadowComparisons({ limit }));
 });
 
 module.exports = router;

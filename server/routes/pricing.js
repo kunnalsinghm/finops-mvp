@@ -11,15 +11,15 @@ router.get("/catalogue", requireAuth("read"), (req, res) => {
   res.json(BASELINE_CATALOGUE);
 });
 
-router.post("/override", requireAuth("manage_budgets"), (req, res) => {
+router.post("/override", requireAuth("manage_budgets"), async (req, res) => {
   const { provider, model, input_per_1k, output_per_1k } = req.body || {};
   if (!provider || !model || input_per_1k == null || output_per_1k == null) {
     return res.status(400).json({
       error: "provider, model, input_per_1k, and output_per_1k are required",
     });
   }
-  setOverride({ provider, model, input_per_1k, output_per_1k });
-  logAudit(req.apiKey.key_id, "pricing.override", `${provider}/${model}`, { input_per_1k, output_per_1k });
+  await setOverride({ provider, model, input_per_1k, output_per_1k });
+  await logAudit(req.apiKey.key_id, "pricing.override", `${provider}/${model}`, { input_per_1k, output_per_1k });
   res.status(201).json({ ok: true });
 });
 

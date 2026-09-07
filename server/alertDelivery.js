@@ -86,7 +86,7 @@ async function sendEmail(message) {
 // of delivery config), then fans out to every configured channel in
 // parallel. A failure in one channel does not block the others.
 async function deliverAlert(message, type = "budget") {
-  logAlert(type, message);
+  await logAlert(type, message);
   await Promise.all([sendSlack(message), sendGenericWebhook(message), sendEmail(message)]);
 }
 

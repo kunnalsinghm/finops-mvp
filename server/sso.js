@@ -83,13 +83,13 @@ function validateState(state) {
 
 // Provision or find a local user record for an SSO-authenticated identity,
 // then issue a normal session token (same session system as password login).
-function loginOrProvisionSsoUser(email) {
+async function loginOrProvisionSsoUser(email) {
   let user = db.prepare("SELECT * FROM users WHERE username = ?").get(email);
   if (!user) {
     // First SSO login for this email - provision as viewer by default.
     // An admin can upgrade their role via PATCH /api/keys or a future
     // admin endpoint - auto-granting admin to any SSO login would be unsafe.
-    createUser({ username: email, password: crypto.randomBytes(24).toString("hex"), role: "viewer" });
+    await createUser({ username: email, password: crypto.randomBytes(24).toString("hex"), role: "viewer" });
     user = db.prepare("SELECT * FROM users WHERE username = ?").get(email);
   }
   return createSession(user);

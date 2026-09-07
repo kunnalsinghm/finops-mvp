@@ -39,12 +39,12 @@ function periodClause(period) {
   throw new Error(`Unknown period '${period}'`);
 }
 
-function getQuotaRows(scopeType, scopeValue) {
+async function getQuotaRows(scopeType, scopeValue) {
   if (!scopeValue) return [];
   return db.prepare("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ?").all(scopeType, scopeValue);
 }
 
-function tokensUsedInPeriod(column, scopeValue, period) {
+async function tokensUsedInPeriod(column, scopeValue, period) {
   const row = db
     .prepare(
       `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total
@@ -58,10 +58,10 @@ function tokensUsedInPeriod(column, scopeValue, period) {
 // Returns { allowed, scope, violations }. scope is 'key', 'team', or null
 // (unrestricted). violations lists every exceeded period with its limit
 // and actual usage, so a block response/audit entry shows the full picture.
-function checkTokenQuota({ keyId, team }) {
-  const keyRows = getQuotaRows("key", keyId);
+async function checkTokenQuota({ keyId, team }) {
+  const keyRows = await getQuotaRows("key", keyId);
   const scope = keyRows.length > 0 ? "key" : null;
-  const rows = keyRows.length > 0 ? keyRows : getQuotaRows("team", team);
+  const rows = keyRows.length > 0 ? keyRows : await getQuotaRows("team", team);
   const resolvedScope = scope || (rows.length > 0 ? "team" : null);
 
   if (rows.length === 0) return { allowed: true, scope: null, violations: [] };
@@ -71,7 +71,7 @@ function checkTokenQuota({ keyId, team }) {
 
   const violations = [];
   for (const row of rows) {
-    const used = tokensUsedInPeriod(scopeColumn, scopeValue, row.period);
+    const used = await tokensUsedInPeriod(scopeColumn, scopeValue, row.period);
     if (used >= row.token_limit) {
       violations.push({ period: row.period, limit: row.token_limit, used });
     }
@@ -80,19 +80,19 @@ function checkTokenQuota({ keyId, team }) {
   return { allowed: violations.length === 0, scope: resolvedScope, violations };
 }
 
-function addQuota({ scope_type, scope_value, period, token_limit }) {
+async function addQuota({ scope_type, scope_value, period, token_limit }) {
   const info = db
     .prepare("INSERT INTO token_quotas (scope_type, scope_value, period, token_limit) VALUES (?, ?, ?, ?)")
     .run(scope_type, scope_value, period, token_limit);
   return info.lastInsertRowid;
 }
 
-function removeQuota(id) {
+async function removeQuota(id) {
   const info = db.prepare("DELETE FROM token_quotas WHERE id = ?").run(id);
   return info.changes > 0;
 }
 
-function listQuotas({ scope_type, scope_value } = {}) {
+async function listQuotas({ scope_type, scope_value } = {}) {
   if (scope_type && scope_value) {
     return db
       .prepare("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC")

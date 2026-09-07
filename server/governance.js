@@ -37,7 +37,7 @@ function checkRateLimit(keyId, limit = DEFAULT_LIMIT) {
 // An isolated key can only make 1 request/minute until a human approves it.
 const quarantineBuckets = new Map(); // keyId -> lastAllowedAt
 
-function isQuarantined(keyId) {
+async function isQuarantined(keyId) {
   const row = db.prepare("SELECT status FROM api_keys WHERE key_id = ?").get(keyId);
   return row?.status === "quarantined";
 }
@@ -52,14 +52,14 @@ function checkQuarantineAllowance(keyId) {
   return { allowed: true };
 }
 
-function quarantineKey(keyId, reason) {
+async function quarantineKey(keyId, reason) {
   db.prepare(
     "UPDATE api_keys SET status = 'quarantined', quarantine_reason = ? WHERE key_id = ?"
   ).run(reason, keyId);
-  logAlert("quarantine", `Key ${keyId} quarantined: ${reason}`);
+  await logAlert("quarantine", `Key ${keyId} quarantined: ${reason}`);
 }
 
-function approveKey(keyId) {
+async function approveKey(keyId) {
   db.prepare(
     "UPDATE api_keys SET status = 'active', quarantine_reason = NULL WHERE key_id = ?"
   ).run(keyId);
@@ -82,7 +82,7 @@ const insertAlert = db.prepare(
   "INSERT INTO alerts_log (type, message, created_at) VALUES (?, ?, datetime('now'))"
 );
 
-function logAlert(type, message) {
+async function logAlert(type, message) {
   insertAlert.run(type, message);
 }
 

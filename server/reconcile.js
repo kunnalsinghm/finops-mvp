@@ -31,7 +31,7 @@ const deleteExisting = db.prepare(
 // false shadow-spend gaps. If you need to import multiple partial exports
 // for the same day (e.g. two different cost centers), sum them into a
 // single row yourself before uploading.
-function importCsv(csvText) {
+async function importCsv(csvText) {
   const batch_id = crypto.randomUUID();
   const lines = csvText.trim().split("\n").map((l) => l.trim()).filter(Boolean);
   if (!lines.length) throw new Error("Empty CSV");
@@ -85,7 +85,7 @@ function importCsv(csvText) {
 // Compare reported (billing export) vs tracked (our usage_events) per day+provider.
 // Flags days where reported spend meaningfully exceeds what we tracked -
 // that gap is spend we never saw, i.e. shadow usage.
-function getReconciliationReport({ thresholdPct = 10 } = {}) {
+async function getReconciliationReport({ thresholdPct = 10 } = {}) {
   const reported = db
     .prepare(
       `SELECT day, provider, SUM(reported_cost_usd) AS reported_cost

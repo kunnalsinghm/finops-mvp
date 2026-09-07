@@ -129,7 +129,7 @@ async function runShadowTest({
       row.shadow_error = `HTTP ${res.status}${json?.error?.message ? `: ${json.error.message}` : ""}`;
     } else {
       const { input_tokens, output_tokens } = endpoint.extractUsage(json);
-      const { cost_usd } = computeCost({ provider: providerName, model: alt.model, input_tokens, output_tokens });
+      const { cost_usd } = await computeCost({ provider: providerName, model: alt.model, input_tokens, output_tokens });
       row.shadow_cost_usd = cost_usd ?? 0;
 
       const primaryText = extractResponseText(providerName, primaryResponseJson);
@@ -155,7 +155,7 @@ async function runShadowTest({
 // Aggregate stats for one specific (current -> suggested) pair, used by
 // recommend.js to decide whether a recommendation has moved beyond
 // "unverified" for that exact switch.
-function getShadowStatsForPair(provider, primaryModel, shadowModel, { days = 90 } = {}) {
+async function getShadowStatsForPair(provider, primaryModel, shadowModel, { days = 90 } = {}) {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n,
@@ -180,7 +180,7 @@ function getShadowStatsForPair(provider, primaryModel, shadowModel, { days = 90 
 }
 
 // Every distinct pair tested, for a dashboard/API summary view.
-function getShadowTestSummary({ days = 90 } = {}) {
+async function getShadowTestSummary({ days = 90 } = {}) {
   const rows = db
     .prepare(
       `SELECT provider, primary_model, shadow_model,
@@ -210,7 +210,7 @@ function getShadowTestSummary({ days = 90 } = {}) {
 }
 
 // Raw recent rows, including failures, for debugging/audit.
-function getShadowComparisons({ limit = 50 } = {}) {
+async function getShadowComparisons({ limit = 50 } = {}) {
   const capped = Math.min(Math.max(Number(limit) || 50, 1), 500);
   return db.prepare(`SELECT * FROM shadow_comparisons ORDER BY created_at DESC LIMIT ?`).all(capped);
 }

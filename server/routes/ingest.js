@@ -31,7 +31,7 @@ const insertEvent = db.prepare(`
 // or bad actor with a leaked key) as the proxy is.
 const INGEST_LIMIT = { capacity: 120, refillPerSec: 2 };
 
-router.post("/", requireAuth("write"), (req, res) => {
+router.post("/", requireAuth("write"), async (req, res) => {
   const rl = checkRateLimit(`ingest:${req.apiKey.key_id}`, INGEST_LIMIT);
   if (!rl.allowed) {
     return res.status(429).json({ error: "Rate limit exceeded", retryAfterSec: rl.retryAfterSec });
@@ -62,7 +62,7 @@ router.post("/", requireAuth("write"), (req, res) => {
   // could be replayed into a real prompt later by some downstream feature.
   const injectionCheck = detectPromptInjection(JSON.stringify(body));
   if (injectionCheck.flagged) {
-    logAlert(
+    await logAlert(
       "prompt-injection",
       `Blocked ingest event from key '${req.apiKey.key_id}' - matched: ${injectionCheck.matched.join(", ")}`
     );
@@ -72,7 +72,7 @@ router.post("/", requireAuth("write"), (req, res) => {
     });
   }
 
-  const { cost_usd, rate_found } = computeCost({ provider, model, input_tokens, output_tokens });
+  const { cost_usd, rate_found } = await computeCost({ provider, model, input_tokens, output_tokens });
 
   const tagged = Boolean(team && environment) ? 1 : 0;
 
@@ -87,7 +87,7 @@ router.post("/", requireAuth("write"), (req, res) => {
     const { value, counts, hasPII } = redactValue(body);
     storedBody = value;
     if (hasPII) {
-      logAlert(
+      await logAlert(
         "pii-redaction",
         `Redacted PII in ingest payload - team:${team || "untagged"} - ${Object.entries(counts)
           .map(([k, v]) => `${k.toLowerCase()}:${v}`)
@@ -113,7 +113,7 @@ router.post("/", requireAuth("write"), (req, res) => {
 
   // Anomaly check runs against the baseline BEFORE this event is inserted,
   // so the outlier itself doesn't dilute the average it's being compared to.
-  const anomaly = checkAnomaly({ provider, model, cost_usd: cost_usd ?? 0, team });
+  const anomaly = await checkAnomaly({ provider, model, cost_usd: cost_usd ?? 0, team });
 
   insertEvent.run(row);
 

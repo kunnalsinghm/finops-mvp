@@ -61,12 +61,12 @@ const insertEvent = db.prepare(`
      @input_tokens, @output_tokens, @cost_usd, @tagged, @raw_json)
 `);
 
-function logUsageEvent({ providerName, effectiveModel, team, environment, gitBranch, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings }) {
-  const { cost_usd } = computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+async function logUsageEvent({ providerName, effectiveModel, team, environment, gitBranch, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings }) {
+  const { cost_usd } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
 
   // Anomaly check BEFORE insertion, same reasoning as ingest.js - comparing
   // against the prior baseline, not one diluted by the event being checked.
-  checkAnomaly({ provider: providerName, model: effectiveModel, cost_usd: cost_usd ?? 0, team });
+  await checkAnomaly({ provider: providerName, model: effectiveModel, cost_usd: cost_usd ?? 0, team });
 
   insertEvent.run({
     event_time: new Date().toISOString(),
@@ -149,7 +149,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   const isStreaming = req.body?.stream === true;
 
   // --- Governance: quarantine + rate limiting (shared by both paths) ---
-  if (isQuarantined(rateLimitKey)) {
+  if (await isQuarantined(rateLimitKey)) {
     const allowance = checkQuarantineAllowance(rateLimitKey);
     if (!allowance.allowed) {
       return res.status(429).json({
@@ -174,9 +174,9 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // that's about to be rejected for model-access reasons anyway. Checked
   // against the REQUESTED model, not any later fallback - see
   // modelAllowlist.js for the full key-vs-team precedence rules.
-  const allowlistCheck = checkModelAllowed({ keyId: rateLimitKey, team, provider: providerName, model: requestedModel });
+  const allowlistCheck = await checkModelAllowed({ keyId: rateLimitKey, team, provider: providerName, model: requestedModel });
   if (!allowlistCheck.allowed) {
-    logAlert(
+    await logAlert(
       "model-allowlist",
       `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - '${providerName}/${requestedModel}' is not on the ${allowlistCheck.scope}-level allow-list`
     );
@@ -190,10 +190,10 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // request, since its own token cost isn't known until the response comes
   // back) - see tokenQuota.js header for the full reasoning and the
   // documented tradeoff this implies.
-  const quotaCheck = checkTokenQuota({ keyId: rateLimitKey, team });
+  const quotaCheck = await checkTokenQuota({ keyId: rateLimitKey, team });
   if (!quotaCheck.allowed) {
     const v = quotaCheck.violations[0];
-    logAlert(
+    await logAlert(
       "token-quota",
       `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - ${quotaCheck.scope}-level ${v.period} token quota exceeded (${v.used}/${v.limit})`
     );
@@ -215,7 +215,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         if (fallback) {
           effectiveModel = fallback.model;
           degraded = true;
-          logAlert("circuit-breaker", `Team '${team}' over budget - degraded ${providerName}/${requestedModel} -> ${fallback.model}`);
+          await logAlert("circuit-breaker", `Team '${team}' over budget - degraded ${providerName}/${requestedModel} -> ${fallback.model}`);
         }
       }
     }
@@ -233,7 +233,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // a real provider. See promptInjection.js header for the full reasoning.
   const injectionCheck = detectPromptInjection(extractPromptText(outboundBody));
   if (injectionCheck.flagged) {
-    logAlert(
+    await logAlert(
       "prompt-injection",
       `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - matched: ${injectionCheck.matched.join(", ")}`
     );
@@ -260,7 +260,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     outboundBody = value;
     piiFindings = counts;
     if (hasPII) {
-      logAlert(
+      await logAlert(
         "pii-redaction",
         `Redacted PII in proxy request - team:${team || "untagged"} - ${Object.entries(counts)
           .map(([k, v]) => `${k.toLowerCase()}:${v}`)
@@ -302,7 +302,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       const usage =
         providerName === "openai" ? parseOpenAIStreamUsage(fullBuffer) : parseAnthropicStreamUsage(fullBuffer);
 
-      logUsageEvent({
+      await logUsageEvent({
         providerName, effectiveModel, team, environment, gitBranch, rateLimitKey,
         input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
         degraded, requestedModel, piiFindings,
@@ -325,7 +325,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     const cachedResponse = getCached(cacheKey);
     if (cachedResponse) {
       const { input_tokens, output_tokens } = endpoint.extractUsage(cachedResponse);
-      const { cost_usd: wouldHaveCost } = computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+      const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
       insertEvent.run({
         event_time: new Date().toISOString(),
         provider: providerName,
@@ -353,7 +353,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     const match = await findSemanticMatch(providerName, effectiveModel, promptText);
     if (match) {
       const { input_tokens, output_tokens } = endpoint.extractUsage(match.value);
-      const { cost_usd: wouldHaveCost } = computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+      const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
       insertEvent.run({
         event_time: new Date().toISOString(),
         provider: providerName,
@@ -397,7 +397,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     }
 
     const { input_tokens, output_tokens } = endpoint.extractUsage(responseJson);
-    const cost_usd = logUsageEvent({
+    const cost_usd = await logUsageEvent({
       providerName, effectiveModel, team, environment, gitBranch, rateLimitKey,
       input_tokens, output_tokens, degraded, requestedModel, piiFindings,
     });

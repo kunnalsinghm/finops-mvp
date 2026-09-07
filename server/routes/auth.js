@@ -11,7 +11,7 @@ const router = express.Router();
 
 // Bootstrap: first user can self-register as admin if NO users AND no API keys
 // exist yet. After that, only an admin can create more users.
-router.post("/register", (req, res) => {
+router.post("/register", async (req, res) => {
   const { username, password, role = "viewer" } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: "username and password are required" });
@@ -26,10 +26,10 @@ router.post("/register", (req, res) => {
 
   if (!isBootstrap) {
     // Not the very first account - require an authenticated admin to create users
-    return requireAuth("manage_keys")(req, res, () => {
+    return requireAuth("manage_keys")(req, res, async () => {
       try {
-        createUser({ username, password, role });
-        logAudit(req.apiKey.key_id, "user.create", username, { role });
+        await createUser({ username, password, role });
+        await logAudit(req.apiKey.key_id, "user.create", username, { role });
         res.status(201).json({ ok: true, username, role });
       } catch (err) {
         res.status(400).json({ error: err.message.includes("UNIQUE") ? "username already exists" : err.message });
@@ -38,20 +38,20 @@ router.post("/register", (req, res) => {
   }
 
   try {
-    createUser({ username, password, role: "admin" }); // bootstrap user is always admin
-    logAudit(username, "user.create", username, { role: "admin", note: "bootstrap" });
+    await createUser({ username, password, role: "admin" }); // bootstrap user is always admin
+    await logAudit(username, "user.create", username, { role: "admin", note: "bootstrap" });
     res.status(201).json({ ok: true, username, role: "admin", note: "bootstrap admin account created" });
   } catch (err) {
     res.status(400).json({ error: err.message.includes("UNIQUE") ? "username already exists" : err.message });
   }
 });
 
-router.post("/login", loginRateLimit, (req, res) => {
+router.post("/login", loginRateLimit, async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: "username and password are required" });
   }
-  const user = verifyLogin(username, password);
+  const user = await verifyLogin(username, password);
   if (!user) {
     return res.status(401).json({ error: "Invalid username or password" });
   }
@@ -67,14 +67,14 @@ router.post("/logout", (req, res) => {
 });
 
 // Admin-only: reset another user's password.
-router.post("/users/:username/reset-password", requireAuth("manage_keys"), (req, res) => {
+router.post("/users/:username/reset-password", requireAuth("manage_keys"), async (req, res) => {
   const { newPassword } = req.body || {};
   if (!newPassword || newPassword.length < 8) {
     return res.status(400).json({ error: "newPassword is required and must be at least 8 characters" });
   }
   try {
-    resetPassword(req.params.username, newPassword);
-    logAudit(req.apiKey.key_id, "user.password_reset", req.params.username, {});
+    await resetPassword(req.params.username, newPassword);
+    await logAudit(req.apiKey.key_id, "user.password_reset", req.params.username, {});
     res.json({ ok: true });
   } catch (err) {
     res.status(404).json({ error: err.message });

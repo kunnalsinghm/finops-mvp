@@ -21,7 +21,7 @@ const db = require("./db");
 
 const MIN_DAYS_FOR_FORECAST = 3;
 
-function getDailySpend({ days = 30 } = {}) {
+async function getDailySpend({ days = 30 } = {}) {
   return db
     .prepare(
       `SELECT date(event_time) AS day, ROUND(SUM(cost_usd), 4) AS cost
@@ -35,8 +35,8 @@ function getDailySpend({ days = 30 } = {}) {
 
 // Returns null if there isn't enough data yet to forecast responsibly,
 // otherwise a forecast object with the projection and its own caveat text.
-function forecastSpend({ lookbackDays = 7, horizonDays = 30 } = {}) {
-  const daily = getDailySpend({ days: lookbackDays });
+async function forecastSpend({ lookbackDays = 7, horizonDays = 30 } = {}) {
+  const daily = await getDailySpend({ days: lookbackDays });
 
   if (daily.length < MIN_DAYS_FOR_FORECAST) {
     return null;

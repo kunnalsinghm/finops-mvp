@@ -11,11 +11,11 @@ const insert = db.prepare(
   "INSERT INTO audit_log (actor, action, target, details, created_at) VALUES (?, ?, ?, ?, datetime('now'))"
 );
 
-function logAudit(actor, action, target, details = {}) {
+async function logAudit(actor, action, target, details = {}) {
   insert.run(actor, action, target || null, JSON.stringify(details));
 }
 
-function getAuditLog({ limit = 100, action, actor } = {}) {
+async function getAuditLog({ limit = 100, action, actor } = {}) {
   let query = "SELECT * FROM audit_log";
   const conditions = [];
   const params = [];

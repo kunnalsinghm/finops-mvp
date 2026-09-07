@@ -6,9 +6,9 @@ const { getAuditLog } = require("../audit");
 
 const router = express.Router();
 
-router.get("/", requireAuth("manage_keys"), (req, res) => {
+router.get("/", requireAuth("manage_keys"), async (req, res) => {
   const { limit, action, actor } = req.query;
-  res.json(getAuditLog({ limit: Number(limit) || 100, action, actor }));
+  res.json(await getAuditLog({ limit: Number(limit) || 100, action, actor }));
 });
 
 module.exports = router;

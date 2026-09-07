@@ -34,14 +34,14 @@ router.post("/", requireAuth("manage_keys"), (req, res) => {
   res.status(201).json({ key_id, label, role, team });
 });
 
-router.post("/:keyId/quarantine", requireAuth("approve_quarantine"), (req, res) => {
+router.post("/:keyId/quarantine", requireAuth("approve_quarantine"), async (req, res) => {
   const { reason = "manually quarantined" } = req.body || {};
-  quarantineKey(req.params.keyId, reason);
+  await quarantineKey(req.params.keyId, reason);
   res.json({ ok: true });
 });
 
-router.post("/:keyId/approve", requireAuth("approve_quarantine"), (req, res) => {
-  approveKey(req.params.keyId);
+router.post("/:keyId/approve", requireAuth("approve_quarantine"), async (req, res) => {
+  await approveKey(req.params.keyId);
   res.json({ ok: true });
 });
 

@@ -6,11 +6,11 @@ const { getModelSwitchRecommendations, getCachingOpportunities } = require("../r
 
 const router = express.Router();
 
-router.get("/", requireAuth("read"), (req, res) => {
+router.get("/", requireAuth("read"), async (req, res) => {
   const days = Number(req.query.days) || 30;
   res.json({
-    model_switch: getModelSwitchRecommendations({ days }),
-    caching_opportunities: getCachingOpportunities({ days }),
+    model_switch: await getModelSwitchRecommendations({ days }),
+    caching_opportunities: await getCachingOpportunities({ days }),
   });
 });
 

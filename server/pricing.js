@@ -38,7 +38,7 @@ const upsertOverrideStmt = db.prepare(`
     updated_at = datetime('now')
 `);
 
-function getRate(provider, model) {
+async function getRate(provider, model) {
   const p = String(provider || "").toLowerCase();
   const m = String(model || "");
 
@@ -53,7 +53,7 @@ function getRate(provider, model) {
   return null; // unknown provider/model - caller should flag, not silently cost $0
 }
 
-function setOverride({ provider, model, input_per_1k, output_per_1k }) {
+async function setOverride({ provider, model, input_per_1k, output_per_1k }) {
   upsertOverrideStmt.run({
     provider: String(provider).toLowerCase(),
     model,
@@ -62,8 +62,8 @@ function setOverride({ provider, model, input_per_1k, output_per_1k }) {
   });
 }
 
-function computeCost({ provider, model, input_tokens = 0, output_tokens = 0 }) {
-  const rate = getRate(provider, model);
+async function computeCost({ provider, model, input_tokens = 0, output_tokens = 0 }) {
+  const rate = await getRate(provider, model);
   if (!rate) {
     return { cost_usd: null, rate_found: false };
   }

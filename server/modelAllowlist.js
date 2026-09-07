@@ -24,7 +24,7 @@
 
 const db = require("./db");
 
-function getEntriesForScope(scopeType, scopeValue) {
+async function getEntriesForScope(scopeType, scopeValue) {
   if (!scopeValue) return [];
   return db
     .prepare("SELECT provider, model FROM model_allowlist WHERE scope_type = ? AND scope_value = ?")
@@ -34,14 +34,14 @@ function getEntriesForScope(scopeType, scopeValue) {
 // Returns { allowed, scope, allowedModels }. scope is which list (if any)
 // was actually enforced - 'key', 'team', or null (neither scope had any
 // entries, so the call was unrestricted) - useful for a clear error message.
-function checkModelAllowed({ keyId, team, provider, model }) {
-  const keyEntries = getEntriesForScope("key", keyId);
+async function checkModelAllowed({ keyId, team, provider, model }) {
+  const keyEntries = await getEntriesForScope("key", keyId);
   if (keyEntries.length > 0) {
     const allowed = keyEntries.some((e) => e.provider === provider && e.model === model);
     return { allowed, scope: "key", allowedModels: keyEntries };
   }
 
-  const teamEntries = getEntriesForScope("team", team);
+  const teamEntries = await getEntriesForScope("team", team);
   if (teamEntries.length > 0) {
     const allowed = teamEntries.some((e) => e.provider === provider && e.model === model);
     return { allowed, scope: "team", allowedModels: teamEntries };
@@ -50,19 +50,19 @@ function checkModelAllowed({ keyId, team, provider, model }) {
   return { allowed: true, scope: null, allowedModels: [] };
 }
 
-function addAllowlistEntry({ scope_type, scope_value, provider, model }) {
+async function addAllowlistEntry({ scope_type, scope_value, provider, model }) {
   const info = db
     .prepare("INSERT INTO model_allowlist (scope_type, scope_value, provider, model) VALUES (?, ?, ?, ?)")
     .run(scope_type, scope_value, provider, model);
   return info.lastInsertRowid;
 }
 
-function removeAllowlistEntry(id) {
+async function removeAllowlistEntry(id) {
   const info = db.prepare("DELETE FROM model_allowlist WHERE id = ?").run(id);
   return info.changes > 0;
 }
 
-function listAllowlistEntries({ scope_type, scope_value } = {}) {
+async function listAllowlistEntries({ scope_type, scope_value } = {}) {
   if (scope_type && scope_value) {
     return db
       .prepare("SELECT * FROM model_allowlist WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC")

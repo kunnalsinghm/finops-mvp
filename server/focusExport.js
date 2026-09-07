@@ -140,8 +140,8 @@ function toFocusRows(rawRows) {
   return rawRows.map(toFocusRow);
 }
 
-function exportFocus({ from, to, format = "json" } = {}) {
-  const rawRows = getUsageEventsRaw({ from, to });
+async function exportFocus({ from, to, format = "json" } = {}) {
+  const rawRows = await getUsageEventsRaw({ from, to });
   const focusRows = toFocusRows(rawRows);
 
   if (format === "csv") {

@@ -14,7 +14,7 @@ router.get("/", requireAuth("read"), (req, res) => {
   res.json(budgets);
 });
 
-router.post("/", requireAuth("manage_budgets"), (req, res) => {
+router.post("/", requireAuth("manage_budgets"), async (req, res) => {
   const { scope_type, scope_value, monthly_limit_usd } = req.body || {};
   if (!scope_type || !scope_value || !monthly_limit_usd) {
     return res
@@ -26,7 +26,7 @@ router.post("/", requireAuth("manage_budgets"), (req, res) => {
       "INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)"
     )
     .run(scope_type, scope_value, monthly_limit_usd);
-  logAudit(req.apiKey.key_id, "budget.create", scope_value, { scope_type, monthly_limit_usd });
+  await logAudit(req.apiKey.key_id, "budget.create", scope_value, { scope_type, monthly_limit_usd });
   res.status(201).json({ id: info.lastInsertRowid });
 });
 

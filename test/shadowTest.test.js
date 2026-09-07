@@ -128,7 +128,7 @@ test("runShadowTest records a successful comparison with similarity and real cos
     sampleRate: 1.0,
   });
 
-  const rows = getShadowComparisons({ limit: 10 });
+  const rows = await getShadowComparisons({ limit: 10 });
   const row = rows.find((r) => r.provider === "openai" && r.primary_model === "gpt-4o" && r.team === "eng");
   assert.ok(row, "expected a shadow_comparisons row to be inserted");
   assert.equal(row.shadow_model, "gpt-4o-mini");
@@ -155,7 +155,7 @@ test("runShadowTest records a lower similarity score when outputs differ", async
     sampleRate: 1.0,
   });
 
-  const rows = getShadowComparisons({ limit: 10 });
+  const rows = await getShadowComparisons({ limit: 10 });
   const row = rows.find((r) => r.team === "finance");
   assert.ok(row);
   assert.ok(row.similarity < 0.5, "unrelated text should score low similarity");
@@ -182,7 +182,7 @@ test("runShadowTest records shadow_error on an upstream HTTP error, without thro
     })
   );
 
-  const rows = getShadowComparisons({ limit: 10 });
+  const rows = await getShadowComparisons({ limit: 10 });
   const row = rows.find((r) => r.provider === "anthropic" && r.primary_model === "claude-opus");
   assert.ok(row);
   assert.match(row.shadow_error, /429/);
@@ -208,7 +208,7 @@ test("runShadowTest records shadow_error on a network exception, without throwin
     })
   );
 
-  const rows = getShadowComparisons({ limit: 10 });
+  const rows = await getShadowComparisons({ limit: 10 });
   const row = rows.find((r) => r.provider === "anthropic" && r.primary_model === "claude-sonnet");
   assert.ok(row);
   assert.match(row.shadow_error, /socket hang up/);
@@ -238,14 +238,14 @@ test("getShadowStatsForPair aggregates only successful rows for a specific pair"
   // (shadow_error) row for this same anthropic/claude-sonnet pair - that
   // row must be excluded from these averages, which is exactly what this
   // assertion also verifies.
-  const stats = getShadowStatsForPair("anthropic", "claude-sonnet", "claude-haiku");
+  const stats = await getShadowStatsForPair("anthropic", "claude-sonnet", "claude-haiku");
   assert.ok(stats.sample_count >= 7, "expected the 6 new rows plus the earlier errored row");
   assert.ok(stats.successful_count >= 6);
   assert.ok(stats.avg_similarity > 0.9, "identical repeated text should average near-1.0 similarity");
 });
 
-test("getShadowTestSummary groups by provider/primary/shadow model", () => {
-  const summary = getShadowTestSummary({ days: 365 });
+test("getShadowTestSummary groups by provider/primary/shadow model", async () => {
+  const summary = await getShadowTestSummary({ days: 365 });
   const pair = summary.find((s) => s.provider === "openai" && s.primary_model === "gpt-4o" && s.shadow_model === "gpt-4o-mini");
   assert.ok(pair, "expected a summary row for openai gpt-4o -> gpt-4o-mini");
   assert.ok(pair.sample_count > 0);

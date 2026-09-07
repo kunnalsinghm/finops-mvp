@@ -31,7 +31,7 @@ function hasPermission(role, permission) {
 // Accepts EITHER an X-API-Key (service/proxy auth) OR an X-Session-Token
 // (human dashboard login via /api/auth/login) - whichever is present.
 function requireAuth(permission) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const sessionToken = req.header("X-Session-Token");
     if (sessionToken) {
       const session = getSession(sessionToken);

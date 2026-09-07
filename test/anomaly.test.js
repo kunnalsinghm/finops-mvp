@@ -25,27 +25,27 @@ function insertBaselineEvents(n, cost) {
   }
 }
 
-test("checkAnomaly returns null when sample size is too small", () => {
+test("checkAnomaly returns null when sample size is too small", async () => {
   insertBaselineEvents(3, 0.1);
-  const result = checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 5.0, team: "x" });
+  const result = await checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 5.0, team: "x" });
   assert.equal(result, null);
 });
 
-test("checkAnomaly flags a cost far above the established baseline", () => {
+test("checkAnomaly flags a cost far above the established baseline", async () => {
   insertBaselineEvents(MIN_SAMPLE_SIZE, 0.1);
-  const result = checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0.1 * ANOMALY_MULTIPLIER * 2, team: "x" });
+  const result = await checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0.1 * ANOMALY_MULTIPLIER * 2, team: "x" });
   assert.ok(result, "expected an anomaly to be flagged");
   assert.equal(result.flagged, true);
   assert.match(result.message, /anomaly/i);
 });
 
-test("checkAnomaly does not flag cost within normal range of baseline", () => {
+test("checkAnomaly does not flag cost within normal range of baseline", async () => {
   insertBaselineEvents(MIN_SAMPLE_SIZE, 0.1);
-  const result = checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0.15, team: "x" });
+  const result = await checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0.15, team: "x" });
   assert.equal(result, null);
 });
 
-test("checkAnomaly ignores zero-cost events", () => {
-  const result = checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0, team: "x" });
+test("checkAnomaly ignores zero-cost events", async () => {
+  const result = await checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0, team: "x" });
   assert.equal(result, null);
 });

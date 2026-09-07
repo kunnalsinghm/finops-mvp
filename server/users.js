@@ -17,14 +17,14 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
   return { hash, salt };
 }
 
-function createUser({ username, password, role = "viewer" }) {
+async function createUser({ username, password, role = "viewer" }) {
   const { hash, salt } = hashPassword(password);
   db.prepare(
     "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)"
   ).run(username, hash, salt, role);
 }
 
-function verifyLogin(username, password) {
+async function verifyLogin(username, password) {
   const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
   if (!user) return null;
   const { hash } = hashPassword(password, user.salt);
@@ -63,7 +63,7 @@ function destroySession(token) {
 // personal tool - the admin sets a temporary password directly and shares it
 // with the user out of band. All existing sessions for that user are
 // invalidated so a compromised session doesn't survive the reset.
-function resetPassword(username, newPassword) {
+async function resetPassword(username, newPassword) {
   const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
   if (!user) throw new Error("User not found");
   const { hash, salt } = hashPassword(newPassword);
