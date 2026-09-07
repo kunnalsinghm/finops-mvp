@@ -8,6 +8,7 @@
 // behaves exactly like the original Slack-only version: local log only.
 
 const { logAlert } = require("./governance");
+const logger = require("./logger");
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || "";
 const GENERIC_WEBHOOK_URL = process.env.FINOPS_WEBHOOK_URL || "";
@@ -41,53 +42,72 @@ function getEmailTransporter() {
   return cachedTransporter;
 }
 
+// Note: sendSlack/sendGenericWebhook/sendEmail intentionally let network and
+// transport errors propagate (no internal try/catch) - deliverAlert below is
+// the single place that decides how to handle a channel failing, so a caller
+// (like alerts.js) can tell "not configured" (silent no-op) apart from
+// "configured but the send actually failed" (thrown error, safe to retry).
+
 async function sendSlack(message) {
   if (!SLACK_WEBHOOK_URL) return;
-  try {
-    await fetch(SLACK_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: message }),
-    });
-  } catch (err) {
-    console.error("Failed to deliver Slack alert:", err.message);
-  }
+  await fetch(SLACK_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: message }),
+  });
 }
 
 async function sendGenericWebhook(message) {
   if (!GENERIC_WEBHOOK_URL) return;
-  try {
-    await fetch(GENERIC_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: message, timestamp: new Date().toISOString() }),
-    });
-  } catch (err) {
-    console.error("Failed to deliver webhook alert:", err.message);
-  }
+  await fetch(GENERIC_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: message, timestamp: new Date().toISOString() }),
+  });
 }
 
 async function sendEmail(message) {
   const transporter = getEmailTransporter();
   if (!transporter) return;
-  try {
-    await transporter.sendMail({
-      from: ALERT_EMAIL_FROM || SMTP_USER,
-      to: ALERT_EMAIL_TO,
-      subject: "FinOps Alert",
-      text: message,
-    });
-  } catch (err) {
-    console.error("Failed to deliver email alert:", err.message);
-  }
+  await transporter.sendMail({
+    from: ALERT_EMAIL_FROM || SMTP_USER,
+    to: ALERT_EMAIL_TO,
+    subject: "FinOps Alert",
+    text: message,
+  });
 }
 
 // Always logs locally first (alerts_log stays the source of truth regardless
 // of delivery config), then fans out to every configured channel in
-// parallel. A failure in one channel does not block the others.
+// parallel. A failure in one channel never blocks the others - but unlike
+// the old version, a failure is no longer silently swallowed: if every
+// configured channel fails, deliverAlert throws so the caller (alerts.js)
+// knows this alert was NOT actually delivered anywhere and can avoid
+// marking it as fired, letting the next scheduled check retry it.
 async function deliverAlert(message, type = "budget") {
   await logAlert(type, message);
-  await Promise.all([sendSlack(message), sendGenericWebhook(message), sendEmail(message)]);
+
+  const channels = [];
+  if (SLACK_WEBHOOK_URL) channels.push(["slack", sendSlack(message)]);
+  if (GENERIC_WEBHOOK_URL) channels.push(["webhook", sendGenericWebhook(message)]);
+  if (getEmailTransporter()) channels.push(["email", sendEmail(message)]);
+
+  if (channels.length === 0) return; // nothing configured - local log only, same as before
+
+  const results = await Promise.allSettled(channels.map(([, p]) => p));
+  const failures = channels
+    .map(([name], i) => ({ name, result: results[i] }))
+    .filter(({ result }) => result.status === "rejected");
+
+  for (const { name, result } of failures) {
+    logger.error("Alert channel delivery failed", { channel: name, error: result.reason?.message });
+  }
+
+  if (failures.length === channels.length) {
+    throw new Error(
+      `All configured alert channels failed to deliver: ${failures.map((f) => f.name).join(", ")}`
+    );
+  }
 }
 
 module.exports = {

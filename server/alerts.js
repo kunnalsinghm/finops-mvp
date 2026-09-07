@@ -1,7 +1,14 @@
 // alerts.js - Progressive alerts (50/80/90/100%) + burn-rate alerts, delivered
 // to Slack via an Incoming Webhook (free Slack feature - no paid plan needed).
 // Falls back to logging only if no webhook URL is configured.
+//
+// Delivery ordering: an alert is only marked "fired" in budget_alert_state
+// AFTER deliverAlert() resolves successfully. If delivery throws (network
+// blip, misconfigured webhook, SMTP outage), the tier is left unmarked so
+// the next scheduled check retries it, instead of silently losing that
+// alert for the rest of the month.
 
+const logger = require("./logger");
 const db = require("./db");
 const { deliverAlert } = require("./alertDelivery");
 
@@ -37,10 +44,18 @@ async function checkBudgetAlerts() {
     for (const tier of crossedTiers) {
       const already = hasFiredStmt.get(b.id, month, tier);
       if (already) continue;
-      markFiredStmt.run(b.id, month, tier);
-      await deliverAlert(
-        `:warning: Budget alert - *${b.scope_type}:${b.scope_value}* has reached *${tier}* of its $${b.monthly_limit_usd} monthly budget (spent $${spend.spend.toFixed(2)}).`
-      );
+      try {
+        await deliverAlert(
+          `:warning: Budget alert - *${b.scope_type}:${b.scope_value}* has reached *${tier}* of its $${b.monthly_limit_usd} monthly budget (spent $${spend.spend.toFixed(2)}).`
+        );
+        markFiredStmt.run(b.id, month, tier);
+      } catch (err) {
+        logger.error("Budget alert delivery failed - will retry on next check", {
+          budgetId: b.id,
+          tier,
+          error: err.message,
+        });
+      }
     }
   }
 }
@@ -69,10 +84,17 @@ async function checkBurnRate() {
       const tier = `burnrate-${month}`;
       const already = hasFiredStmt.get(b.id, month, tier);
       if (already) continue;
-      markFiredStmt.run(b.id, month, tier);
-      await deliverAlert(
-        `:fire: Burn-rate alert - *${b.scope_type}:${b.scope_value}* is on pace to spend ~$${projected.toFixed(2)} this month, ${Math.round(overrunPct * 100)}% over its $${b.monthly_limit_usd} budget.`
-      );
+      try {
+        await deliverAlert(
+          `:fire: Burn-rate alert - *${b.scope_type}:${b.scope_value}* is on pace to spend ~$${projected.toFixed(2)} this month, ${Math.round(overrunPct * 100)}% over its $${b.monthly_limit_usd} budget.`
+        );
+        markFiredStmt.run(b.id, month, tier);
+      } catch (err) {
+        logger.error("Burn-rate alert delivery failed - will retry on next check", {
+          budgetId: b.id,
+          error: err.message,
+        });
+      }
     }
   }
 }
