@@ -27,7 +27,7 @@ router.post("/", requireAuth("manage_keys"), async (req, res) => {
     await logAudit(req.apiKey.key_id, "model_allowlist.add", scope_value, { scope_type, provider, model });
     res.status(201).json({ id, scope_type, scope_value, provider, model });
   } catch (err) {
-    if (err.message && err.message.includes("UNIQUE")) {
+    if (err.message && /unique/i.test(err.message)) {
       return res.status(409).json({ error: "This exact allow-list entry already exists" });
     }
     throw err;

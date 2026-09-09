@@ -68,7 +68,7 @@ test("addAllowlistEntry rejects an exact duplicate", async () => {
   await addAllowlistEntry({ scope_type: "team", scope_value: "dup-test", provider: "openai", model: "gpt-4o-mini" });
   await assert.rejects(async () => {
     await addAllowlistEntry({ scope_type: "team", scope_value: "dup-test", provider: "openai", model: "gpt-4o-mini" });
-  }, /UNIQUE/);
+  }, /unique/i);
 });
 
 test("removeAllowlistEntry deletes a row and re-opens access for that scope", async () => {

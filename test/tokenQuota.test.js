@@ -92,7 +92,7 @@ test("addQuota rejects a duplicate scope+period combination", async () => {
   await addQuota({ scope_type: "team", scope_value: "dup-quota-test", period: "daily", token_limit: 1000 });
   await assert.rejects(async () => {
     await addQuota({ scope_type: "team", scope_value: "dup-quota-test", period: "daily", token_limit: 2000 });
-  }, /UNIQUE/);
+  }, /unique/i);
 });
 
 test("removeQuota deletes a row and re-opens access for that scope/period", async () => {

@@ -1,4 +1,4 @@
-// routes/auth.js - human user registration + login (session-based)
+﻿// routes/auth.js - human user registration + login (session-based)
 
 const express = require("express");
 const db = require("../db");
@@ -32,7 +32,7 @@ router.post("/register", async (req, res) => {
         await logAudit(req.apiKey.key_id, "user.create", username, { role });
         res.status(201).json({ ok: true, username, role });
       } catch (err) {
-        res.status(400).json({ error: err.message.includes("UNIQUE") ? "username already exists" : err.message });
+        res.status(400).json({ error: /unique/i.test(err.message) ? "username already exists" : err.message });
       }
     });
   }
@@ -42,7 +42,7 @@ router.post("/register", async (req, res) => {
     await logAudit(username, "user.create", username, { role: "admin", note: "bootstrap" });
     res.status(201).json({ ok: true, username, role: "admin", note: "bootstrap admin account created" });
   } catch (err) {
-    res.status(400).json({ error: err.message.includes("UNIQUE") ? "username already exists" : err.message });
+    res.status(400).json({ error: /unique/i.test(err.message) ? "username already exists" : err.message });
   }
 });
 

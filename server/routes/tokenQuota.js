@@ -31,7 +31,7 @@ router.post("/", requireAuth("manage_budgets"), async (req, res) => {
     await logAudit(req.apiKey.key_id, "token_quota.add", scope_value, { scope_type, period, token_limit });
     res.status(201).json({ id, scope_type, scope_value, period, token_limit });
   } catch (err) {
-    if (err.message && err.message.includes("UNIQUE")) {
+    if (err.message && /unique/i.test(err.message)) {
       return res.status(409).json({ error: "A quota for this scope and period already exists" });
     }
     throw err;
