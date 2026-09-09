@@ -1,4 +1,4 @@
-// anomaly.js - single-request spend anomaly detection.
+﻿// anomaly.js - single-request spend anomaly detection.
 //
 // Budgets catch monthly aggregate overspend, but nothing else catches "one
 // buggy request that burned $40 in a single call" until the monthly total
@@ -6,7 +6,8 @@
 // each new event against a rolling baseline for that provider/model and
 // alerts immediately if it's a wild outlier, independent of budget status.
 
-const db = require("./db");
+const db = require("./storage");
+const { sinceDaysAgo } = require("./storage/dialectSql");
 const { logAlert } = require("./governance");
 
 // Needs a reasonable sample size before "average" means anything - avoids
@@ -19,18 +20,18 @@ const MIN_SAMPLE_SIZE = 10;
 // (a runaway loop, an accidentally huge context dump) without flagging
 // normal variance.
 const ANOMALY_MULTIPLIER = 5;
+const BASELINE_LOOKBACK_DAYS = 30;
 
 async function checkAnomaly({ provider, model, cost_usd, team }) {
   if (!cost_usd || cost_usd <= 0) return null;
 
-  const baseline = db
-    .prepare(
-      `SELECT AVG(cost_usd) AS avg_cost, COUNT(*) AS n
-       FROM usage_events
-       WHERE provider = ? AND model = ?
-         AND event_time >= datetime('now', '-30 days')`
-    )
-    .get(provider, model);
+  const baseline = await db.get(
+    `SELECT AVG(cost_usd) AS avg_cost, COUNT(*) AS n
+     FROM usage_events
+     WHERE provider = ? AND model = ?
+       AND event_time >= ${sinceDaysAgo(BASELINE_LOOKBACK_DAYS)}`,
+    [provider, model]
+  );
 
   if (!baseline || baseline.n < MIN_SAMPLE_SIZE || !baseline.avg_cost) return null;
 

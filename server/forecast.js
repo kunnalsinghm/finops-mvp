@@ -17,20 +17,25 @@
 //     string returned alongside every forecast, which is meant to travel
 //     with the number wherever it's displayed, not just live in this file.
 
-const db = require("./db");
+const db = require("./storage");
+const { sinceDaysAgo, dayFloorExpr } = require("./storage/dialectSql");
 
 const MIN_DAYS_FOR_FORECAST = 3;
 
+// Note: the original SQL used ROUND(SUM(cost_usd), 4) - Postgres has no
+// round(double precision, integer) overload (only round(numeric, integer)),
+// so that errors out on that backend. Rounding is done in JS after
+// fetching instead, which produces the identical result on both dialects.
 async function getDailySpend({ days = 30 } = {}) {
-  return db
-    .prepare(
-      `SELECT date(event_time) AS day, ROUND(SUM(cost_usd), 4) AS cost
-       FROM usage_events
-       WHERE event_time >= datetime('now', ?)
-       GROUP BY date(event_time)
-       ORDER BY day ASC`
-    )
-    .all(`-${days} days`);
+  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
+  const rows = await db.all(
+    `SELECT ${dayFloorExpr("event_time")} AS day, SUM(cost_usd) AS cost
+     FROM usage_events
+     WHERE event_time >= ${sinceDaysAgo(safeDays)}
+     GROUP BY ${dayFloorExpr("event_time")}
+     ORDER BY day ASC`
+  );
+  return rows.map((r) => ({ day: r.day, cost: Math.round((r.cost || 0) * 10000) / 10000 }));
 }
 
 // Returns null if there isn't enough data yet to forecast responsibly,

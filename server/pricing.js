@@ -1,11 +1,11 @@
-// pricing.js - Pricing Catalogue Engine (Phase 1)
+﻿// pricing.js - Pricing Catalogue Engine (Phase 1)
 //
 // Ships with a static baseline catalogue (update these numbers periodically -
 // see README for where to check current vendor pricing) PLUS a manual override
-// table in SQLite, since the blueprint flagged auto-scraped pricing as a
-// trust-risk if it silently goes stale. Overrides always win.
+// table, since the blueprint flagged auto-scraped pricing as a trust-risk if
+// it silently goes stale. Overrides always win.
 
-const db = require("./db");
+const db = require("./storage");
 
 // Baseline rates in USD per 1,000 tokens. THESE ARE ILLUSTRATIVE PLACEHOLDERS -
 // check current vendor pricing pages before relying on them for real billing,
@@ -25,25 +25,15 @@ const BASELINE_CATALOGUE = {
   },
 };
 
-const getOverrideStmt = db.prepare(
-  "SELECT input_per_1k, output_per_1k FROM pricing_overrides WHERE provider = ? AND model = ?"
-);
-
-const upsertOverrideStmt = db.prepare(`
-  INSERT INTO pricing_overrides (provider, model, input_per_1k, output_per_1k, updated_at)
-  VALUES (@provider, @model, @input_per_1k, @output_per_1k, datetime('now'))
-  ON CONFLICT(provider, model) DO UPDATE SET
-    input_per_1k = excluded.input_per_1k,
-    output_per_1k = excluded.output_per_1k,
-    updated_at = datetime('now')
-`);
-
 async function getRate(provider, model) {
   const p = String(provider || "").toLowerCase();
   const m = String(model || "");
 
   // 1. Manual override always wins
-  const override = getOverrideStmt.get(p, m);
+  const override = await db.get(
+    "SELECT input_per_1k, output_per_1k FROM pricing_overrides WHERE provider = ? AND model = ?",
+    [p, m]
+  );
   if (override) return { ...override, source: "override" };
 
   // 2. Baseline catalogue
@@ -54,12 +44,19 @@ async function getRate(provider, model) {
 }
 
 async function setOverride({ provider, model, input_per_1k, output_per_1k }) {
-  upsertOverrideStmt.run({
-    provider: String(provider).toLowerCase(),
-    model,
-    input_per_1k,
-    output_per_1k,
-  });
+  // EXCLUDED works identically in this ON CONFLICT clause on both SQLite and
+  // Postgres (same pseudo-table name in both dialects) - no dialect helper
+  // needed here. updated_at is passed explicitly (see audit.js/governance.js
+  // for why) rather than via a dialect-native datetime('now')/NOW() literal.
+  await db.run(
+    `INSERT INTO pricing_overrides (provider, model, input_per_1k, output_per_1k, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(provider, model) DO UPDATE SET
+       input_per_1k = excluded.input_per_1k,
+       output_per_1k = excluded.output_per_1k,
+       updated_at = excluded.updated_at`,
+    [String(provider).toLowerCase(), model, input_per_1k, output_per_1k, new Date().toISOString()]
+  );
 }
 
 async function computeCost({ provider, model, input_tokens = 0, output_tokens = 0 }) {

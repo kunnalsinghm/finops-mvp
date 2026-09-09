@@ -8,7 +8,8 @@
 // category (see blueprint risk notes). This engine surfaces *opportunities*
 // for a human to evaluate, not autonomous decisions.
 
-const db = require("./db");
+const db = require("./storage");
+const { sinceDaysAgo } = require("./storage/dialectSql");
 const { computeCost } = require("./pricing");
 const { CHEAPER_ALTERNATIVES } = require("./modelAlternatives");
 const { getShadowStatsForPair, MIN_SAMPLES_FOR_CONFIDENCE, SIMILARITY_CONFIDENCE_THRESHOLD } = require("./shadowTest");
@@ -17,16 +18,15 @@ const { getShadowStatsForPair, MIN_SAMPLES_FOR_CONFIDENCE, SIMILARITY_CONFIDENCE
 // now live in modelAlternatives.js (shared with shadowTest.js).
 
 async function getModelSwitchRecommendations({ days = 30 } = {}) {
-  const rows = db
-    .prepare(
-      `SELECT provider, model, SUM(cost_usd) AS total_cost,
-              SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-              COUNT(*) AS event_count
-       FROM usage_events
-       WHERE event_time >= datetime('now', ?)
-       GROUP BY provider, model`
-    )
-    .all(`-${days} days`);
+  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
+  const rows = await db.all(
+    `SELECT provider, model, SUM(cost_usd) AS total_cost,
+            SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+            COUNT(*) AS event_count
+     FROM usage_events
+     WHERE event_time >= ${sinceDaysAgo(safeDays)}
+     GROUP BY provider, model`
+  );
 
   const recommendations = [];
 
@@ -87,13 +87,12 @@ async function getModelSwitchRecommendations({ days = 30 } = {}) {
 // but low token variance per call, which often indicates repeated/templated
 // prompts that could benefit from semantic or provider-native prompt caching.
 async function getCachingOpportunities({ days = 30 } = {}) {
-  const rows = db
-    .prepare(
-      `SELECT provider, model, input_tokens
-       FROM usage_events
-       WHERE event_time >= datetime('now', ?)`
-    )
-    .all(`-${days} days`);
+  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
+  const rows = await db.all(
+    `SELECT provider, model, input_tokens
+     FROM usage_events
+     WHERE event_time >= ${sinceDaysAgo(safeDays)}`
+  );
 
   const groups = {};
   for (const r of rows) {

@@ -1,0 +1,1906 @@
+diff --git a/server/alerts.js b/server/alerts.js
+index aa1eb28..f45ee4c 100644
+--- a/server/alerts.js
++++ b/server/alerts.js
+@@ -9,30 +9,43 @@
+ // alert for the rest of the month.
+ 
+ const logger = require("./logger");
+-const db = require("./db");
++const db = require("./storage");
++const { yearMonthExpr } = require("./storage/dialectSql");
+ const { deliverAlert } = require("./alertDelivery");
+ 
+-const hasFiredStmt = db.prepare(
+-  "SELECT 1 FROM budget_alert_state WHERE budget_id = ? AND month = ? AND tier = ?"
+-);
+-const markFiredStmt = db.prepare(
+-  "INSERT OR IGNORE INTO budget_alert_state (budget_id, month, tier) VALUES (?, ?, ?)"
+-);
++async function hasFired(budgetId, month, tier) {
++  const row = await db.get(
++    "SELECT 1 AS found FROM budget_alert_state WHERE budget_id = ? AND month = ? AND tier = ?",
++    [budgetId, month, tier]
++  );
++  return Boolean(row);
++}
++
++// ON CONFLICT DO NOTHING works identically on both dialects here (it's not
++// just Postgres syntax - SQLite has supported the same ON CONFLICT clause
++// for years, so unlike most dialect differences in this codebase, this one
++// needs no branching at all), matching budget_alert_state's composite
++// PRIMARY KEY (budget_id, month, tier) in both schema files.
++async function markFired(budgetId, month, tier) {
++  await db.run(
++    "INSERT INTO budget_alert_state (budget_id, month, tier) VALUES (?, ?, ?) ON CONFLICT(budget_id, month, tier) DO NOTHING",
++    [budgetId, month, tier]
++  );
++}
+ 
+ // Call this periodically (e.g. from a cron, or after each ingest) to check
+ // budgets and fire alerts exactly once per threshold per month.
+ async function checkBudgetAlerts() {
+-  const budgets = db.prepare("SELECT * FROM budgets").all();
++  const budgets = await db.all("SELECT * FROM budgets");
+   const month = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+ 
+   for (const b of budgets) {
+     const col = b.scope_type === "team" ? "team" : b.scope_type === "key" ? "user_id" : "environment";
+-    const spend = db
+-      .prepare(
+-        `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events
+-         WHERE ${col} = ? AND strftime('%Y-%m', event_time) = ?`
+-      )
+-      .get(b.scope_value, month);
++    const spend = await db.get(
++      `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events
++       WHERE ${col} = ? AND ${yearMonthExpr("event_time")} = ?`,
++      [b.scope_value, month]
++    );
+ 
+     const pct = b.monthly_limit_usd > 0 ? spend.spend / b.monthly_limit_usd : 0;
+     const crossedTiers = [];
+@@ -42,13 +55,12 @@ async function checkBudgetAlerts() {
+     if (pct >= 1.0) crossedTiers.push("exceeded");
+ 
+     for (const tier of crossedTiers) {
+-      const already = hasFiredStmt.get(b.id, month, tier);
+-      if (already) continue;
++      if (await hasFired(b.id, month, tier)) continue;
+       try {
+         await deliverAlert(
+           `:warning: Budget alert - *${b.scope_type}:${b.scope_value}* has reached *${tier}* of its $${b.monthly_limit_usd} monthly budget (spent $${spend.spend.toFixed(2)}).`
+         );
+-        markFiredStmt.run(b.id, month, tier);
++        await markFired(b.id, month, tier);
+       } catch (err) {
+         logger.error("Budget alert delivery failed - will retry on next check", {
+           budgetId: b.id,
+@@ -62,7 +74,7 @@ async function checkBudgetAlerts() {
+ 
+ // Burn-rate alert: flags if current daily pace implies >20% budget overrun by month end
+ async function checkBurnRate() {
+-  const budgets = db.prepare("SELECT * FROM budgets").all();
++  const budgets = await db.all("SELECT * FROM budgets");
+   const now = new Date();
+   const dayOfMonth = now.getDate();
+   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+@@ -70,25 +82,23 @@ async function checkBurnRate() {
+ 
+   for (const b of budgets) {
+     const col = b.scope_type === "team" ? "team" : b.scope_type === "key" ? "user_id" : "environment";
+-    const spend = db
+-      .prepare(
+-        `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events
+-         WHERE ${col} = ? AND strftime('%Y-%m', event_time) = ?`
+-      )
+-      .get(b.scope_value, month);
++    const spend = await db.get(
++      `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events
++       WHERE ${col} = ? AND ${yearMonthExpr("event_time")} = ?`,
++      [b.scope_value, month]
++    );
+ 
+     const projected = (spend.spend / dayOfMonth) * daysInMonth;
+     const overrunPct = b.monthly_limit_usd > 0 ? (projected - b.monthly_limit_usd) / b.monthly_limit_usd : 0;
+ 
+     if (overrunPct > 0.2) {
+       const tier = `burnrate-${month}`;
+-      const already = hasFiredStmt.get(b.id, month, tier);
+-      if (already) continue;
++      if (await hasFired(b.id, month, tier)) continue;
+       try {
+         await deliverAlert(
+           `:fire: Burn-rate alert - *${b.scope_type}:${b.scope_value}* is on pace to spend ~$${projected.toFixed(2)} this month, ${Math.round(overrunPct * 100)}% over its $${b.monthly_limit_usd} budget.`
+         );
+-        markFiredStmt.run(b.id, month, tier);
++        await markFired(b.id, month, tier);
+       } catch (err) {
+         logger.error("Burn-rate alert delivery failed - will retry on next check", {
+           budgetId: b.id,
+@@ -99,4 +109,4 @@ async function checkBurnRate() {
+   }
+ }
+ 
+-module.exports = { checkBudgetAlerts, checkBurnRate };
+\ No newline at end of file
++module.exports = { checkBudgetAlerts, checkBurnRate };
+diff --git a/server/anomaly.js b/server/anomaly.js
+index 2b214bd..98d7350 100644
+--- a/server/anomaly.js
++++ b/server/anomaly.js
+@@ -6,7 +6,8 @@
+ // each new event against a rolling baseline for that provider/model and
+ // alerts immediately if it's a wild outlier, independent of budget status.
+ 
+-const db = require("./db");
++const db = require("./storage");
++const { sinceDaysAgo } = require("./storage/dialectSql");
+ const { logAlert } = require("./governance");
+ 
+ // Needs a reasonable sample size before "average" means anything - avoids
+@@ -19,18 +20,18 @@ const MIN_SAMPLE_SIZE = 10;
+ // (a runaway loop, an accidentally huge context dump) without flagging
+ // normal variance.
+ const ANOMALY_MULTIPLIER = 5;
++const BASELINE_LOOKBACK_DAYS = 30;
+ 
+ async function checkAnomaly({ provider, model, cost_usd, team }) {
+   if (!cost_usd || cost_usd <= 0) return null;
+ 
+-  const baseline = db
+-    .prepare(
+-      `SELECT AVG(cost_usd) AS avg_cost, COUNT(*) AS n
+-       FROM usage_events
+-       WHERE provider = ? AND model = ?
+-         AND event_time >= datetime('now', '-30 days')`
+-    )
+-    .get(provider, model);
++  const baseline = await db.get(
++    `SELECT AVG(cost_usd) AS avg_cost, COUNT(*) AS n
++     FROM usage_events
++     WHERE provider = ? AND model = ?
++       AND event_time >= ${sinceDaysAgo(BASELINE_LOOKBACK_DAYS)}`,
++    [provider, model]
++  );
+ 
+   if (!baseline || baseline.n < MIN_SAMPLE_SIZE || !baseline.avg_cost) return null;
+ 
+@@ -43,4 +44,4 @@ async function checkAnomaly({ provider, model, cost_usd, team }) {
+   return null;
+ }
+ 
+-module.exports = { checkAnomaly, MIN_SAMPLE_SIZE, ANOMALY_MULTIPLIER };
+\ No newline at end of file
++module.exports = { checkAnomaly, MIN_SAMPLE_SIZE, ANOMALY_MULTIPLIER };
+diff --git a/server/audit.js b/server/audit.js
+index 3d593d9..e8487ed 100644
+--- a/server/audit.js
++++ b/server/audit.js
+@@ -5,14 +5,19 @@
+ // a budget, who revoked a key, who overrode a price. Required for SOC2/audit
+ // readiness per the original blueprint's compliance section.
+ 
+-const db = require("./db");
+-
+-const insert = db.prepare(
+-  "INSERT INTO audit_log (actor, action, target, details, created_at) VALUES (?, ?, ?, ?, datetime('now'))"
+-);
++const db = require("./storage");
+ 
+ async function logAudit(actor, action, target, details = {}) {
+-  insert.run(actor, action, target || null, JSON.stringify(details));
++  // created_at is set explicitly here (JS ISO string) rather than relying on
++  // the schema's dialect-native DEFAULT, for the same reason event_time
++  // always is: a single consistent format regardless of backend. Nothing
++  // queries this column by range today, but keeping the convention uniform
++  // avoids a future date-range query silently mis-comparing two different
++  // per-dialect timestamp formats.
++  await db.run(
++    "INSERT INTO audit_log (actor, action, target, details, created_at) VALUES (?, ?, ?, ?, ?)",
++    [actor, action, target || null, JSON.stringify(details), new Date().toISOString()]
++  );
+ }
+ 
+ async function getAuditLog({ limit = 100, action, actor } = {}) {
+@@ -30,7 +35,7 @@ async function getAuditLog({ limit = 100, action, actor } = {}) {
+   if (conditions.length) query += " WHERE " + conditions.join(" AND ");
+   query += " ORDER BY id DESC LIMIT ?";
+   params.push(limit);
+-  return db.prepare(query).all(...params);
++  return db.all(query, params);
+ }
+ 
+-module.exports = { logAudit, getAuditLog };
+\ No newline at end of file
++module.exports = { logAudit, getAuditLog };
+diff --git a/server/auth.js b/server/auth.js
+index 8a9ec73..2574fa5 100644
+--- a/server/auth.js
++++ b/server/auth.js
+@@ -6,7 +6,7 @@
+ // deployment, API keys + roles + optional session login cover real access
+ // control needs without external dependencies.
+ 
+-const db = require("./db");
++const db = require("./storage");
+ const { getSession } = require("./users");
+ const logger = require("./logger");
+ 
+@@ -49,8 +49,8 @@ function requireAuth(permission) {
+ 
+     // Allow local/dev usage without a key ONLY if no keys AND no users exist yet
+     // (fresh install bootstrap) - once you create your first key or user, auth is enforced.
+-    const anyKeys = db.prepare("SELECT COUNT(*) AS n FROM api_keys").get();
+-    const anyUsers = db.prepare("SELECT COUNT(*) AS n FROM users").get();
++    const anyKeys = await db.get("SELECT COUNT(*) AS n FROM api_keys");
++    const anyUsers = await db.get("SELECT COUNT(*) AS n FROM users");
+     if (anyKeys.n === 0 && anyUsers.n === 0) {
+       if (!warnedBootstrapAccess) {
+         warnedBootstrapAccess = true;
+@@ -66,7 +66,7 @@ function requireAuth(permission) {
+       return res.status(401).json({ error: "Missing X-API-Key or X-Session-Token header" });
+     }
+ 
+-    const row = db.prepare("SELECT * FROM api_keys WHERE key_id = ?").get(keyId);
++    const row = await db.get("SELECT * FROM api_keys WHERE key_id = ?", [keyId]);
+     if (!row) {
+       return res.status(401).json({ error: "Invalid API key" });
+     }
+diff --git a/server/data.js b/server/data.js
+index e206eca..11b0764 100644
+--- a/server/data.js
++++ b/server/data.js
+@@ -6,7 +6,7 @@
+ // doesn't grow forever and so you have a real answer if asked "how long do
+ // you keep this data").
+ 
+-const db = require("./db");
++const db = require("./storage");
+ const { logAudit } = require("./audit");
+ 
+ async function getUsageEventsRaw({ from, to } = {}) {
+@@ -21,7 +21,7 @@ async function getUsageEventsRaw({ from, to } = {}) {
+     params.push(to);
+   }
+   query += " ORDER BY event_time ASC";
+-  return db.prepare(query).all(...params);
++  return db.all(query, params);
+ }
+ 
+ async function exportUsageEvents({ from, to, format = "json" } = {}) {
+@@ -55,11 +55,11 @@ function csvEscape(value) {
+ // that quietly deletes data nobody meant to lose.
+ async function purgeUsageEvents(beforeIsoDate, actor) {
+   if (!beforeIsoDate) throw new Error("beforeIsoDate is required");
+-  const countRow = db.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE event_time < ?").get(beforeIsoDate);
++  const countRow = await db.get("SELECT COUNT(*) AS n FROM usage_events WHERE event_time < ?", [beforeIsoDate]);
+   const count = countRow.n;
+-  db.prepare("DELETE FROM usage_events WHERE event_time < ?").run(beforeIsoDate);
++  await db.run("DELETE FROM usage_events WHERE event_time < ?", [beforeIsoDate]);
+   await logAudit(actor, "data.purge", null, { before: beforeIsoDate, rowsDeleted: count });
+   return count;
+ }
+ 
+-module.exports = { exportUsageEvents, purgeUsageEvents, getUsageEventsRaw, csvEscape };
+\ No newline at end of file
++module.exports = { exportUsageEvents, purgeUsageEvents, getUsageEventsRaw, csvEscape };
+diff --git a/server/forecast.js b/server/forecast.js
+index d9af0a0..04ae097 100644
+--- a/server/forecast.js
++++ b/server/forecast.js
+@@ -17,20 +17,25 @@
+ //     string returned alongside every forecast, which is meant to travel
+ //     with the number wherever it's displayed, not just live in this file.
+ 
+-const db = require("./db");
++const db = require("./storage");
++const { sinceDaysAgo, dayFloorExpr } = require("./storage/dialectSql");
+ 
+ const MIN_DAYS_FOR_FORECAST = 3;
+ 
++// Note: the original SQL used ROUND(SUM(cost_usd), 4) - Postgres has no
++// round(double precision, integer) overload (only round(numeric, integer)),
++// so that errors out on that backend. Rounding is done in JS after
++// fetching instead, which produces the identical result on both dialects.
+ async function getDailySpend({ days = 30 } = {}) {
+-  return db
+-    .prepare(
+-      `SELECT date(event_time) AS day, ROUND(SUM(cost_usd), 4) AS cost
+-       FROM usage_events
+-       WHERE event_time >= datetime('now', ?)
+-       GROUP BY date(event_time)
+-       ORDER BY day ASC`
+-    )
+-    .all(`-${days} days`);
++  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
++  const rows = await db.all(
++    `SELECT ${dayFloorExpr("event_time")} AS day, SUM(cost_usd) AS cost
++     FROM usage_events
++     WHERE event_time >= ${sinceDaysAgo(safeDays)}
++     GROUP BY ${dayFloorExpr("event_time")}
++     ORDER BY day ASC`
++  );
++  return rows.map((r) => ({ day: r.day, cost: Math.round((r.cost || 0) * 10000) / 10000 }));
+ }
+ 
+ // Returns null if there isn't enough data yet to forecast responsibly,
+diff --git a/server/governance.js b/server/governance.js
+index 3132790..e1ad9f5 100644
+--- a/server/governance.js
++++ b/server/governance.js
+@@ -4,7 +4,7 @@
+ // single-process self-hosted deployment. If you outgrow one process,
+ // swap the Maps below for Redis.
+ 
+-const db = require("./db");
++const db = require("./storage");
+ 
+ // ---- Rate limiting (token bucket per key) ----
+ // Prevents a recursive loop / bug from draining budget in minutes.
+@@ -38,7 +38,7 @@ function checkRateLimit(keyId, limit = DEFAULT_LIMIT) {
+ const quarantineBuckets = new Map(); // keyId -> lastAllowedAt
+ 
+ async function isQuarantined(keyId) {
+-  const row = db.prepare("SELECT status FROM api_keys WHERE key_id = ?").get(keyId);
++  const row = await db.get("SELECT status FROM api_keys WHERE key_id = ?", [keyId]);
+   return row?.status === "quarantined";
+ }
+ 
+@@ -53,16 +53,18 @@ function checkQuarantineAllowance(keyId) {
+ }
+ 
+ async function quarantineKey(keyId, reason) {
+-  db.prepare(
+-    "UPDATE api_keys SET status = 'quarantined', quarantine_reason = ? WHERE key_id = ?"
+-  ).run(reason, keyId);
++  await db.run(
++    "UPDATE api_keys SET status = 'quarantined', quarantine_reason = ? WHERE key_id = ?",
++    [reason, keyId]
++  );
+   await logAlert("quarantine", `Key ${keyId} quarantined: ${reason}`);
+ }
+ 
+ async function approveKey(keyId) {
+-  db.prepare(
+-    "UPDATE api_keys SET status = 'active', quarantine_reason = NULL WHERE key_id = ?"
+-  ).run(keyId);
++  await db.run(
++    "UPDATE api_keys SET status = 'active', quarantine_reason = NULL WHERE key_id = ?",
++    [keyId]
++  );
+ }
+ 
+ // ---- Circuit breaker / graceful degradation ----
+@@ -78,12 +80,13 @@ function getFallback(provider, model) {
+ }
+ 
+ // ---- Alert log (shared by governance + budgets) ----
+-const insertAlert = db.prepare(
+-  "INSERT INTO alerts_log (type, message, created_at) VALUES (?, ?, datetime('now'))"
+-);
+-
+ async function logAlert(type, message) {
+-  insertAlert.run(type, message);
++  // Explicit ISO timestamp - see audit.js's logAudit for why (consistent
++  // format regardless of backend, matching event_time's convention).
++  await db.run(
++    "INSERT INTO alerts_log (type, message, created_at) VALUES (?, ?, ?)",
++    [type, message, new Date().toISOString()]
++  );
+ }
+ 
+ module.exports = {
+@@ -94,4 +97,4 @@ module.exports = {
+   approveKey,
+   getFallback,
+   logAlert,
+-};
+\ No newline at end of file
++};
+diff --git a/server/modelAllowlist.js b/server/modelAllowlist.js
+index 07142aa..83ed2ee 100644
+--- a/server/modelAllowlist.js
++++ b/server/modelAllowlist.js
+@@ -22,13 +22,14 @@
+ //     nothing to "allow" or "deny" there. Blocking ingest of an already-
+ //     incurred cost wouldn't undo the spend, only hide it from the dashboard.
+ 
+-const db = require("./db");
++const db = require("./storage");
+ 
+ async function getEntriesForScope(scopeType, scopeValue) {
+   if (!scopeValue) return [];
+-  return db
+-    .prepare("SELECT provider, model FROM model_allowlist WHERE scope_type = ? AND scope_value = ?")
+-    .all(scopeType, scopeValue);
++  return db.all(
++    "SELECT provider, model FROM model_allowlist WHERE scope_type = ? AND scope_value = ?",
++    [scopeType, scopeValue]
++  );
+ }
+ 
+ // Returns { allowed, scope, allowedModels }. scope is which list (if any)
+@@ -51,24 +52,31 @@ async function checkModelAllowed({ keyId, team, provider, model }) {
+ }
+ 
+ async function addAllowlistEntry({ scope_type, scope_value, provider, model }) {
+-  const info = db
+-    .prepare("INSERT INTO model_allowlist (scope_type, scope_value, provider, model) VALUES (?, ?, ?, ?)")
+-    .run(scope_type, scope_value, provider, model);
++  // RETURNING id: SQLite's driver returns lastInsertRowid automatically,
++  // but Postgres has no equivalent - the storage adapter's run() surfaces
++  // whatever "id" column RETURNING produces as .lastInsertRowid on both
++  // backends, so this same call works unchanged either way. Verified
++  // directly against both a real SQLite file and a real Postgres instance.
++  const info = await db.run(
++    "INSERT INTO model_allowlist (scope_type, scope_value, provider, model) VALUES (?, ?, ?, ?) RETURNING id",
++    [scope_type, scope_value, provider, model]
++  );
+   return info.lastInsertRowid;
+ }
+ 
+ async function removeAllowlistEntry(id) {
+-  const info = db.prepare("DELETE FROM model_allowlist WHERE id = ?").run(id);
++  const info = await db.run("DELETE FROM model_allowlist WHERE id = ?", [id]);
+   return info.changes > 0;
+ }
+ 
+ async function listAllowlistEntries({ scope_type, scope_value } = {}) {
+   if (scope_type && scope_value) {
+-    return db
+-      .prepare("SELECT * FROM model_allowlist WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC")
+-      .all(scope_type, scope_value);
++    return db.all(
++      "SELECT * FROM model_allowlist WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC",
++      [scope_type, scope_value]
++    );
+   }
+-  return db.prepare("SELECT * FROM model_allowlist ORDER BY id DESC").all();
++  return db.all("SELECT * FROM model_allowlist ORDER BY id DESC");
+ }
+ 
+ module.exports = { checkModelAllowed, addAllowlistEntry, removeAllowlistEntry, listAllowlistEntries };
+diff --git a/server/pricing.js b/server/pricing.js
+index 4480512..dc1735d 100644
+--- a/server/pricing.js
++++ b/server/pricing.js
+@@ -2,10 +2,10 @@
+ //
+ // Ships with a static baseline catalogue (update these numbers periodically -
+ // see README for where to check current vendor pricing) PLUS a manual override
+-// table in SQLite, since the blueprint flagged auto-scraped pricing as a
+-// trust-risk if it silently goes stale. Overrides always win.
++// table, since the blueprint flagged auto-scraped pricing as a trust-risk if
++// it silently goes stale. Overrides always win.
+ 
+-const db = require("./db");
++const db = require("./storage");
+ 
+ // Baseline rates in USD per 1,000 tokens. THESE ARE ILLUSTRATIVE PLACEHOLDERS -
+ // check current vendor pricing pages before relying on them for real billing,
+@@ -25,25 +25,15 @@ const BASELINE_CATALOGUE = {
+   },
+ };
+ 
+-const getOverrideStmt = db.prepare(
+-  "SELECT input_per_1k, output_per_1k FROM pricing_overrides WHERE provider = ? AND model = ?"
+-);
+-
+-const upsertOverrideStmt = db.prepare(`
+-  INSERT INTO pricing_overrides (provider, model, input_per_1k, output_per_1k, updated_at)
+-  VALUES (@provider, @model, @input_per_1k, @output_per_1k, datetime('now'))
+-  ON CONFLICT(provider, model) DO UPDATE SET
+-    input_per_1k = excluded.input_per_1k,
+-    output_per_1k = excluded.output_per_1k,
+-    updated_at = datetime('now')
+-`);
+-
+ async function getRate(provider, model) {
+   const p = String(provider || "").toLowerCase();
+   const m = String(model || "");
+ 
+   // 1. Manual override always wins
+-  const override = getOverrideStmt.get(p, m);
++  const override = await db.get(
++    "SELECT input_per_1k, output_per_1k FROM pricing_overrides WHERE provider = ? AND model = ?",
++    [p, m]
++  );
+   if (override) return { ...override, source: "override" };
+ 
+   // 2. Baseline catalogue
+@@ -54,12 +44,19 @@ async function getRate(provider, model) {
+ }
+ 
+ async function setOverride({ provider, model, input_per_1k, output_per_1k }) {
+-  upsertOverrideStmt.run({
+-    provider: String(provider).toLowerCase(),
+-    model,
+-    input_per_1k,
+-    output_per_1k,
+-  });
++  // EXCLUDED works identically in this ON CONFLICT clause on both SQLite and
++  // Postgres (same pseudo-table name in both dialects) - no dialect helper
++  // needed here. updated_at is passed explicitly (see audit.js/governance.js
++  // for why) rather than via a dialect-native datetime('now')/NOW() literal.
++  await db.run(
++    `INSERT INTO pricing_overrides (provider, model, input_per_1k, output_per_1k, updated_at)
++     VALUES (?, ?, ?, ?, ?)
++     ON CONFLICT(provider, model) DO UPDATE SET
++       input_per_1k = excluded.input_per_1k,
++       output_per_1k = excluded.output_per_1k,
++       updated_at = excluded.updated_at`,
++    [String(provider).toLowerCase(), model, input_per_1k, output_per_1k, new Date().toISOString()]
++  );
+ }
+ 
+ async function computeCost({ provider, model, input_tokens = 0, output_tokens = 0 }) {
+diff --git a/server/recommend.js b/server/recommend.js
+index b78e39d..ce32540 100644
+--- a/server/recommend.js
++++ b/server/recommend.js
+@@ -8,7 +8,8 @@
+ // category (see blueprint risk notes). This engine surfaces *opportunities*
+ // for a human to evaluate, not autonomous decisions.
+ 
+-const db = require("./db");
++const db = require("./storage");
++const { sinceDaysAgo } = require("./storage/dialectSql");
+ const { computeCost } = require("./pricing");
+ const { CHEAPER_ALTERNATIVES } = require("./modelAlternatives");
+ const { getShadowStatsForPair, MIN_SAMPLES_FOR_CONFIDENCE, SIMILARITY_CONFIDENCE_THRESHOLD } = require("./shadowTest");
+@@ -17,16 +18,15 @@ const { getShadowStatsForPair, MIN_SAMPLES_FOR_CONFIDENCE, SIMILARITY_CONFIDENCE
+ // now live in modelAlternatives.js (shared with shadowTest.js).
+ 
+ async function getModelSwitchRecommendations({ days = 30 } = {}) {
+-  const rows = db
+-    .prepare(
+-      `SELECT provider, model, SUM(cost_usd) AS total_cost,
+-              SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+-              COUNT(*) AS event_count
+-       FROM usage_events
+-       WHERE event_time >= datetime('now', ?)
+-       GROUP BY provider, model`
+-    )
+-    .all(`-${days} days`);
++  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
++  const rows = await db.all(
++    `SELECT provider, model, SUM(cost_usd) AS total_cost,
++            SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
++            COUNT(*) AS event_count
++     FROM usage_events
++     WHERE event_time >= ${sinceDaysAgo(safeDays)}
++     GROUP BY provider, model`
++  );
+ 
+   const recommendations = [];
+ 
+@@ -87,13 +87,12 @@ async function getModelSwitchRecommendations({ days = 30 } = {}) {
+ // but low token variance per call, which often indicates repeated/templated
+ // prompts that could benefit from semantic or provider-native prompt caching.
+ async function getCachingOpportunities({ days = 30 } = {}) {
+-  const rows = db
+-    .prepare(
+-      `SELECT provider, model, input_tokens
+-       FROM usage_events
+-       WHERE event_time >= datetime('now', ?)`
+-    )
+-    .all(`-${days} days`);
++  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
++  const rows = await db.all(
++    `SELECT provider, model, input_tokens
++     FROM usage_events
++     WHERE event_time >= ${sinceDaysAgo(safeDays)}`
++  );
+ 
+   const groups = {};
+   for (const r of rows) {
+diff --git a/server/reconcile.js b/server/reconcile.js
+index a009db7..86a8554 100644
+--- a/server/reconcile.js
++++ b/server/reconcile.js
+@@ -10,18 +10,10 @@
+ // exactly the "shadow AI" signal the blueprint calls for, without needing
+ // any paid integration.
+ 
+-const db = require("./db");
++const db = require("./storage");
++const { dayFloorExpr } = require("./storage/dialectSql");
+ const crypto = require("crypto");
+ 
+-const insertRow = db.prepare(`
+-  INSERT INTO reconciliation_rows (batch_id, day, provider, reported_cost_usd)
+-  VALUES (?, ?, ?, ?)
+-`);
+-
+-const deleteExisting = db.prepare(
+-  `DELETE FROM reconciliation_rows WHERE day = ? AND provider = ?`
+-);
+-
+ // Expects CSV text with header: date,provider,cost
+ // (date format YYYY-MM-DD; provider lowercase matching our provider names)
+ //
+@@ -31,6 +23,12 @@ const deleteExisting = db.prepare(
+ // false shadow-spend gaps. If you need to import multiple partial exports
+ // for the same day (e.g. two different cost centers), sum them into a
+ // single row yourself before uploading.
++//
++// The whole import runs inside storage.transaction() - see storage/
++// postgres.js for why that matters on that backend specifically (a plain
++// sequence of pool.query() calls can land on different physical
++// connections, silently breaking the all-or-nothing guarantee this
++// function's delete-then-replace logic depends on).
+ async function importCsv(csvText) {
+   const batch_id = crypto.randomUUID();
+   const lines = csvText.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+@@ -60,24 +58,25 @@ async function importCsv(csvText) {
+   let replacedCount = 0;
+   const seenDayProvider = new Set();
+ 
+-  db.exec("BEGIN");
+-  try {
++  await db.transaction(async (tx) => {
+     for (const row of parsedRows) {
+       const key = `${row.day}|${row.provider}`;
+       if (!seenDayProvider.has(key)) {
+-        const existing = db.prepare(`SELECT COUNT(*) AS n FROM reconciliation_rows WHERE day = ? AND provider = ?`).get(row.day, row.provider);
++        const existing = await tx.get(
++          `SELECT COUNT(*) AS n FROM reconciliation_rows WHERE day = ? AND provider = ?`,
++          [row.day, row.provider]
++        );
+         if (existing.n > 0) replacedCount++;
+-        deleteExisting.run(row.day, row.provider);
++        await tx.run(`DELETE FROM reconciliation_rows WHERE day = ? AND provider = ?`, [row.day, row.provider]);
+         seenDayProvider.add(key);
+       }
+-      insertRow.run(batch_id, row.day, row.provider, row.cost);
++      await tx.run(
++        `INSERT INTO reconciliation_rows (batch_id, day, provider, reported_cost_usd) VALUES (?, ?, ?, ?)`,
++        [batch_id, row.day, row.provider, row.cost]
++      );
+       rowCount++;
+     }
+-    db.exec("COMMIT");
+-  } catch (err) {
+-    db.exec("ROLLBACK");
+-    throw err;
+-  }
++  });
+ 
+   return { batch_id, rowCount, replacedDayProviderPairs: replacedCount };
+ }
+@@ -86,21 +85,17 @@ async function importCsv(csvText) {
+ // Flags days where reported spend meaningfully exceeds what we tracked -
+ // that gap is spend we never saw, i.e. shadow usage.
+ async function getReconciliationReport({ thresholdPct = 10 } = {}) {
+-  const reported = db
+-    .prepare(
+-      `SELECT day, provider, SUM(reported_cost_usd) AS reported_cost
+-       FROM reconciliation_rows
+-       GROUP BY day, provider`
+-    )
+-    .all();
+-
+-  const tracked = db
+-    .prepare(
+-      `SELECT date(event_time) AS day, provider, SUM(cost_usd) AS tracked_cost
+-       FROM usage_events
+-       GROUP BY date(event_time), provider`
+-    )
+-    .all();
++  const reported = await db.all(
++    `SELECT day, provider, SUM(reported_cost_usd) AS reported_cost
++     FROM reconciliation_rows
++     GROUP BY day, provider`
++  );
++
++  const tracked = await db.all(
++    `SELECT ${dayFloorExpr("event_time")} AS day, provider, SUM(cost_usd) AS tracked_cost
++     FROM usage_events
++     GROUP BY ${dayFloorExpr("event_time")}, provider`
++  );
+ 
+   const trackedMap = {};
+   for (const t of tracked) trackedMap[`${t.day}|${t.provider}`] = t.tracked_cost;
+diff --git a/server/seed.js b/server/seed.js
+index 046b0ee..ecf5cb2 100644
+--- a/server/seed.js
++++ b/server/seed.js
+@@ -1,7 +1,7 @@
+ // seed.js - populates sample usage events so you can see the dashboard working immediately.
+ // Run with: npm run seed
+ 
+-const db = require("./db");
++const db = require("./storage");
+ const { computeCost } = require("./pricing");
+ 
+ const teams = ["growth", "platform", "research", null]; // null -> untagged, on purpose
+@@ -14,24 +14,36 @@ const combos = [
+   { provider: "bedrock", model: "titan-text-express" },
+ ];
+ 
+-const insert = db.prepare(`
+-  INSERT INTO usage_events
+-    (event_time, provider, model, team, environment, git_branch, user_id,
+-     input_tokens, output_tokens, cost_usd, tagged, raw_json)
+-  VALUES
+-    (@event_time, @provider, @model, @team, @environment, @git_branch, @user_id,
+-     @input_tokens, @output_tokens, @cost_usd, @tagged, @raw_json)
+-`);
+-
+-function insertMany(rows) {
+-  db.exec("BEGIN");
+-  try {
+-    for (const r of rows) insert.run(r);
+-    db.exec("COMMIT");
+-  } catch (err) {
+-    db.exec("ROLLBACK");
+-    throw err;
+-  }
++// Runs inside storage.transaction() - same reasoning as reconcile.js's
++// importCsv: on Postgres, an unwrapped sequence of individual inserts has
++// no all-or-nothing guarantee (and no real need for one here), but wrapping
++// several hundred inserts in one transaction is also just much faster than
++// autocommitting each individually, on both backends.
++async function insertMany(rows) {
++  await db.transaction(async (tx) => {
++    for (const r of rows) {
++      await tx.run(
++        `INSERT INTO usage_events
++           (event_time, provider, model, team, environment, git_branch, user_id,
++            input_tokens, output_tokens, cost_usd, tagged, raw_json)
++         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
++        [
++          r.event_time,
++          r.provider,
++          r.model,
++          r.team,
++          r.environment,
++          r.git_branch,
++          r.user_id,
++          r.input_tokens,
++          r.output_tokens,
++          r.cost_usd,
++          r.tagged,
++          r.raw_json,
++        ]
++      );
++    }
++  });
+ }
+ 
+ function randDate(daysAgo) {
+@@ -70,21 +82,28 @@ async function main() {
+     }
+   }
+ 
+-  insertMany(rows);
++  await insertMany(rows);
+ 
+   // Sample budgets
+-  db.prepare("DELETE FROM budgets").run();
+-  db.prepare("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)").run(
+-    "team", "growth", 50
+-  );
+-  db.prepare("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)").run(
+-    "team", "platform", 100
+-  );
++  await db.run("DELETE FROM budgets");
++  await db.run("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)", [
++    "team", "growth", 50,
++  ]);
++  await db.run("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)", [
++    "team", "platform", 100,
++  ]);
+ 
+   console.log(`Seeded ${rows.length} usage events and 2 sample budgets.`);
++
++  // Explicit exit: this is a one-shot CLI script, not the long-running
++  // server. SQLite's DatabaseSync doesn't hold the event loop open, but
++  // Postgres's connection pool does - without this, `npm run seed` would
++  // print the success message above and then just hang indefinitely under
++  // FINOPS_DB_DRIVER=postgres.
++  process.exit(0);
+ }
+ 
+ main().catch((err) => {
+   console.error("Seeding failed:", err);
+   process.exit(1);
+-});
+\ No newline at end of file
++});
+diff --git a/server/shadowTest.js b/server/shadowTest.js
+index e05121b..71a0889 100644
+--- a/server/shadowTest.js
++++ b/server/shadowTest.js
+@@ -18,8 +18,8 @@
+ //     latency this is trying to avoid. A streaming request is simply never
+ //     eligible for shadow testing.
+ //   - Costs here are REAL (both models actually got called) but are
+-//     deliberately NOT written to usage_events/budgets - see the db.js
+-//     schema comment on shadow_comparisons for why.
++//     deliberately NOT written to usage_events/budgets - see the schema
++//     comment on shadow_comparisons for why.
+ //   - Quality scoring reuses the same local word-overlap cosine similarity
+ //     already implemented in semanticCache.js, rather than inventing a
+ //     second implementation. Same honest caveat applies: this is lexical
+@@ -30,7 +30,8 @@
+ //     whole point is spending a little to find out whether you can spend
+ //     a lot less, but that "little" is real money if left on unbounded.
+ 
+-const db = require("./db");
++const db = require("./storage");
++const { sinceDaysAgo } = require("./storage/dialectSql");
+ const { computeCost } = require("./pricing");
+ const { CHEAPER_ALTERNATIVES } = require("./modelAlternatives");
+ const { tokenize, termFrequency, cosineSimilarityLocal } = require("./semanticCache");
+@@ -45,15 +46,6 @@ function clamp01(n, fallback) {
+   return Math.min(1, Math.max(0, n));
+ }
+ 
+-const insertShadowRow = db.prepare(`
+-  INSERT INTO shadow_comparisons
+-    (provider, primary_model, shadow_model, team, primary_cost_usd, shadow_cost_usd,
+-     similarity, primary_length, shadow_length, length_delta_pct, shadow_error)
+-  VALUES
+-    (@provider, @primary_model, @shadow_model, @team, @primary_cost_usd, @shadow_cost_usd,
+-     @similarity, @primary_length, @shadow_length, @length_delta_pct, @shadow_error)
+-`);
+-
+ // Pulls plain response text out of an OpenAI or Anthropic chat *response*
+ // body (different shape from semanticCache.js's extractPromptText, which
+ // reads REQUEST bodies) so the two can be compared for similarity/length.
+@@ -149,25 +141,50 @@ async function runShadowTest({
+     row.shadow_error = err.message;
+   }
+ 
+-  insertShadowRow.run(row);
++  // created_at is set explicitly (JS ISO string) rather than left to the
++  // schema's dialect-native DEFAULT, so the date-range filters in
++  // getShadowStatsForPair/getShadowTestSummary below can use the same
++  // sinceDaysAgo() helper that every other event_time-style column in this
++  // codebase uses - one comparison convention, not two.
++  await db.run(
++    `INSERT INTO shadow_comparisons
++      (provider, primary_model, shadow_model, team, primary_cost_usd, shadow_cost_usd,
++       similarity, primary_length, shadow_length, length_delta_pct, shadow_error, created_at)
++     VALUES
++      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
++    [
++      row.provider,
++      row.primary_model,
++      row.shadow_model,
++      row.team,
++      row.primary_cost_usd,
++      row.shadow_cost_usd,
++      row.similarity,
++      row.primary_length,
++      row.shadow_length,
++      row.length_delta_pct,
++      row.shadow_error,
++      new Date().toISOString(),
++    ]
++  );
+ }
+ 
+ // Aggregate stats for one specific (current -> suggested) pair, used by
+ // recommend.js to decide whether a recommendation has moved beyond
+ // "unverified" for that exact switch.
+ async function getShadowStatsForPair(provider, primaryModel, shadowModel, { days = 90 } = {}) {
+-  const row = db
+-    .prepare(
+-      `SELECT COUNT(*) AS n,
+-              SUM(CASE WHEN shadow_error IS NULL THEN 1 ELSE 0 END) AS successes,
+-              AVG(CASE WHEN shadow_error IS NULL THEN similarity END) AS avg_similarity,
+-              AVG(CASE WHEN shadow_error IS NULL THEN length_delta_pct END) AS avg_length_delta_pct,
+-              SUM(CASE WHEN shadow_error IS NULL THEN primary_cost_usd - shadow_cost_usd ELSE 0 END) AS total_actual_savings_usd
+-       FROM shadow_comparisons
+-       WHERE provider = ? AND primary_model = ? AND shadow_model = ?
+-         AND created_at >= datetime('now', ?)`
+-    )
+-    .get(provider, primaryModel, shadowModel, `-${days} days`);
++  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
++  const row = await db.get(
++    `SELECT COUNT(*) AS n,
++            SUM(CASE WHEN shadow_error IS NULL THEN 1 ELSE 0 END) AS successes,
++            AVG(CASE WHEN shadow_error IS NULL THEN similarity END) AS avg_similarity,
++            AVG(CASE WHEN shadow_error IS NULL THEN length_delta_pct END) AS avg_length_delta_pct,
++            SUM(CASE WHEN shadow_error IS NULL THEN primary_cost_usd - shadow_cost_usd ELSE 0 END) AS total_actual_savings_usd
++     FROM shadow_comparisons
++     WHERE provider = ? AND primary_model = ? AND shadow_model = ?
++       AND created_at >= ${sinceDaysAgo(safeDays)}`,
++    [provider, primaryModel, shadowModel]
++  );
+ 
+   return {
+     sample_count: row.n || 0,
+@@ -181,20 +198,19 @@ async function getShadowStatsForPair(provider, primaryModel, shadowModel, { days
+ 
+ // Every distinct pair tested, for a dashboard/API summary view.
+ async function getShadowTestSummary({ days = 90 } = {}) {
+-  const rows = db
+-    .prepare(
+-      `SELECT provider, primary_model, shadow_model,
+-              COUNT(*) AS n,
+-              SUM(CASE WHEN shadow_error IS NULL THEN 1 ELSE 0 END) AS successes,
+-              AVG(CASE WHEN shadow_error IS NULL THEN similarity END) AS avg_similarity,
+-              AVG(CASE WHEN shadow_error IS NULL THEN length_delta_pct END) AS avg_length_delta_pct,
+-              SUM(CASE WHEN shadow_error IS NULL THEN primary_cost_usd - shadow_cost_usd ELSE 0 END) AS total_actual_savings_usd
+-       FROM shadow_comparisons
+-       WHERE created_at >= datetime('now', ?)
+-       GROUP BY provider, primary_model, shadow_model
+-       ORDER BY n DESC`
+-    )
+-    .all(`-${days} days`);
++  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
++  const rows = await db.all(
++    `SELECT provider, primary_model, shadow_model,
++            COUNT(*) AS n,
++            SUM(CASE WHEN shadow_error IS NULL THEN 1 ELSE 0 END) AS successes,
++            AVG(CASE WHEN shadow_error IS NULL THEN similarity END) AS avg_similarity,
++            AVG(CASE WHEN shadow_error IS NULL THEN length_delta_pct END) AS avg_length_delta_pct,
++            SUM(CASE WHEN shadow_error IS NULL THEN primary_cost_usd - shadow_cost_usd ELSE 0 END) AS total_actual_savings_usd
++     FROM shadow_comparisons
++     WHERE created_at >= ${sinceDaysAgo(safeDays)}
++     GROUP BY provider, primary_model, shadow_model
++     ORDER BY n DESC`
++  );
+ 
+   return rows.map((r) => ({
+     provider: r.provider,
+@@ -212,7 +228,7 @@ async function getShadowTestSummary({ days = 90 } = {}) {
+ // Raw recent rows, including failures, for debugging/audit.
+ async function getShadowComparisons({ limit = 50 } = {}) {
+   const capped = Math.min(Math.max(Number(limit) || 50, 1), 500);
+-  return db.prepare(`SELECT * FROM shadow_comparisons ORDER BY created_at DESC LIMIT ?`).all(capped);
++  return db.all(`SELECT * FROM shadow_comparisons ORDER BY created_at DESC LIMIT ?`, [capped]);
+ }
+ 
+ module.exports = {
+diff --git a/server/sso.js b/server/sso.js
+index e1e51ad..a7a7470 100644
+--- a/server/sso.js
++++ b/server/sso.js
+@@ -17,7 +17,7 @@
+ 
+ const crypto = require("crypto");
+ const { createUser, createSession } = require("./users");
+-const db = require("./db");
++const db = require("./storage");
+ 
+ const pendingStates = new Map(); // state -> { createdAt } (CSRF protection)
+ 
+@@ -84,13 +84,13 @@ function validateState(state) {
+ // Provision or find a local user record for an SSO-authenticated identity,
+ // then issue a normal session token (same session system as password login).
+ async function loginOrProvisionSsoUser(email) {
+-  let user = db.prepare("SELECT * FROM users WHERE username = ?").get(email);
++  let user = await db.get("SELECT * FROM users WHERE username = ?", [email]);
+   if (!user) {
+     // First SSO login for this email - provision as viewer by default.
+     // An admin can upgrade their role via PATCH /api/keys or a future
+     // admin endpoint - auto-granting admin to any SSO login would be unsafe.
+     await createUser({ username: email, password: crypto.randomBytes(24).toString("hex"), role: "viewer" });
+-    user = db.prepare("SELECT * FROM users WHERE username = ?").get(email);
++    user = await db.get("SELECT * FROM users WHERE username = ?", [email]);
+   }
+   return createSession(user);
+ }
+@@ -103,4 +103,4 @@ module.exports = {
+   decodeIdTokenUnsafe,
+   validateState,
+   loginOrProvisionSsoUser,
+-};
+\ No newline at end of file
++};
+diff --git a/server/storage/postgres.js b/server/storage/postgres.js
+index d01e096..c5ba748 100644
+--- a/server/storage/postgres.js
++++ b/server/storage/postgres.js
+@@ -31,8 +31,48 @@ types.setTypeParser(20 /* int8/bigint */, (val) => parseInt(val, 10));
+ 
+ const dialect = "postgres";
+ 
++// Optional per-run schema isolation (FINOPS_POSTGRES_SCHEMA). Not needed for
++// normal single-tenant use (defaults to Postgres's own "public" schema), but
++// lets test files - one process each, same convention as SQLite's per-file
++// FINOPS_DB_PATH - get an isolated, disposable namespace against the SAME
++// shared Postgres instance/database, instead of colliding in one shared set
++// of tables. Schema creation needs its own short-lived connection since the
++// main `pool` below is constructed with this schema already baked into its
++// search_path - the schema has to exist before that pool's first connection
++// asks Postgres to search inside it.
++const schema = process.env.FINOPS_POSTGRES_SCHEMA || null;
++
++async function ensureSchema() {
++  if (!schema) return;
++  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(schema)) {
++    throw new Error(`FINOPS_POSTGRES_SCHEMA must be a plain identifier, got ${schema}`);
++  }
++  // Deliberately NOT double-quoted. The pool below points its search_path
++  // at this same name via the `-c search_path=...` connection option, which
++  // is an UNQUOTED libpq startup parameter - Postgres folds unquoted
++  // identifiers to lowercase by standard SQL rules. Quoting this CREATE
++  // SCHEMA (preserving exact case) while search_path resolves the unquoted,
++  // lowercased version would create a schema the pool's own connections can
++  // never find. Leaving both unquoted makes them fold the same way, so a
++  // mixed-case FINOPS_POSTGRES_SCHEMA value still resolves consistently -
++  // found by actually exercising this with a mixed-case schema name against
++  // a real Postgres instance, not by inspection.
++  const setupPool = new Pool({ connectionString: process.env.FINOPS_POSTGRES_URL });
++  try {
++    await setupPool.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
++  } finally {
++    await setupPool.end();
++  }
++}
++
++// `options: '-c search_path=...'` is passed as a libpq startup parameter, so
++// - unlike `pool.query("SET search_path...")`, which would only affect
++// whichever single physical connection happens to run that query - it
++// applies to EVERY connection the pool ever opens. Verified empirically
++// against a real local Postgres before relying on it here.
+ const pool = new Pool({
+   connectionString: process.env.FINOPS_POSTGRES_URL,
++  ...(schema ? { options: `-c search_path=${schema}` } : {}),
+ });
+ 
+ // Converts a `?`-placeholder query into Postgres's `$1, $2, ...` form.
+@@ -44,17 +84,32 @@ function toPositional(sql) {
+   return sql.replace(/\?/g, () => `$${++i}`);
+ }
+ 
++// Every exported operation awaits `ready` (schema creation) first. This is
++// not optional defensiveness: unlike SQLite, where schema creation is
++// synchronous and finishes before `require("./sqlite")` even returns,
++// Postgres schema setup (ensureSchema + the CREATE TABLE statements) is
++// genuinely asynchronous. Without this, the very first query issued by a
++// fast-starting caller can race the schema creation and fail with
++// "relation ... does not exist" - found by running this migration's own
++// test suite against a real Postgres instance, not by inspection. `ready`
++// is declared further down this file (after SCHEMA_SQL is available) but
++// that's fine: these functions are only ever invoked after the whole
++// module has finished loading, by which point the const is assigned - this
++// is an ordinary closure over a module-scoped binding, not a hoisting hazard.
+ async function get(sql, params = []) {
++  await ready;
+   const result = await pool.query(toPositional(sql), params);
+   return result.rows[0];
+ }
+ 
+ async function all(sql, params = []) {
++  await ready;
+   const result = await pool.query(toPositional(sql), params);
+   return result.rows;
+ }
+ 
+ async function run(sql, params = []) {
++  await ready;
+   const result = await pool.query(toPositional(sql), params);
+   // If the caller's INSERT included "RETURNING id", result.rows[0].id is the
+   // new row's id - otherwise there's nothing to report (matches SQLite's
+@@ -64,15 +119,65 @@ async function run(sql, params = []) {
+ }
+ 
+ async function exec(sql) {
++  await ready;
+   await pool.query(sql);
+ }
+ 
+-const { SCHEMA_SQL } = require("./schema.postgres");
+-const ready = pool.query(SCHEMA_SQL).then(
+-  () => {},
+-  (err) => {
+-    throw new Error(`Postgres schema initialization failed: ${err.message}`);
++// Runs `fn` against a SINGLE checked-out client for the whole transaction.
++// This is the actual fix, not just a style preference: `pool.query()` may
++// hand each call a DIFFERENT physical connection, so naively doing
++// `pool.query("BEGIN")` then a few `pool.query(insert...)` calls then
++// `pool.query("COMMIT")` can silently split a "transaction" across several
++// unrelated connections - the BEGIN and COMMIT would bracket nothing, every
++// intermediate statement would auto-commit individually on whatever
++// connection it happened to land on, and a thrown error partway through
++// would leave already-applied statements in place instead of rolling back.
++// Checking out one client via pool.connect() and running BEGIN/work/COMMIT/
++// ROLLBACK all on that same client is the standard node-postgres pattern
++// for this. The callback gets its own get/all/run bound to that client,
++// not to the pool, so every statement inside `fn` is guaranteed to run on
++// the same connection as the surrounding BEGIN/COMMIT.
++async function transaction(fn) {
++  await ready;
++  const client = await pool.connect();
++  try {
++    await client.query("BEGIN");
++    const txGet = async (sql, params = []) => {
++      const result = await client.query(toPositional(sql), params);
++      return result.rows[0];
++    };
++    const txAll = async (sql, params = []) => {
++      const result = await client.query(toPositional(sql), params);
++      return result.rows;
++    };
++    const txRun = async (sql, params = []) => {
++      const result = await client.query(toPositional(sql), params);
++      return { lastInsertRowid: result.rows[0]?.id, changes: result.rowCount };
++    };
++    const result = await fn({ get: txGet, all: txAll, run: txRun });
++    await client.query("COMMIT");
++    return result;
++  } catch (err) {
++    try {
++      await client.query("ROLLBACK");
++    } catch {
++      // ROLLBACK can itself fail if the connection is already broken - the
++      // original error is what matters to the caller.
++    }
++    throw err;
++  } finally {
++    client.release();
+   }
+-);
++}
++
++const { SCHEMA_SQL } = require("./schema.postgres");
++const ready = ensureSchema()
++  .then(() => pool.query(SCHEMA_SQL))
++  .then(
++    () => {},
++    (err) => {
++      throw new Error(`Postgres schema initialization failed: ${err.message}`);
++    }
++  );
+ 
+-module.exports = { dialect, get, all, run, exec, pool, ready };
++module.exports = { dialect, get, all, run, exec, transaction, pool, ready };
+diff --git a/server/storage/sqlite.js b/server/storage/sqlite.js
+index f76d356..9c6785f 100644
+--- a/server/storage/sqlite.js
++++ b/server/storage/sqlite.js
+@@ -40,4 +40,28 @@ async function exec(sql) {
+   raw.exec(sql);
+ }
+ 
+-module.exports = { dialect, get, all, run, exec, raw, ready: Promise.resolve() };
++// Runs `fn` inside a BEGIN/COMMIT block, rolling back on any thrown error.
++// SQLite here is a single global connection (raw), so there's no risk of a
++// statement landing on a different connection mid-transaction the way there
++// is with a Postgres connection pool - the plain top-level get/all/run are
++// already transaction-safe to hand to the callback as-is. See postgres.js
++// for why that backend needs a materially different implementation.
++async function transaction(fn) {
++  raw.exec("BEGIN");
++  try {
++    const result = await fn({ get, all, run });
++    raw.exec("COMMIT");
++    return result;
++  } catch (err) {
++    try {
++      raw.exec("ROLLBACK");
++    } catch {
++      // ROLLBACK can itself fail if BEGIN never actually started a
++      // transaction (e.g. the error above came from a syntax error before
++      // any statement ran) - the original error is what matters to the caller.
++    }
++    throw err;
++  }
++}
++
++module.exports = { dialect, get, all, run, exec, transaction, raw, ready: Promise.resolve() };
+diff --git a/server/tokenQuota.js b/server/tokenQuota.js
+index bf2bfb8..6143161 100644
+--- a/server/tokenQuota.js
++++ b/server/tokenQuota.js
+@@ -31,27 +31,65 @@
+ //     same convention budgets.js already uses for "this month" - not a
+ //     rolling 24h/7d window.
+ 
+-const db = require("./db");
++const db = require("./storage");
++const { dayFloorExpr } = require("./storage/dialectSql");
+ 
++// Returns { clause, params } instead of a plain SQL string - the original
++// SQLite-only version inlined `date('now')`/`strftime('%Y-%W', 'now')`
++// directly, but the boundary now has to be computed in JS (see the two
++// functions below) and bound as a parameter rather than relying on a SQL
++// "current time" function, so both dialects filter against the identical
++// value rather than each server computing "now" independently.
+ function periodClause(period) {
+-  if (period === "daily") return `date(event_time) = date('now')`;
+-  if (period === "weekly") return `strftime('%Y-%W', event_time) = strftime('%Y-%W', 'now')`;
++  if (period === "daily") {
++    return { clause: `${dayFloorExpr("event_time")} = ?`, params: [todayUtc()] };
++  }
++  if (period === "weekly") {
++    const { start, end } = thisIsoWeekUtc();
++    return { clause: `event_time >= ? AND event_time < ?`, params: [start, end] };
++  }
+   throw new Error(`Unknown period '${period}'`);
+ }
+ 
++// 'YYYY-MM-DD' in UTC, matching dayFloorExpr's own UTC-based extraction of
++// event_time (which is always stored as a UTC ISO string).
++function todayUtc() {
++  return new Date().toISOString().slice(0, 10);
++}
++
++// [start, end) of the current ISO week (Monday 00:00:00 UTC through the
++// following Monday, exclusive) as ISO strings - matches event_time's own
++// storage format so this is a plain string comparison, not a dialect date
++// function. Note: this is a deliberate, documented change from the
++// original SQLite-only implementation's week definition (strftime's
++// '%Y-%W', which starts weeks on SUNDAY and isn't quite ISO 8601 either) -
++// no test in this codebase asserts a specific week-boundary edge case, and
++// an ISO week (Monday-start) is the more standard, unambiguous choice for
++// a definition that now has to be spelled out in JS rather than borrowed
++// from whichever dialect happened to be running.
++function thisIsoWeekUtc() {
++  const now = new Date();
++  const day = now.getUTCDay(); // 0 (Sun) - 6 (Sat)
++  const diffToMonday = day === 0 ? 6 : day - 1;
++  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - diffToMonday));
++  const nextMonday = new Date(monday);
++  nextMonday.setUTCDate(monday.getUTCDate() + 7);
++  return { start: monday.toISOString(), end: nextMonday.toISOString() };
++}
++
+ async function getQuotaRows(scopeType, scopeValue) {
+   if (!scopeValue) return [];
+-  return db.prepare("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ?").all(scopeType, scopeValue);
++  return db.all("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ?", [scopeType, scopeValue]);
+ }
+ 
+ async function tokensUsedInPeriod(column, scopeValue, period) {
+-  const row = db
+-    .prepare(
+-      `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total
+-       FROM usage_events
+-       WHERE ${column} = ? AND ${periodClause(period)}`
+-    )
+-    .get(scopeValue);
++  const { clause, params } = periodClause(period);
++  const row = await db.get(
++    `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total
++     FROM usage_events
++     WHERE ${column} = ? AND ${clause}`,
++    [scopeValue, ...params]
++  );
+   return row.total;
+ }
+ 
+@@ -81,24 +119,27 @@ async function checkTokenQuota({ keyId, team }) {
+ }
+ 
+ async function addQuota({ scope_type, scope_value, period, token_limit }) {
+-  const info = db
+-    .prepare("INSERT INTO token_quotas (scope_type, scope_value, period, token_limit) VALUES (?, ?, ?, ?)")
+-    .run(scope_type, scope_value, period, token_limit);
++  // RETURNING id - see modelAllowlist.js's addAllowlistEntry for why.
++  const info = await db.run(
++    "INSERT INTO token_quotas (scope_type, scope_value, period, token_limit) VALUES (?, ?, ?, ?) RETURNING id",
++    [scope_type, scope_value, period, token_limit]
++  );
+   return info.lastInsertRowid;
+ }
+ 
+ async function removeQuota(id) {
+-  const info = db.prepare("DELETE FROM token_quotas WHERE id = ?").run(id);
++  const info = await db.run("DELETE FROM token_quotas WHERE id = ?", [id]);
+   return info.changes > 0;
+ }
+ 
+ async function listQuotas({ scope_type, scope_value } = {}) {
+   if (scope_type && scope_value) {
+-    return db
+-      .prepare("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC")
+-      .all(scope_type, scope_value);
++    return db.all(
++      "SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC",
++      [scope_type, scope_value]
++    );
+   }
+-  return db.prepare("SELECT * FROM token_quotas ORDER BY id DESC").all();
++  return db.all("SELECT * FROM token_quotas ORDER BY id DESC");
+ }
+ 
+ module.exports = { checkTokenQuota, addQuota, removeQuota, listQuotas };
+diff --git a/server/users.js b/server/users.js
+index a02549f..6664314 100644
+--- a/server/users.js
++++ b/server/users.js
+@@ -7,7 +7,7 @@
+ // deployment) with a 24-hour expiry.
+ 
+ const crypto = require("crypto");
+-const db = require("./db");
++const db = require("./storage");
+ 
+ const sessions = new Map(); // token -> { username, role, expiresAt }
+ const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+@@ -19,13 +19,13 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+ 
+ async function createUser({ username, password, role = "viewer" }) {
+   const { hash, salt } = hashPassword(password);
+-  db.prepare(
+-    "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)"
+-  ).run(username, hash, salt, role);
++  await db.run("INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)", [
++    username, hash, salt, role,
++  ]);
+ }
+ 
+ async function verifyLogin(username, password) {
+-  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
++  const user = await db.get("SELECT * FROM users WHERE username = ?", [username]);
+   if (!user) return null;
+   const { hash } = hashPassword(password, user.salt);
+   // Constant-time comparison to avoid timing attacks
+@@ -64,14 +64,14 @@ function destroySession(token) {
+ // with the user out of band. All existing sessions for that user are
+ // invalidated so a compromised session doesn't survive the reset.
+ async function resetPassword(username, newPassword) {
+-  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
++  const user = await db.get("SELECT * FROM users WHERE username = ?", [username]);
+   if (!user) throw new Error("User not found");
+   const { hash, salt } = hashPassword(newPassword);
+-  db.prepare("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?").run(hash, salt, username);
++  await db.run("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?", [hash, salt, username]);
+ 
+   for (const [token, session] of sessions.entries()) {
+     if (session.username === username) sessions.delete(token);
+   }
+ }
+ 
+-module.exports = { createUser, verifyLogin, createSession, getSession, destroySession, resetPassword };
+\ No newline at end of file
++module.exports = { createUser, verifyLogin, createSession, getSession, destroySession, resetPassword };
+diff --git a/test/alertDelivery.test.js b/test/alertDelivery.test.js
+index ceda4fa..33ffda8 100644
+--- a/test/alertDelivery.test.js
++++ b/test/alertDelivery.test.js
+@@ -1,21 +1,12 @@
+ ﻿// test/alertDelivery.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
+-
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-alertDelivery-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
+-
+-let db;
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
++const { setup } = require("./helpers/dbTestSetup");
++
++const { cleanup } = setup("alertDelivery");
++test.after(cleanup);
+ 
+-db = require("../server/db");
++const db = require("../server/storage");
+ 
+ test("deliverAlert always logs locally even when no channels are configured", async (t) => {
+   delete process.env.SLACK_WEBHOOK_URL;
+@@ -23,9 +14,9 @@ test("deliverAlert always logs locally even when no channels are configured", as
+   delete require.cache[require.resolve("../server/alertDelivery")];
+   const { deliverAlert } = require("../server/alertDelivery");
+ 
+-  const before = db.prepare("SELECT COUNT(*) AS n FROM alerts_log").get().n;
++  const before = (await db.get("SELECT COUNT(*) AS n FROM alerts_log")).n;
+   await deliverAlert("test message", "budget");
+-  const after = db.prepare("SELECT COUNT(*) AS n FROM alerts_log").get().n;
++  const after = (await db.get("SELECT COUNT(*) AS n FROM alerts_log")).n;
+ 
+   assert.equal(after, before + 1, "expected exactly one new alerts_log row");
+ });
+diff --git a/test/anomaly.test.js b/test/anomaly.test.js
+index a28f673..85d0dcd 100644
+--- a/test/anomaly.test.js
++++ b/test/anomaly.test.js
+@@ -1,38 +1,31 @@
+ // test/anomaly.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
++const { setup } = require("./helpers/dbTestSetup");
+ 
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-anomaly-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
++const { cleanup } = setup("anomaly");
++test.after(cleanup);
+ 
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
+-
+-const db = require("../server/db");
++const db = require("../server/storage");
+ const { checkAnomaly, MIN_SAMPLE_SIZE, ANOMALY_MULTIPLIER } = require("../server/anomaly");
+ 
+-function insertBaselineEvents(n, cost) {
++async function insertBaselineEvents(n, cost) {
+   for (let i = 0; i < n; i++) {
+-    db.prepare(
+-      `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`
+-    ).run(new Date().toISOString(), "openai", "gpt-4o", cost);
++    await db.run(
++      `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`,
++      [new Date().toISOString(), "openai", "gpt-4o", cost]
++    );
+   }
+ }
+ 
+ test("checkAnomaly returns null when sample size is too small", async () => {
+-  insertBaselineEvents(3, 0.1);
++  await insertBaselineEvents(3, 0.1);
+   const result = await checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 5.0, team: "x" });
+   assert.equal(result, null);
+ });
+ 
+ test("checkAnomaly flags a cost far above the established baseline", async () => {
+-  insertBaselineEvents(MIN_SAMPLE_SIZE, 0.1);
++  await insertBaselineEvents(MIN_SAMPLE_SIZE, 0.1);
+   const result = await checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0.1 * ANOMALY_MULTIPLIER * 2, team: "x" });
+   assert.ok(result, "expected an anomaly to be flagged");
+   assert.equal(result.flagged, true);
+@@ -40,7 +33,7 @@ test("checkAnomaly flags a cost far above the established baseline", async () =>
+ });
+ 
+ test("checkAnomaly does not flag cost within normal range of baseline", async () => {
+-  insertBaselineEvents(MIN_SAMPLE_SIZE, 0.1);
++  await insertBaselineEvents(MIN_SAMPLE_SIZE, 0.1);
+   const result = await checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0.15, team: "x" });
+   assert.equal(result, null);
+ });
+@@ -48,4 +41,4 @@ test("checkAnomaly does not flag cost within normal range of baseline", async ()
+ test("checkAnomaly ignores zero-cost events", async () => {
+   const result = await checkAnomaly({ provider: "openai", model: "gpt-4o", cost_usd: 0, team: "x" });
+   assert.equal(result, null);
+-});
+\ No newline at end of file
++});
+diff --git a/test/auth.test.js b/test/auth.test.js
+index 5824688..1ce19d4 100644
+--- a/test/auth.test.js
++++ b/test/auth.test.js
+@@ -1,19 +1,10 @@
+ ﻿// test/auth.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
++const { setup } = require("./helpers/dbTestSetup");
+ 
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-auth-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
+-const db = require("../server/db");
+-
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
++const { cleanup } = setup("auth");
++test.after(cleanup);
+ 
+ const { hasPermission, ROLE_PERMISSIONS } = require("../server/auth");
+ 
+diff --git a/test/forecast.test.js b/test/forecast.test.js
+index ffb4c2c..f933529 100644
+--- a/test/forecast.test.js
++++ b/test/forecast.test.js
+@@ -1,36 +1,26 @@
+ ﻿// test/forecast.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
++const { setup } = require("./helpers/dbTestSetup");
+ 
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-forecast-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
++const { cleanup } = setup("forecast");
++test.after(cleanup);
+ 
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
+-
+-const db = require("../server/db");
++const db = require("../server/storage");
+ const { forecastSpend, getDailySpend, MIN_DAYS_FOR_FORECAST } = require("../server/forecast");
+ 
+-const insertEvent = db.prepare(`
+-  INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged)
+-  VALUES (?, 'openai', 'gpt-4o', ?, 1)
+-`);
+-
+-function seedDay(daysAgo, cost) {
++async function seedDay(daysAgo, cost) {
+   const d = new Date();
+   d.setDate(d.getDate() - daysAgo);
+-  insertEvent.run(d.toISOString(), cost);
++  await db.run(
++    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, 'openai', 'gpt-4o', ?, 1)`,
++    [d.toISOString(), cost]
++  );
+ }
+ 
+ test("forecastSpend returns null with fewer than MIN_DAYS_FOR_FORECAST days of data", async () => {
+-  seedDay(0, 10);
+-  seedDay(1, 12);
++  await seedDay(0, 10);
++  await seedDay(1, 12);
+   // Only 2 distinct days - below the minimum of 3
+   const result = await forecastSpend({ lookbackDays: 7 });
+   assert.equal(result, null);
+@@ -40,7 +30,7 @@ test("forecastSpend computes a simple moving average once enough days exist", as
+   // Fresh DB slate isn't practical mid-file (other tests share state), so
+   // seed a distinctly-dated cluster of days here and use a short lookback
+   // that only captures these.
+-  seedDay(2, 30); // total so far across this file: day0=10, day1=12, day2=30
++  await seedDay(2, 30); // total so far across this file: day0=10, day1=12, day2=30
+   // days_with_data = 3, total = 52, avg = 52/3 = 17.333...
+   const result = await forecastSpend({ lookbackDays: 7, horizonDays: 30 });
+   assert.ok(result, "expected a forecast once 3+ days of data exist");
+@@ -52,7 +42,7 @@ test("forecastSpend computes a simple moving average once enough days exist", as
+ });
+ 
+ test("forecastSpend respects the lookback window - older days don't count", async () => {
+-  seedDay(20, 999); // way outside a 7-day lookback
++  await seedDay(20, 999); // way outside a 7-day lookback
+   const result = await forecastSpend({ lookbackDays: 7, horizonDays: 30 });
+   assert.ok(result);
+   assert.equal(result.days_with_data, 3, "the 20-days-ago event should not be included in a 7-day lookback");
+diff --git a/test/governance.test.js b/test/governance.test.js
+index af7e200..b6218ac 100644
+--- a/test/governance.test.js
++++ b/test/governance.test.js
+@@ -1,20 +1,12 @@
+ ﻿// test/governance.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
++const { setup } = require("./helpers/dbTestSetup");
+ 
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-governance-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
++const { cleanup } = setup("governance");
++test.after(cleanup);
+ 
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
+-
+-const db = require("../server/db");
++const db = require("../server/storage");
+ const {
+   checkRateLimit,
+   isQuarantined,
+@@ -41,14 +33,14 @@ test("checkRateLimit blocks once capacity is exhausted", () => {
+ });
+ 
+ test("quarantineKey marks a key quarantined and isQuarantined reflects it", async () => {
+-  db.prepare("INSERT INTO api_keys (key_id, label, role) VALUES (?, ?, ?)").run("qk_1", "test", "developer");
++  await db.run("INSERT INTO api_keys (key_id, label, role) VALUES (?, ?, ?)", ["qk_1", "test", "developer"]);
+   assert.equal(await isQuarantined("qk_1"), false);
+   await quarantineKey("qk_1", "suspicious activity");
+   assert.equal(await isQuarantined("qk_1"), true);
+ });
+ 
+ test("approveKey lifts quarantine status", async () => {
+-  db.prepare("INSERT INTO api_keys (key_id, label, role) VALUES (?, ?, ?)").run("qk_2", "test2", "developer");
++  await db.run("INSERT INTO api_keys (key_id, label, role) VALUES (?, ?, ?)", ["qk_2", "test2", "developer"]);
+   await quarantineKey("qk_2", "test");
+   assert.equal(await isQuarantined("qk_2"), true);
+   await approveKey("qk_2");
+diff --git a/test/helpers/dbTestSetup.js b/test/helpers/dbTestSetup.js
+new file mode 100644
+index 0000000..8897dbf
+--- /dev/null
++++ b/test/helpers/dbTestSetup.js
+@@ -0,0 +1,86 @@
++// test/helpers/dbTestSetup.js
++//
++// Call setup(name) at the very top of a test file, BEFORE requiring
++// server/storage or any production module that reaches it - storage/index.js
++// picks its driver and (for Postgres) opens its connection pool at require
++// time, reading these same env vars, so they must already be set.
++//
++// Mirrors this project's existing SQLite isolation convention (a unique
++// FINOPS_DB_PATH per test file, keyed by pid, cleaned up in test.after) and
++// extends the same idea to Postgres: a unique schema per test file instead
++// of a unique file, so parallel/unrelated test files never collide over
++// shared tables like usage_events or api_keys. Test files themselves don't
++// need to know or care which backend is active - they just call
++// storage.get/all/run and let this helper handle the plumbing underneath.
++
++const path = require("path");
++const fs = require("fs");
++const crypto = require("crypto");
++
++function setup(name) {
++  const isPostgres = process.env.FINOPS_DB_DRIVER === "postgres";
++
++  if (isPostgres) {
++    if (!process.env.FINOPS_POSTGRES_URL) {
++      throw new Error(
++        "FINOPS_DB_DRIVER=postgres but FINOPS_POSTGRES_URL is not set - point it at a real Postgres instance to run tests against this backend."
++      );
++    }
++    // Lowercased deliberately: postgres.js's CREATE SCHEMA quotes this name
++    // (preserving exact case), but the search_path passed via the pool's
++    // `-c search_path=...` connection option is UNQUOTED, so Postgres folds
++    // it to lowercase per standard SQL identifier rules. A mixed-case name
++    // (e.g. from a camelCase test file name like "shadowTest") would create
++    // a schema the pool's own search_path then can't find, since the two
++    // resolve to different identifiers - caught by actually running this
++    // against a real Postgres instance, not by inspection.
++    const schema = `test_${name}_${process.pid}_${crypto.randomBytes(3).toString("hex")}`.toLowerCase();
++    process.env.FINOPS_POSTGRES_SCHEMA = schema;
++
++    async function cleanup() {
++      // Wait for this process's own schema-creation to finish before
++      // dropping it - a test file with few/no DB calls could otherwise
++      // reach cleanup while the storage module's CREATE TABLE statements
++      // (kicked off unawaited at require time) are still in flight,
++      // racing the DROP SCHEMA against them.
++      try {
++        await require("../../server/storage").ready;
++      } catch {
++        // schema init itself failed - nothing to await further, still want
++        // to attempt the drop below in case it partially succeeded
++      }
++      const { Pool } = require("pg");
++      const p = new Pool({ connectionString: process.env.FINOPS_POSTGRES_URL });
++      try {
++        await p.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
++      } finally {
++        await p.end();
++      }
++    }
++
++    return { cleanup, dialect: "postgres" };
++  }
++
++  const dbPath = path.join(__dirname, "..", `.tmp-${name}-${process.pid}.db`);
++  process.env.FINOPS_DB_PATH = dbPath;
++
++  async function cleanup() {
++    try {
++      const storage = require("../../server/storage");
++      storage.raw?.close();
++    } catch {
++      // already closed, or never opened - fine either way for cleanup purposes
++    }
++    for (const suffix of ["", "-shm", "-wal"]) {
++      try {
++        fs.unlinkSync(dbPath + suffix);
++      } catch {
++        // file never existed - fine
++      }
++    }
++  }
++
++  return { cleanup, dialect: "sqlite" };
++}
++
++module.exports = { setup };
+diff --git a/test/pricing.test.js b/test/pricing.test.js
+index 0c9d3e3..45f0479 100644
+--- a/test/pricing.test.js
++++ b/test/pricing.test.js
+@@ -1,19 +1,10 @@
+ ﻿// test/pricing.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
++const { setup } = require("./helpers/dbTestSetup");
+ 
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-pricing-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
+-const db = require("../server/db");
+-
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
++const { cleanup } = setup("pricing");
++test.after(cleanup);
+ 
+ const { computeCost, setOverride, getRate } = require("../server/pricing");
+ 
+diff --git a/test/recommend.test.js b/test/recommend.test.js
+index 258baa8..3ab84b6 100644
+--- a/test/recommend.test.js
++++ b/test/recommend.test.js
+@@ -1,35 +1,28 @@
+ ﻿// test/recommend.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
++const { setup } = require("./helpers/dbTestSetup");
+ 
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-recommend-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
++const { cleanup } = setup("recommend");
++test.after(cleanup);
+ 
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
+-
+-const db = require("../server/db");
++const db = require("../server/storage");
+ const { getModelSwitchRecommendations, getCachingOpportunities } = require("../server/recommend");
+ const { runShadowTest } = require("../server/shadowTest");
+ 
+-function insertEvent({ provider, model, input_tokens, output_tokens, cost_usd, daysAgo = 0 }) {
++async function insertEvent({ provider, model, input_tokens, output_tokens, cost_usd, daysAgo = 0 }) {
+   const d = new Date();
+   d.setDate(d.getDate() - daysAgo);
+-  db.prepare(
++  await db.run(
+     `INSERT INTO usage_events (event_time, provider, model, input_tokens, output_tokens, cost_usd, tagged)
+-     VALUES (?, ?, ?, ?, ?, ?, 1)`
+-  ).run(d.toISOString(), provider, model, input_tokens, output_tokens, cost_usd);
++     VALUES (?, ?, ?, ?, ?, ?, 1)`,
++    [d.toISOString(), provider, model, input_tokens, output_tokens, cost_usd]
++  );
+ }
+ 
+ test("getModelSwitchRecommendations suggests a cheaper alternative when spend is significant", async () => {
+   for (let i = 0; i < 20; i++) {
+-    insertEvent({ provider: "openai", model: "gpt-4o", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5 });
++    await insertEvent({ provider: "openai", model: "gpt-4o", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5 });
+   }
+   const recs = await getModelSwitchRecommendations({ days: 30 });
+   const rec = recs.find((r) => r.current.provider === "openai" && r.current.model === "gpt-4o");
+@@ -40,7 +33,7 @@ test("getModelSwitchRecommendations suggests a cheaper alternative when spend is
+ });
+ 
+ test("getModelSwitchRecommendations skips trivial spend (< $1 total)", async () => {
+-  insertEvent({ provider: "anthropic", model: "claude-opus", input_tokens: 100, output_tokens: 50, cost_usd: 0.05 });
++  await insertEvent({ provider: "anthropic", model: "claude-opus", input_tokens: 100, output_tokens: 50, cost_usd: 0.05 });
+   const recs = await getModelSwitchRecommendations({ days: 30 });
+   const rec = recs.find((r) => r.current.model === "claude-opus");
+   assert.equal(rec, undefined);
+@@ -48,7 +41,7 @@ test("getModelSwitchRecommendations skips trivial spend (< $1 total)", async ()
+ 
+ test("getModelSwitchRecommendations ignores events outside the day window", async () => {
+   for (let i = 0; i < 20; i++) {
+-    insertEvent({ provider: "anthropic", model: "claude-sonnet", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5, daysAgo: 90 });
++    await insertEvent({ provider: "anthropic", model: "claude-sonnet", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5, daysAgo: 90 });
+   }
+   const recs = await getModelSwitchRecommendations({ days: 7 });
+   const rec = recs.find((r) => r.current.model === "claude-sonnet");
+@@ -57,7 +50,7 @@ test("getModelSwitchRecommendations ignores events outside the day window", asyn
+ 
+ test("getCachingOpportunities flags low-variance repeated call patterns", async () => {
+   for (let i = 0; i < 25; i++) {
+-    insertEvent({ provider: "openai", model: "gpt-4o-mini", input_tokens: 500, output_tokens: 100, cost_usd: 0.01 });
++    await insertEvent({ provider: "openai", model: "gpt-4o-mini", input_tokens: 500, output_tokens: 100, cost_usd: 0.01 });
+   }
+   const opportunities = await getCachingOpportunities({ days: 30 });
+   const found = opportunities.find((o) => o.provider === "openai" && o.model === "gpt-4o-mini");
+@@ -66,7 +59,7 @@ test("getCachingOpportunities flags low-variance repeated call patterns", async
+ 
+ test("getCachingOpportunities does not flag low-volume usage", async () => {
+   for (let i = 0; i < 5; i++) {
+-    insertEvent({ provider: "bedrock", model: "titan-text-express", input_tokens: 500, output_tokens: 100, cost_usd: 0.01 });
++    await insertEvent({ provider: "bedrock", model: "titan-text-express", input_tokens: 500, output_tokens: 100, cost_usd: 0.01 });
+   }
+   const opportunities = await getCachingOpportunities({ days: 30 });
+   const found = opportunities.find((o) => o.model === "titan-text-express");
+@@ -75,7 +68,7 @@ test("getCachingOpportunities does not flag low-volume usage", async () => {
+ 
+ test("getModelSwitchRecommendations upgrades confidence to shadow-tested-similar once enough high-similarity shadow samples exist", async (t) => {
+   for (let i = 0; i < 20; i++) {
+-    insertEvent({ provider: "anthropic", model: "claude-opus", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5 });
++    await insertEvent({ provider: "anthropic", model: "claude-opus", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5 });
+   }
+ 
+   t.mock.method(global, "fetch", async () => ({
+@@ -108,7 +101,7 @@ test("getModelSwitchRecommendations upgrades confidence to shadow-tested-similar
+ 
+ test("getModelSwitchRecommendations flags shadow-tested-diverges when shadow-tested outputs don't match well", async (t) => {
+   for (let i = 0; i < 20; i++) {
+-    insertEvent({ provider: "anthropic", model: "claude-sonnet", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5 });
++    await insertEvent({ provider: "anthropic", model: "claude-sonnet", input_tokens: 2000, output_tokens: 1000, cost_usd: 0.5 });
+   }
+ 
+   t.mock.method(global, "fetch", async () => ({
+diff --git a/test/reconcile.test.js b/test/reconcile.test.js
+index 2c1f405..cb870dc 100644
+--- a/test/reconcile.test.js
++++ b/test/reconcile.test.js
+@@ -1,20 +1,12 @@
+ ﻿// test/reconcile.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
++const { setup } = require("./helpers/dbTestSetup");
+ 
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-reconcile-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
++const { cleanup } = setup("reconcile");
++test.after(cleanup);
+ 
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
+-
+-const db = require("../server/db");
++const db = require("../server/storage");
+ const { importCsv, getReconciliationReport } = require("../server/reconcile");
+ 
+ test("importCsv rejects a CSV missing required headers", async () => {
+@@ -51,9 +43,10 @@ test("getReconciliationReport flags a gap above the threshold", async () => {
+ });
+ 
+ test("getReconciliationReport does not flag when tracked spend covers reported spend", async () => {
+-  db.prepare(
+-    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`
+-  ).run("2026-04-01T10:00:00Z", "openai", "gpt-4o", 10.0);
++  await db.run(
++    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`,
++    ["2026-04-01T10:00:00Z", "openai", "gpt-4o", 10.0]
++  );
+   await importCsv("date,provider,cost\n2026-04-01,openai,10.00");
+   const report = await getReconciliationReport({ thresholdPct: 10 });
+   const row = report.find((r) => r.day === "2026-04-01");
+diff --git a/test/shadowTest.test.js b/test/shadowTest.test.js
+index 026eccc..2de8134 100644
+--- a/test/shadowTest.test.js
++++ b/test/shadowTest.test.js
+@@ -1,21 +1,11 @@
+ ﻿// test/shadowTest.test.js
+ const test = require("node:test");
+ const assert = require("node:assert/strict");
+-const path = require("node:path");
+-const fs = require("node:fs");
++const { setup } = require("./helpers/dbTestSetup");
+ 
+-process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-shadowTest-${process.pid}.db`);
+-const dbPath = process.env.FINOPS_DB_PATH;
++const { cleanup } = setup("shadowTest");
++test.after(cleanup);
+ 
+-let db;
+-test.after(() => {
+-  try { db.close(); } catch {}
+-  for (const suffix of ["", "-shm", "-wal"]) {
+-    try { fs.unlinkSync(dbPath + suffix); } catch {}
+-  }
+-});
+-
+-db = require("../server/db");
+ const {
+   runShadowTest,
+   getShadowStatsForPair,

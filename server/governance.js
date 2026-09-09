@@ -1,10 +1,10 @@
-// governance.js - Rate Limiting as Code + Circuit Breaker + Quarantine Mode
+﻿// governance.js - Rate Limiting as Code + Circuit Breaker + Quarantine Mode
 //
 // In-memory implementation (resets on server restart) - fine for a
 // single-process self-hosted deployment. If you outgrow one process,
 // swap the Maps below for Redis.
 
-const db = require("./db");
+const db = require("./storage");
 
 // ---- Rate limiting (token bucket per key) ----
 // Prevents a recursive loop / bug from draining budget in minutes.
@@ -38,7 +38,7 @@ function checkRateLimit(keyId, limit = DEFAULT_LIMIT) {
 const quarantineBuckets = new Map(); // keyId -> lastAllowedAt
 
 async function isQuarantined(keyId) {
-  const row = db.prepare("SELECT status FROM api_keys WHERE key_id = ?").get(keyId);
+  const row = await db.get("SELECT status FROM api_keys WHERE key_id = ?", [keyId]);
   return row?.status === "quarantined";
 }
 
@@ -53,16 +53,18 @@ function checkQuarantineAllowance(keyId) {
 }
 
 async function quarantineKey(keyId, reason) {
-  db.prepare(
-    "UPDATE api_keys SET status = 'quarantined', quarantine_reason = ? WHERE key_id = ?"
-  ).run(reason, keyId);
+  await db.run(
+    "UPDATE api_keys SET status = 'quarantined', quarantine_reason = ? WHERE key_id = ?",
+    [reason, keyId]
+  );
   await logAlert("quarantine", `Key ${keyId} quarantined: ${reason}`);
 }
 
 async function approveKey(keyId) {
-  db.prepare(
-    "UPDATE api_keys SET status = 'active', quarantine_reason = NULL WHERE key_id = ?"
-  ).run(keyId);
+  await db.run(
+    "UPDATE api_keys SET status = 'active', quarantine_reason = NULL WHERE key_id = ?",
+    [keyId]
+  );
 }
 
 // ---- Circuit breaker / graceful degradation ----
@@ -78,12 +80,13 @@ function getFallback(provider, model) {
 }
 
 // ---- Alert log (shared by governance + budgets) ----
-const insertAlert = db.prepare(
-  "INSERT INTO alerts_log (type, message, created_at) VALUES (?, ?, datetime('now'))"
-);
-
 async function logAlert(type, message) {
-  insertAlert.run(type, message);
+  // Explicit ISO timestamp - see audit.js's logAudit for why (consistent
+  // format regardless of backend, matching event_time's convention).
+  await db.run(
+    "INSERT INTO alerts_log (type, message, created_at) VALUES (?, ?, ?)",
+    [type, message, new Date().toISOString()]
+  );
 }
 
 module.exports = {
