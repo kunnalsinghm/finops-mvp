@@ -30,7 +30,8 @@
 //     whole point is spending a little to find out whether you can spend
 //     a lot less, but that "little" is real money if left on unbounded.
 
-const db = require("./db");
+const db = require("./storage");
+const { sinceDaysAgo } = require("./storage/dialectSql");
 const { computeCost } = require("./pricing");
 const { CHEAPER_ALTERNATIVES } = require("./modelAlternatives");
 const { tokenize, termFrequency, cosineSimilarityLocal } = require("./semanticCache");
@@ -45,14 +46,30 @@ function clamp01(n, fallback) {
   return Math.min(1, Math.max(0, n));
 }
 
-const insertShadowRow = db.prepare(`
-  INSERT INTO shadow_comparisons
-    (provider, primary_model, shadow_model, team, primary_cost_usd, shadow_cost_usd,
-     similarity, primary_length, shadow_length, length_delta_pct, shadow_error)
-  VALUES
-    (@provider, @primary_model, @shadow_model, @team, @primary_cost_usd, @shadow_cost_usd,
-     @similarity, @primary_length, @shadow_length, @length_delta_pct, @shadow_error)
-`);
+// Note: was a db.prepare(...) statement with named (@col) params under the
+// old sync db.js. The storage adapter takes positional (?) params, so this
+// is now a plain async helper instead of a prepared-statement object.
+async function insertShadowRow(row) {
+  await db.run(
+    `INSERT INTO shadow_comparisons
+       (provider, primary_model, shadow_model, team, primary_cost_usd, shadow_cost_usd,
+        similarity, primary_length, shadow_length, length_delta_pct, shadow_error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      row.provider,
+      row.primary_model,
+      row.shadow_model,
+      row.team,
+      row.primary_cost_usd,
+      row.shadow_cost_usd,
+      row.similarity,
+      row.primary_length,
+      row.shadow_length,
+      row.length_delta_pct,
+      row.shadow_error,
+    ]
+  );
+}
 
 // Pulls plain response text out of an OpenAI or Anthropic chat *response*
 // body (different shape from semanticCache.js's extractPromptText, which
@@ -149,52 +166,56 @@ async function runShadowTest({
     row.shadow_error = err.message;
   }
 
-  insertShadowRow.run(row);
+  await insertShadowRow(row);
 }
 
 // Aggregate stats for one specific (current -> suggested) pair, used by
 // recommend.js to decide whether a recommendation has moved beyond
 // "unverified" for that exact switch.
+//
+// Was previously calling db.prepare(...).get(...) synchronously despite the
+// function's own `async` keyword - a pre-existing latent bug that this
+// migration also fixes, since the old db.js sync path won't exist once the
+// rest of the app has moved to server/storage.
 async function getShadowStatsForPair(provider, primaryModel, shadowModel, { days = 90 } = {}) {
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS n,
-              SUM(CASE WHEN shadow_error IS NULL THEN 1 ELSE 0 END) AS successes,
-              AVG(CASE WHEN shadow_error IS NULL THEN similarity END) AS avg_similarity,
-              AVG(CASE WHEN shadow_error IS NULL THEN length_delta_pct END) AS avg_length_delta_pct,
-              SUM(CASE WHEN shadow_error IS NULL THEN primary_cost_usd - shadow_cost_usd ELSE 0 END) AS total_actual_savings_usd
-       FROM shadow_comparisons
-       WHERE provider = ? AND primary_model = ? AND shadow_model = ?
-         AND created_at >= datetime('now', ?)`
-    )
-    .get(provider, primaryModel, shadowModel, `-${days} days`);
+  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
+  const row = await db.get(
+    `SELECT COUNT(*) AS n,
+            SUM(CASE WHEN shadow_error IS NULL THEN 1 ELSE 0 END) AS successes,
+            AVG(CASE WHEN shadow_error IS NULL THEN similarity END) AS avg_similarity,
+            AVG(CASE WHEN shadow_error IS NULL THEN length_delta_pct END) AS avg_length_delta_pct,
+            SUM(CASE WHEN shadow_error IS NULL THEN primary_cost_usd - shadow_cost_usd ELSE 0 END) AS total_actual_savings_usd
+     FROM shadow_comparisons
+     WHERE provider = ? AND primary_model = ? AND shadow_model = ?
+       AND created_at >= ${sinceDaysAgo(safeDays)}`,
+    [provider, primaryModel, shadowModel]
+  );
 
   return {
-    sample_count: row.n || 0,
-    successful_count: row.successes || 0,
-    avg_similarity: row.avg_similarity != null ? Math.round(row.avg_similarity * 1000) / 1000 : null,
-    avg_length_delta_pct: row.avg_length_delta_pct != null ? Math.round(row.avg_length_delta_pct * 10) / 10 : null,
+    sample_count: row?.n || 0,
+    successful_count: row?.successes || 0,
+    avg_similarity: row?.avg_similarity != null ? Math.round(row.avg_similarity * 1000) / 1000 : null,
+    avg_length_delta_pct: row?.avg_length_delta_pct != null ? Math.round(row.avg_length_delta_pct * 10) / 10 : null,
     total_actual_savings_usd:
-      row.total_actual_savings_usd != null ? Math.round(row.total_actual_savings_usd * 1e6) / 1e6 : 0,
+      row?.total_actual_savings_usd != null ? Math.round(row.total_actual_savings_usd * 1e6) / 1e6 : 0,
   };
 }
 
 // Every distinct pair tested, for a dashboard/API summary view.
 async function getShadowTestSummary({ days = 90 } = {}) {
-  const rows = db
-    .prepare(
-      `SELECT provider, primary_model, shadow_model,
-              COUNT(*) AS n,
-              SUM(CASE WHEN shadow_error IS NULL THEN 1 ELSE 0 END) AS successes,
-              AVG(CASE WHEN shadow_error IS NULL THEN similarity END) AS avg_similarity,
-              AVG(CASE WHEN shadow_error IS NULL THEN length_delta_pct END) AS avg_length_delta_pct,
-              SUM(CASE WHEN shadow_error IS NULL THEN primary_cost_usd - shadow_cost_usd ELSE 0 END) AS total_actual_savings_usd
-       FROM shadow_comparisons
-       WHERE created_at >= datetime('now', ?)
-       GROUP BY provider, primary_model, shadow_model
-       ORDER BY n DESC`
-    )
-    .all(`-${days} days`);
+  const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
+  const rows = await db.all(
+    `SELECT provider, primary_model, shadow_model,
+            COUNT(*) AS n,
+            SUM(CASE WHEN shadow_error IS NULL THEN 1 ELSE 0 END) AS successes,
+            AVG(CASE WHEN shadow_error IS NULL THEN similarity END) AS avg_similarity,
+            AVG(CASE WHEN shadow_error IS NULL THEN length_delta_pct END) AS avg_length_delta_pct,
+            SUM(CASE WHEN shadow_error IS NULL THEN primary_cost_usd - shadow_cost_usd ELSE 0 END) AS total_actual_savings_usd
+     FROM shadow_comparisons
+     WHERE created_at >= ${sinceDaysAgo(safeDays)}
+     GROUP BY provider, primary_model, shadow_model
+     ORDER BY n DESC`
+  );
 
   return rows.map((r) => ({
     provider: r.provider,
@@ -212,7 +233,7 @@ async function getShadowTestSummary({ days = 90 } = {}) {
 // Raw recent rows, including failures, for debugging/audit.
 async function getShadowComparisons({ limit = 50 } = {}) {
   const capped = Math.min(Math.max(Number(limit) || 50, 1), 500);
-  return db.prepare(`SELECT * FROM shadow_comparisons ORDER BY created_at DESC LIMIT ?`).all(capped);
+  return db.all(`SELECT * FROM shadow_comparisons ORDER BY created_at DESC LIMIT ?`, [capped]);
 }
 
 module.exports = {
