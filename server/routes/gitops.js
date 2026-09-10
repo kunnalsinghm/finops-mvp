@@ -1,4 +1,4 @@
-// routes/gitops.js - "FinOps as Code": sync budgets from finops.yaml
+﻿// routes/gitops.js - "FinOps as Code": sync budgets from finops.yaml
 //
 // Simple version of the blueprint's GitOps idea: no GitHub Action wiring yet
 // (that requires a repo + CI to call this endpoint on push), but the
@@ -8,21 +8,21 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const yaml = require("js-yaml");
-const db = require("../db");
+const db = require("../storage");
 const { requireAuth } = require("../auth");
 const { logAudit } = require("../audit");
 
 const router = express.Router();
 const CONFIG_PATH = path.join(__dirname, "..", "..", "finops.yaml");
 
-function syncFromFile() {
+async function syncFromFile() {
   if (!fs.existsSync(CONFIG_PATH)) {
     throw new Error(`finops.yaml not found at ${CONFIG_PATH}`);
   }
   const doc = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) || {};
   const desired = doc.budgets || [];
 
-  const existing = db.prepare("SELECT * FROM budgets").all();
+  const existing = await db.all("SELECT * FROM budgets");
   const desiredKeys = new Set(desired.map((b) => `${b.scope_type}:${b.scope_value}`));
 
   let created = 0, updated = 0, removed = 0;
@@ -34,16 +34,14 @@ function syncFromFile() {
     );
     if (match) {
       if (match.monthly_limit_usd !== b.monthly_limit_usd) {
-        db.prepare("UPDATE budgets SET monthly_limit_usd = ? WHERE id = ?").run(
-          b.monthly_limit_usd,
-          match.id
-        );
+        await db.run("UPDATE budgets SET monthly_limit_usd = ? WHERE id = ?", [b.monthly_limit_usd, match.id]);
         updated++;
       }
     } else {
-      db.prepare(
-        "INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)"
-      ).run(b.scope_type, b.scope_value, b.monthly_limit_usd);
+      await db.run(
+        "INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)",
+        [b.scope_type, b.scope_value, b.monthly_limit_usd]
+      );
       created++;
     }
   }
@@ -51,7 +49,7 @@ function syncFromFile() {
   // Remove budgets no longer present in the file (prevents drift)
   for (const e of existing) {
     if (!desiredKeys.has(`${e.scope_type}:${e.scope_value}`)) {
-      db.prepare("DELETE FROM budgets WHERE id = ?").run(e.id);
+      await db.run("DELETE FROM budgets WHERE id = ?", [e.id]);
       removed++;
     }
   }
@@ -59,9 +57,9 @@ function syncFromFile() {
   return { created, updated, removed, total: desired.length };
 }
 
-router.post("/sync", requireAuth("manage_budgets"), (req, res) => {
+router.post("/sync", requireAuth("manage_budgets"), async (req, res) => {
   try {
-    const result = syncFromFile();
+    const result = await syncFromFile();
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(400).json({ error: err.message });

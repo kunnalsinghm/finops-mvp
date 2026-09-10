@@ -66,9 +66,9 @@ function dayFloorExpr(column) {
 }
 
 // Whether a timestamp column falls on today's calendar date (UTC) - used
-// for daily-period boundaries (tokenQuota.js). Same date-only string
-// comparison approach as dayFloorExpr, so both sides of the equality
-// format identically regardless of backend.
+// for daily-period boundaries (tokenQuota.js, costs.js summary). Same
+// date-only string comparison approach as dayFloorExpr, so both sides of
+// the equality format identically regardless of backend.
 function todayClause(column) {
   assertSafeColumn(column);
   return dialect === "postgres"
@@ -91,6 +91,18 @@ function thisWeekClause(column) {
     : `strftime('%Y-%W', ${column}) = strftime('%Y-%W', 'now')`;
 }
 
+// Whether a timestamp column falls in the current calendar month - used for
+// monthly budget status (budgets.js) and budget alert aggregation
+// (alerts.js's month-scoped SUM). Same YYYY-MM formatting as yearMonthExpr,
+// just applied to both sides of an equality instead of used as a GROUP BY
+// key, so this and yearMonthExpr intentionally share the same date format.
+function thisMonthClause(column) {
+  assertSafeColumn(column);
+  return dialect === "postgres"
+    ? `TO_CHAR((${column})::timestamp, 'YYYY-MM') = TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM')`
+    : `strftime('%Y-%m', ${column}) = strftime('%Y-%m', 'now')`;
+}
+
 // Current timestamp - used as a column default in a handful of places where
 // the schema itself needs it inline rather than via DEFAULT (rare; most
 // defaults are handled directly in the per-dialect schema files instead).
@@ -98,4 +110,12 @@ function nowExpr() {
   return dialect === "postgres" ? "NOW()" : "datetime('now')";
 }
 
-module.exports = { sinceDaysAgo, yearMonthExpr, dayFloorExpr, todayClause, thisWeekClause, nowExpr };
+module.exports = {
+  sinceDaysAgo,
+  yearMonthExpr,
+  dayFloorExpr,
+  todayClause,
+  thisWeekClause,
+  thisMonthClause,
+  nowExpr,
+};
