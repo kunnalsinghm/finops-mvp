@@ -1,7 +1,7 @@
 ﻿// routes/auth.js - human user registration + login (session-based)
 
 const express = require("express");
-const db = require("../db");
+const db = require("../storage");
 const { requireAuth } = require("../auth");
 const { createUser, verifyLogin, createSession, destroySession, resetPassword } = require("../users");
 const { logAudit } = require("../audit");
@@ -20,8 +20,8 @@ router.post("/register", async (req, res) => {
     return res.status(400).json({ error: "password must be at least 8 characters" });
   }
 
-  const anyUsers = db.prepare("SELECT COUNT(*) AS n FROM users").get();
-  const anyKeys = db.prepare("SELECT COUNT(*) AS n FROM api_keys").get();
+  const anyUsers = await db.get("SELECT COUNT(*) AS n FROM users");
+  const anyKeys = await db.get("SELECT COUNT(*) AS n FROM api_keys");
   const isBootstrap = anyUsers.n === 0 && anyKeys.n === 0;
 
   if (!isBootstrap) {
