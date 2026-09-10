@@ -29,29 +29,30 @@
 //     advance, which no provider exposes before generating the response.
 //   - Periods are CALENDAR boundaries (today / this calendar week), the
 //     same convention budgets.js already uses for "this month" - not a
-//     rolling 24h/7d window.
+//     rolling 24h/7d window. See storage/dialectSql.js's todayClause /
+//     thisWeekClause for how each dialect expresses that boundary.
 
-const db = require("./db");
+const db = require("./storage");
+const { todayClause, thisWeekClause } = require("./storage/dialectSql");
 
 function periodClause(period) {
-  if (period === "daily") return `date(event_time) = date('now')`;
-  if (period === "weekly") return `strftime('%Y-%W', event_time) = strftime('%Y-%W', 'now')`;
+  if (period === "daily") return todayClause("event_time");
+  if (period === "weekly") return thisWeekClause("event_time");
   throw new Error(`Unknown period '${period}'`);
 }
 
 async function getQuotaRows(scopeType, scopeValue) {
   if (!scopeValue) return [];
-  return db.prepare("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ?").all(scopeType, scopeValue);
+  return db.all("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ?", [scopeType, scopeValue]);
 }
 
 async function tokensUsedInPeriod(column, scopeValue, period) {
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total
-       FROM usage_events
-       WHERE ${column} = ? AND ${periodClause(period)}`
-    )
-    .get(scopeValue);
+  const row = await db.get(
+    `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total
+     FROM usage_events
+     WHERE ${column} = ? AND ${periodClause(period)}`,
+    [scopeValue]
+  );
   return row.total;
 }
 
@@ -80,25 +81,30 @@ async function checkTokenQuota({ keyId, team }) {
   return { allowed: violations.length === 0, scope: resolvedScope, violations };
 }
 
+// RETURNING id: required for the Postgres backend to report the new row's
+// id via result.lastInsertRowid - a no-op for SQLite (see modelAllowlist.js
+// for the same pattern and why).
 async function addQuota({ scope_type, scope_value, period, token_limit }) {
-  const info = db
-    .prepare("INSERT INTO token_quotas (scope_type, scope_value, period, token_limit) VALUES (?, ?, ?, ?)")
-    .run(scope_type, scope_value, period, token_limit);
-  return info.lastInsertRowid;
+  const result = await db.run(
+    "INSERT INTO token_quotas (scope_type, scope_value, period, token_limit) VALUES (?, ?, ?, ?) RETURNING id",
+    [scope_type, scope_value, period, token_limit]
+  );
+  return result.lastInsertRowid;
 }
 
 async function removeQuota(id) {
-  const info = db.prepare("DELETE FROM token_quotas WHERE id = ?").run(id);
-  return info.changes > 0;
+  const result = await db.run("DELETE FROM token_quotas WHERE id = ?", [id]);
+  return result.changes > 0;
 }
 
 async function listQuotas({ scope_type, scope_value } = {}) {
   if (scope_type && scope_value) {
-    return db
-      .prepare("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC")
-      .all(scope_type, scope_value);
+    return db.all("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC", [
+      scope_type,
+      scope_value,
+    ]);
   }
-  return db.prepare("SELECT * FROM token_quotas ORDER BY id DESC").all();
+  return db.all("SELECT * FROM token_quotas ORDER BY id DESC");
 }
 
 module.exports = { checkTokenQuota, addQuota, removeQuota, listQuotas };

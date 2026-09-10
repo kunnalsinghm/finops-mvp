@@ -1,4 +1,4 @@
-// storage/dialectSql.js - the actual "SQL dialect" half of Phase B.
+﻿// storage/dialectSql.js - the actual "SQL dialect" half of Phase B.
 //
 // SQLite and Postgres have completely different date/string function names
 // (this is exactly the "30 SQLite-specific date expressions across 15
@@ -65,6 +65,32 @@ function dayFloorExpr(column) {
   return dialect === "postgres" ? `TO_CHAR((${column})::timestamp, 'YYYY-MM-DD')` : `date(${column})`;
 }
 
+// Whether a timestamp column falls on today's calendar date (UTC) - used
+// for daily-period boundaries (tokenQuota.js). Same date-only string
+// comparison approach as dayFloorExpr, so both sides of the equality
+// format identically regardless of backend.
+function todayClause(column) {
+  assertSafeColumn(column);
+  return dialect === "postgres"
+    ? `TO_CHAR((${column})::timestamp, 'YYYY-MM-DD') = TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD')`
+    : `date(${column}) = date('now')`;
+}
+
+// Whether a timestamp column falls in the current calendar week - used for
+// weekly-period boundaries (tokenQuota.js).
+// NOTE: SQLite's strftime('%W') (Monday-start week-of-year, 00-53) and
+// Postgres's IYYY-IW (ISO week, Monday-start, 01-53) can disagree by one
+// week in rare year-boundary edge cases. That's acceptable here - this only
+// needs to be internally consistent within whichever single backend is
+// actually running, not byte-identical across backends, since a deployment
+// only ever runs one at a time.
+function thisWeekClause(column) {
+  assertSafeColumn(column);
+  return dialect === "postgres"
+    ? `TO_CHAR((${column})::timestamp, 'IYYY-IW') = TO_CHAR(NOW() AT TIME ZONE 'UTC', 'IYYY-IW')`
+    : `strftime('%Y-%W', ${column}) = strftime('%Y-%W', 'now')`;
+}
+
 // Current timestamp - used as a column default in a handful of places where
 // the schema itself needs it inline rather than via DEFAULT (rare; most
 // defaults are handled directly in the per-dialect schema files instead).
@@ -72,4 +98,4 @@ function nowExpr() {
   return dialect === "postgres" ? "NOW()" : "datetime('now')";
 }
 
-module.exports = { sinceDaysAgo, yearMonthExpr, dayFloorExpr, nowExpr };
+module.exports = { sinceDaysAgo, yearMonthExpr, dayFloorExpr, todayClause, thisWeekClause, nowExpr };

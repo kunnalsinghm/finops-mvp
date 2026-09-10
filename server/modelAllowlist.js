@@ -22,13 +22,14 @@
 //     nothing to "allow" or "deny" there. Blocking ingest of an already-
 //     incurred cost wouldn't undo the spend, only hide it from the dashboard.
 
-const db = require("./db");
+const db = require("./storage");
 
 async function getEntriesForScope(scopeType, scopeValue) {
   if (!scopeValue) return [];
-  return db
-    .prepare("SELECT provider, model FROM model_allowlist WHERE scope_type = ? AND scope_value = ?")
-    .all(scopeType, scopeValue);
+  return db.all("SELECT provider, model FROM model_allowlist WHERE scope_type = ? AND scope_value = ?", [
+    scopeType,
+    scopeValue,
+  ]);
 }
 
 // Returns { allowed, scope, allowedModels }. scope is which list (if any)
@@ -50,25 +51,30 @@ async function checkModelAllowed({ keyId, team, provider, model }) {
   return { allowed: true, scope: null, allowedModels: [] };
 }
 
+// RETURNING id: required for the Postgres backend to report the new row's
+// id via result.lastInsertRowid - a no-op for SQLite, which populates
+// lastInsertRowid on its own regardless (see storage/sqlite.js).
 async function addAllowlistEntry({ scope_type, scope_value, provider, model }) {
-  const info = db
-    .prepare("INSERT INTO model_allowlist (scope_type, scope_value, provider, model) VALUES (?, ?, ?, ?)")
-    .run(scope_type, scope_value, provider, model);
-  return info.lastInsertRowid;
+  const result = await db.run(
+    "INSERT INTO model_allowlist (scope_type, scope_value, provider, model) VALUES (?, ?, ?, ?) RETURNING id",
+    [scope_type, scope_value, provider, model]
+  );
+  return result.lastInsertRowid;
 }
 
 async function removeAllowlistEntry(id) {
-  const info = db.prepare("DELETE FROM model_allowlist WHERE id = ?").run(id);
-  return info.changes > 0;
+  const result = await db.run("DELETE FROM model_allowlist WHERE id = ?", [id]);
+  return result.changes > 0;
 }
 
 async function listAllowlistEntries({ scope_type, scope_value } = {}) {
   if (scope_type && scope_value) {
-    return db
-      .prepare("SELECT * FROM model_allowlist WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC")
-      .all(scope_type, scope_value);
+    return db.all("SELECT * FROM model_allowlist WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC", [
+      scope_type,
+      scope_value,
+    ]);
   }
-  return db.prepare("SELECT * FROM model_allowlist ORDER BY id DESC").all();
+  return db.all("SELECT * FROM model_allowlist ORDER BY id DESC");
 }
 
 module.exports = { checkModelAllowed, addAllowlistEntry, removeAllowlistEntry, listAllowlistEntries };
