@@ -10,17 +10,9 @@
 // exactly the "shadow AI" signal the blueprint calls for, without needing
 // any paid integration.
 
-const db = require("./db");
+const db = require("./storage");
+const { dayFloorExpr } = require("./storage/dialectSql");
 const crypto = require("crypto");
-
-const insertRow = db.prepare(`
-  INSERT INTO reconciliation_rows (batch_id, day, provider, reported_cost_usd)
-  VALUES (?, ?, ?, ?)
-`);
-
-const deleteExisting = db.prepare(
-  `DELETE FROM reconciliation_rows WHERE day = ? AND provider = ?`
-);
 
 // Expects CSV text with header: date,provider,cost
 // (date format YYYY-MM-DD; provider lowercase matching our provider names)
@@ -31,6 +23,10 @@ const deleteExisting = db.prepare(
 // false shadow-spend gaps. If you need to import multiple partial exports
 // for the same day (e.g. two different cost centers), sum them into a
 // single row yourself before uploading.
+//
+// The delete-then-insert-per-row work all happens inside a single
+// storage.transaction() so it's genuinely atomic on both backends - see
+// storage/postgres.js's transaction() comment for why that matters.
 async function importCsv(csvText) {
   const batch_id = crypto.randomUUID();
   const lines = csvText.trim().split("\n").map((l) => l.trim()).filter(Boolean);
@@ -60,24 +56,25 @@ async function importCsv(csvText) {
   let replacedCount = 0;
   const seenDayProvider = new Set();
 
-  db.exec("BEGIN");
-  try {
+  await db.transaction(async (tx) => {
     for (const row of parsedRows) {
       const key = `${row.day}|${row.provider}`;
       if (!seenDayProvider.has(key)) {
-        const existing = db.prepare(`SELECT COUNT(*) AS n FROM reconciliation_rows WHERE day = ? AND provider = ?`).get(row.day, row.provider);
+        const existing = await tx.get(
+          `SELECT COUNT(*) AS n FROM reconciliation_rows WHERE day = ? AND provider = ?`,
+          [row.day, row.provider]
+        );
         if (existing.n > 0) replacedCount++;
-        deleteExisting.run(row.day, row.provider);
+        await tx.run(`DELETE FROM reconciliation_rows WHERE day = ? AND provider = ?`, [row.day, row.provider]);
         seenDayProvider.add(key);
       }
-      insertRow.run(batch_id, row.day, row.provider, row.cost);
+      await tx.run(
+        `INSERT INTO reconciliation_rows (batch_id, day, provider, reported_cost_usd) VALUES (?, ?, ?, ?)`,
+        [batch_id, row.day, row.provider, row.cost]
+      );
       rowCount++;
     }
-    db.exec("COMMIT");
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
+  });
 
   return { batch_id, rowCount, replacedDayProviderPairs: replacedCount };
 }
@@ -86,21 +83,17 @@ async function importCsv(csvText) {
 // Flags days where reported spend meaningfully exceeds what we tracked -
 // that gap is spend we never saw, i.e. shadow usage.
 async function getReconciliationReport({ thresholdPct = 10 } = {}) {
-  const reported = db
-    .prepare(
-      `SELECT day, provider, SUM(reported_cost_usd) AS reported_cost
-       FROM reconciliation_rows
-       GROUP BY day, provider`
-    )
-    .all();
+  const reported = await db.all(
+    `SELECT day, provider, SUM(reported_cost_usd) AS reported_cost
+     FROM reconciliation_rows
+     GROUP BY day, provider`
+  );
 
-  const tracked = db
-    .prepare(
-      `SELECT date(event_time) AS day, provider, SUM(cost_usd) AS tracked_cost
-       FROM usage_events
-       GROUP BY date(event_time), provider`
-    )
-    .all();
+  const tracked = await db.all(
+    `SELECT ${dayFloorExpr("event_time")} AS day, provider, SUM(cost_usd) AS tracked_cost
+     FROM usage_events
+     GROUP BY ${dayFloorExpr("event_time")}, provider`
+  );
 
   const trackedMap = {};
   for (const t of tracked) trackedMap[`${t.day}|${t.provider}`] = t.tracked_cost;

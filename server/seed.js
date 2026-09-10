@@ -1,7 +1,7 @@
-// seed.js - populates sample usage events so you can see the dashboard working immediately.
+﻿// seed.js - populates sample usage events so you can see the dashboard working immediately.
 // Run with: npm run seed
 
-const db = require("./db");
+const db = require("./storage");
 const { computeCost } = require("./pricing");
 
 const teams = ["growth", "platform", "research", null]; // null -> untagged, on purpose
@@ -14,24 +14,34 @@ const combos = [
   { provider: "bedrock", model: "titan-text-express" },
 ];
 
-const insert = db.prepare(`
-  INSERT INTO usage_events
-    (event_time, provider, model, team, environment, git_branch, user_id,
-     input_tokens, output_tokens, cost_usd, tagged, raw_json)
-  VALUES
-    (@event_time, @provider, @model, @team, @environment, @git_branch, @user_id,
-     @input_tokens, @output_tokens, @cost_usd, @tagged, @raw_json)
-`);
-
-function insertMany(rows) {
-  db.exec("BEGIN");
-  try {
-    for (const r of rows) insert.run(r);
-    db.exec("COMMIT");
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
+// Was named-param (@col) + db.exec("BEGIN"/"COMMIT") under the old sync
+// db.js. Now positional params inside a single storage.transaction() so
+// this stays atomic on both backends.
+async function insertMany(rows) {
+  await db.transaction(async (tx) => {
+    for (const r of rows) {
+      await tx.run(
+        `INSERT INTO usage_events
+           (event_time, provider, model, team, environment, git_branch, user_id,
+            input_tokens, output_tokens, cost_usd, tagged, raw_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          r.event_time,
+          r.provider,
+          r.model,
+          r.team,
+          r.environment,
+          r.git_branch,
+          r.user_id,
+          r.input_tokens,
+          r.output_tokens,
+          r.cost_usd,
+          r.tagged,
+          r.raw_json,
+        ]
+      );
+    }
+  });
 }
 
 function randDate(daysAgo) {
@@ -70,16 +80,20 @@ async function main() {
     }
   }
 
-  insertMany(rows);
+  await insertMany(rows);
 
   // Sample budgets
-  db.prepare("DELETE FROM budgets").run();
-  db.prepare("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)").run(
-    "team", "growth", 50
-  );
-  db.prepare("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)").run(
-    "team", "platform", 100
-  );
+  await db.run("DELETE FROM budgets");
+  await db.run("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)", [
+    "team",
+    "growth",
+    50,
+  ]);
+  await db.run("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?)", [
+    "team",
+    "platform",
+    100,
+  ]);
 
   console.log(`Seeded ${rows.length} usage events and 2 sample budgets.`);
 }

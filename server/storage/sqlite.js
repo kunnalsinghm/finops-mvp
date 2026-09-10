@@ -1,4 +1,4 @@
-// storage/sqlite.js - SQLite backend for the storage adapter interface.
+﻿// storage/sqlite.js - SQLite backend for the storage adapter interface.
 // Wraps node:sqlite's synchronous DatabaseSync in an async-shaped API so
 // route/module code can be written once against storage/index.js and work
 // unchanged regardless of which backend is actually configured.
@@ -40,4 +40,32 @@ async function exec(sql) {
   raw.exec(sql);
 }
 
-module.exports = { dialect, get, all, run, exec, raw, ready: Promise.resolve() };
+// Runs `fn` inside a single BEGIN/COMMIT/ROLLBACK block. SQLite only ever
+// has the one connection (raw), so unlike Postgres there's no risk of
+// separate calls landing on different connections - this exists mainly so
+// callers can write identical transaction() code against both backends.
+// `fn` receives a { get, all, run } object with the same signatures as the
+// module-level ones above; using those (not the outer get/all/run) inside
+// a transaction isn't required for correctness here, but keeps the calling
+// code backend-agnostic, matching the Postgres version where it IS required.
+async function transaction(fn) {
+  raw.exec("BEGIN");
+  try {
+    const tx = {
+      get: async (sql, params = []) => raw.prepare(sql).get(...params),
+      all: async (sql, params = []) => raw.prepare(sql).all(...params),
+      run: async (sql, params = []) => {
+        const info = raw.prepare(sql).run(...params);
+        return { lastInsertRowid: info.lastInsertRowid, changes: info.changes };
+      },
+    };
+    const result = await fn(tx);
+    raw.exec("COMMIT");
+    return result;
+  } catch (err) {
+    raw.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+module.exports = { dialect, get, all, run, exec, transaction, raw, ready: Promise.resolve() };
