@@ -1,4 +1,4 @@
-// users.js - human user accounts + session tokens (for dashboard login).
+﻿// users.js - human user accounts + session tokens (for dashboard login).
 //
 // Distinct from api_keys (used by services/the proxy for programmatic auth).
 // Passwords hashed with Node's built-in scrypt (no bcrypt dependency needed -
@@ -7,7 +7,7 @@
 // deployment) with a 24-hour expiry.
 
 const crypto = require("crypto");
-const db = require("./db");
+const db = require("./storage");
 
 const sessions = new Map(); // token -> { username, role, expiresAt }
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -19,13 +19,16 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
 
 async function createUser({ username, password, role = "viewer" }) {
   const { hash, salt } = hashPassword(password);
-  db.prepare(
-    "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)"
-  ).run(username, hash, salt, role);
+  await db.run("INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)", [
+    username,
+    hash,
+    salt,
+    role,
+  ]);
 }
 
 async function verifyLogin(username, password) {
-  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+  const user = await db.get("SELECT * FROM users WHERE username = ?", [username]);
   if (!user) return null;
   const { hash } = hashPassword(password, user.salt);
   // Constant-time comparison to avoid timing attacks
@@ -64,10 +67,10 @@ function destroySession(token) {
 // with the user out of band. All existing sessions for that user are
 // invalidated so a compromised session doesn't survive the reset.
 async function resetPassword(username, newPassword) {
-  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+  const user = await db.get("SELECT * FROM users WHERE username = ?", [username]);
   if (!user) throw new Error("User not found");
   const { hash, salt } = hashPassword(newPassword);
-  db.prepare("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?").run(hash, salt, username);
+  await db.run("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?", [hash, salt, username]);
 
   for (const [token, session] of sessions.entries()) {
     if (session.username === username) sessions.delete(token);
