@@ -6,7 +6,15 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 
+// Kept for now: several route files (pricing, recommendations, auth, sso,
+// reconcile, audit, cache, semanticCache, data, backup, shadowTest,
+// modelAllowlist, tokenQuota) have not yet been migrated off this old sync
+// SQLite module - they require("../db") directly, and that requires this
+// file to still exist and initialize correctly. Safe to remove only once
+// every route file is confirmed migrated to ./storage.
 require("./db");
+
+const storage = require("./storage");
 const logger = require("./logger");
 const { runBackup } = require("./backup");
 
@@ -85,17 +93,33 @@ app.use("/api/token-quotas", tokenQuotaRoute);
 
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
-app.listen(PORT, HOST, () => {
-  logger.info(`FinOps platform running at http://${HOST}:${PORT}`);
-  console.log(`Dashboard:    http://${HOST}:${PORT}`);
-  if (HOST === "0.0.0.0") {
-    logger.warn(
-      "FINOPS_HOST=0.0.0.0 - this server is reachable from other devices on your network (LAN, port-forward, tunnel), not just this machine."
-    );
-    console.warn(
-      "[WARN] Server bound to 0.0.0.0 - reachable beyond localhost. Unset FINOPS_HOST (or set it to 127.0.0.1) to restrict access to this machine only."
-    );
-  }
+// storage.ready is a no-op resolved Promise on SQLite (schema init there is
+// synchronous, at require time), but genuinely async on Postgres (schema
+// creation is a real network round-trip via pool.query()). Awaiting it here
+// closes the exact race the earlier migration work flagged: without this,
+// the server could start accepting requests before the Postgres schema
+// finished being created, and the first request(s) would hit tables that
+// don't exist yet.
+async function start() {
+  await storage.ready;
+
+  app.listen(PORT, HOST, () => {
+    logger.info(`FinOps platform running at http://${HOST}:${PORT}`);
+    console.log(`Dashboard:    http://${HOST}:${PORT}`);
+    if (HOST === "0.0.0.0") {
+      logger.warn(
+        "FINOPS_HOST=0.0.0.0 - this server is reachable from other devices on your network (LAN, port-forward, tunnel), not just this machine."
+      );
+      console.warn(
+        "[WARN] Server bound to 0.0.0.0 - reachable beyond localhost. Unset FINOPS_HOST (or set it to 127.0.0.1) to restrict access to this machine only."
+      );
+    }
+  });
+}
+
+start().catch((err) => {
+  logger.error("Failed to start server", { error: err.message, stack: err.stack });
+  process.exit(1);
 });
 
 process.on("uncaughtException", (err) => {
