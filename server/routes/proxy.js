@@ -12,7 +12,8 @@
 // buffering); usage parsing happens on our copy of the same bytes in parallel.
 
 const express = require("express");
-const db = require("../db");
+const db = require("../storage");
+const { yearMonthExpr } = require("../storage/dialectSql");
 const { computeCost } = require("../pricing");
 const { requireAuth } = require("../auth");
 const {
@@ -52,14 +53,31 @@ const PROVIDER_ENDPOINTS = {
   },
 };
 
-const insertEvent = db.prepare(`
-  INSERT INTO usage_events
-    (event_time, provider, model, team, environment, git_branch, user_id,
-     input_tokens, output_tokens, cost_usd, tagged, raw_json)
-  VALUES
-    (@event_time, @provider, @model, @team, @environment, @git_branch, @user_id,
-     @input_tokens, @output_tokens, @cost_usd, @tagged, @raw_json)
-`);
+// Was a db.prepare(...) statement with named (@col) params under the old
+// sync db.js. Positional params + await, same pattern used everywhere else
+// in this migration - see ingest.js for the identical helper.
+async function insertUsageEvent(row) {
+  await db.run(
+    `INSERT INTO usage_events
+       (event_time, provider, model, team, environment, git_branch, user_id,
+        input_tokens, output_tokens, cost_usd, tagged, raw_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      row.event_time,
+      row.provider,
+      row.model,
+      row.team,
+      row.environment,
+      row.git_branch,
+      row.user_id,
+      row.input_tokens,
+      row.output_tokens,
+      row.cost_usd,
+      row.tagged,
+      row.raw_json,
+    ]
+  );
+}
 
 async function logUsageEvent({ providerName, effectiveModel, team, environment, gitBranch, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings }) {
   const { cost_usd } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
@@ -68,7 +86,7 @@ async function logUsageEvent({ providerName, effectiveModel, team, environment, 
   // against the prior baseline, not one diluted by the event being checked.
   await checkAnomaly({ provider: providerName, model: effectiveModel, cost_usd: cost_usd ?? 0, team });
 
-  insertEvent.run({
+  await insertUsageEvent({
     event_time: new Date().toISOString(),
     provider: providerName,
     model: effectiveModel,
@@ -204,12 +222,13 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   }
 
   if (team) {
-    const budget = db.prepare("SELECT * FROM budgets WHERE scope_type = 'team' AND scope_value = ?").get(team);
+    const budget = await db.get("SELECT * FROM budgets WHERE scope_type = 'team' AND scope_value = ?", [team]);
     if (budget) {
       const month = new Date().toISOString().slice(0, 7);
-      const spend = db
-        .prepare(`SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events WHERE team = ? AND strftime('%Y-%m', event_time) = ?`)
-        .get(team, month);
+      const spend = await db.get(
+        `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events WHERE team = ? AND ${yearMonthExpr("event_time")} = ?`,
+        [team, month]
+      );
       if (spend.spend >= budget.monthly_limit_usd) {
         const fallback = getFallback(providerName, requestedModel);
         if (fallback) {
@@ -326,7 +345,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     if (cachedResponse) {
       const { input_tokens, output_tokens } = endpoint.extractUsage(cachedResponse);
       const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
-      insertEvent.run({
+      await insertUsageEvent({
         event_time: new Date().toISOString(),
         provider: providerName,
         model: effectiveModel,
@@ -354,7 +373,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     if (match) {
       const { input_tokens, output_tokens } = endpoint.extractUsage(match.value);
       const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
-      insertEvent.run({
+      await insertUsageEvent({
         event_time: new Date().toISOString(),
         provider: providerName,
         model: effectiveModel,

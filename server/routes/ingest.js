@@ -6,7 +6,7 @@
 // in an "untagged spend" view rather than silently vanishing or breaking traffic.
 
 const express = require("express");
-const db = require("../db");
+const db = require("../storage");
 const { computeCost } = require("../pricing");
 const { requireAuth } = require("../auth");
 const { checkRateLimit } = require("../governance");
@@ -17,14 +17,31 @@ const { detectPromptInjection } = require("../promptInjection");
 
 const router = express.Router();
 
-const insertEvent = db.prepare(`
-  INSERT INTO usage_events
-    (event_time, provider, model, team, environment, git_branch, user_id,
-     input_tokens, output_tokens, cost_usd, tagged, raw_json)
-  VALUES
-    (@event_time, @provider, @model, @team, @environment, @git_branch, @user_id,
-     @input_tokens, @output_tokens, @cost_usd, @tagged, @raw_json)
-`);
+// Was a db.prepare(...) statement with named (@col) params under the old
+// sync db.js. Positional params + await, same pattern as every other
+// migrated insert in this codebase (see shadowTest.js/seed.js).
+async function insertUsageEvent(row) {
+  await db.run(
+    `INSERT INTO usage_events
+       (event_time, provider, model, team, environment, git_branch, user_id,
+        input_tokens, output_tokens, cost_usd, tagged, raw_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      row.event_time,
+      row.provider,
+      row.model,
+      row.team,
+      row.environment,
+      row.git_branch,
+      row.user_id,
+      row.input_tokens,
+      row.output_tokens,
+      row.cost_usd,
+      row.tagged,
+      row.raw_json,
+    ]
+  );
+}
 
 // Same governance rate limiter used by the proxy - the ingest webhook is
 // just as capable of being flooded (by a bug, a misconfigured retry loop,
@@ -115,7 +132,7 @@ router.post("/", requireAuth("write"), async (req, res) => {
   // so the outlier itself doesn't dilute the average it's being compared to.
   const anomaly = await checkAnomaly({ provider, model, cost_usd: cost_usd ?? 0, team });
 
-  insertEvent.run(row);
+  await insertUsageEvent(row);
 
   res.status(201).json({
     ok: true,
