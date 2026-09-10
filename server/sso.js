@@ -1,4 +1,4 @@
-// sso.js - Generic OpenID Connect (OIDC) client, authorization code flow.
+﻿// sso.js - Generic OpenID Connect (OIDC) client, authorization code flow.
 //
 // IMPORTANT: this implements the OIDC mechanics correctly per spec, but it
 // CANNOT be fully tested without a real identity provider (Okta, Azure AD,
@@ -17,7 +17,7 @@
 
 const crypto = require("crypto");
 const { createUser, createSession } = require("./users");
-const db = require("./db");
+const db = require("./storage");
 
 const pendingStates = new Map(); // state -> { createdAt } (CSRF protection)
 
@@ -84,13 +84,13 @@ function validateState(state) {
 // Provision or find a local user record for an SSO-authenticated identity,
 // then issue a normal session token (same session system as password login).
 async function loginOrProvisionSsoUser(email) {
-  let user = db.prepare("SELECT * FROM users WHERE username = ?").get(email);
+  let user = await db.get("SELECT * FROM users WHERE username = ?", [email]);
   if (!user) {
     // First SSO login for this email - provision as viewer by default.
     // An admin can upgrade their role via PATCH /api/keys or a future
     // admin endpoint - auto-granting admin to any SSO login would be unsafe.
     await createUser({ username: email, password: crypto.randomBytes(24).toString("hex"), role: "viewer" });
-    user = db.prepare("SELECT * FROM users WHERE username = ?").get(email);
+    user = await db.get("SELECT * FROM users WHERE username = ?", [email]);
   }
   return createSession(user);
 }
