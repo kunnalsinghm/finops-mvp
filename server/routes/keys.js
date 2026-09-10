@@ -1,8 +1,8 @@
-// routes/keys.js - create/list/quarantine/revoke API keys
+﻿// routes/keys.js - create/list/quarantine/revoke API keys
 
 const express = require("express");
 const crypto = require("crypto");
-const db = require("../db");
+const db = require("../storage");
 const { requireAuth } = require("../auth");
 const { quarantineKey, approveKey } = require("../governance");
 const { logAudit } = require("../audit");
@@ -12,23 +12,26 @@ function generateKey() {
   return "fk_" + crypto.randomBytes(20).toString("hex");
 }
 
-router.get("/", requireAuth("read"), (req, res) => {
-  const rows = db
-    .prepare("SELECT id, key_id, label, role, team, status, quarantine_reason, created_at FROM api_keys ORDER BY id DESC")
-    .all();
+router.get("/", requireAuth("read"), async (req, res) => {
+  const rows = await db.all(
+    "SELECT id, key_id, label, role, team, status, quarantine_reason, created_at FROM api_keys ORDER BY id DESC"
+  );
   res.json(rows);
 });
 
-router.post("/", requireAuth("manage_keys"), (req, res) => {
+router.post("/", requireAuth("manage_keys"), async (req, res) => {
   const { label, role = "developer", team } = req.body || {};
   if (!label) return res.status(400).json({ error: "label is required" });
   if (!["admin", "budget-manager", "developer", "viewer"].includes(role)) {
     return res.status(400).json({ error: "invalid role" });
   }
   const key_id = generateKey();
-  db.prepare(
-    "INSERT INTO api_keys (key_id, label, role, team) VALUES (?, ?, ?, ?)"
-  ).run(key_id, label, role, team || null);
+  await db.run("INSERT INTO api_keys (key_id, label, role, team) VALUES (?, ?, ?, ?)", [
+    key_id,
+    label,
+    role,
+    team || null,
+  ]);
 
   // key_id is only ever shown here at creation time - treat it like a password
   res.status(201).json({ key_id, label, role, team });
@@ -45,8 +48,8 @@ router.post("/:keyId/approve", requireAuth("approve_quarantine"), async (req, re
   res.json({ ok: true });
 });
 
-router.post("/:keyId/revoke", requireAuth("manage_keys"), (req, res) => {
-  db.prepare("UPDATE api_keys SET status = 'revoked' WHERE key_id = ?").run(req.params.keyId);
+router.post("/:keyId/revoke", requireAuth("manage_keys"), async (req, res) => {
+  await db.run("UPDATE api_keys SET status = 'revoked' WHERE key_id = ?", [req.params.keyId]);
   res.json({ ok: true });
 });
 
