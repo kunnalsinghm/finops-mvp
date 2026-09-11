@@ -6,14 +6,6 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 
-// Kept for now: several route files (pricing, recommendations, auth, sso,
-// reconcile, audit, cache, semanticCache, data, backup, shadowTest,
-// modelAllowlist, tokenQuota) have not yet been migrated off this old sync
-// SQLite module - they require("../db") directly, and that requires this
-// file to still exist and initialize correctly. Safe to remove only once
-// every route file is confirmed migrated to ./storage.
-require("./db");
-
 const storage = require("./storage");
 const logger = require("./logger");
 const { runBackup } = require("./backup");
