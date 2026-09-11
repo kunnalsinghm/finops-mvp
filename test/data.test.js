@@ -7,22 +7,48 @@ const fs = require("node:fs");
 process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-data-${process.pid}.db`);
 const dbPath = process.env.FINOPS_DB_PATH;
 
-test.after(() => {
-  try { db.close(); } catch {}
+// Gives this test file its own disposable Postgres schema (when running
+// against Postgres) instead of sharing "public" with every other test
+// file - the same kind of isolation SQLite gets for free via the unique
+// file above. Only takes effect if FINOPS_DB_DRIVER=postgres is already
+// set in the environment; harmless no-op otherwise.
+const isPostgres = process.env.FINOPS_DB_DRIVER === "postgres";
+if (isPostgres) {
+  process.env.FINOPS_POSTGRES_SCHEMA = `test_data_${process.pid}`;
+}
+
+// legacyDb is ONLY used for the SQLite-specific .close() + temp-file
+// cleanup below - it must NOT be used to seed or read fixture data,
+// because it always talks to the old sync SQLite backend regardless of
+// FINOPS_DB_DRIVER. Seeding/reading test data goes through `storage`
+// instead, so it actually lands in whichever backend is under test.
+const legacyDb = require("../server/db");
+const storage = require("../server/storage");
+
+test.after(async () => {
+  if (isPostgres && storage.schemaName) {
+    // Drop the whole disposable schema so re-running this file doesn't
+    // collide with leftover rows/UNIQUE constraints from a prior run -
+    // the Postgres equivalent of deleting the SQLite temp file below.
+    try {
+      await storage.pool.query(`DROP SCHEMA IF EXISTS ${storage.schemaName} CASCADE`);
+    } catch (err) {
+      console.warn(`[data.test.js] Failed to drop test schema: ${err.message}`);
+    }
+    await storage.pool.end();
+  }
+  try { legacyDb.close(); } catch {}
   for (const suffix of ["", "-shm", "-wal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch {}
   }
 });
 
-const db = require("../server/db");
 const { exportUsageEvents, purgeUsageEvents, getUsageEventsRaw, csvEscape } = require("../server/data");
 
-function insertEvent(event_time, provider = "openai", model = "gpt-4o", cost_usd = 1.23) {
-  db.prepare(`INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`).run(
-    event_time,
-    provider,
-    model,
-    cost_usd
+async function insertEvent(event_time, provider = "openai", model = "gpt-4o", cost_usd = 1.23) {
+  await storage.run(
+    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`,
+    [event_time, provider, model, cost_usd]
   );
 }
 
@@ -43,9 +69,9 @@ test("csvEscape returns an empty string for null/undefined", () => {
 });
 
 test("getUsageEventsRaw filters by from/to and orders ascending", async () => {
-  insertEvent("2026-01-01T00:00:00.000Z");
-  insertEvent("2026-01-05T00:00:00.000Z");
-  insertEvent("2026-01-10T00:00:00.000Z");
+  await insertEvent("2026-01-01T00:00:00.000Z");
+  await insertEvent("2026-01-05T00:00:00.000Z");
+  await insertEvent("2026-01-10T00:00:00.000Z");
 
   const rows = await getUsageEventsRaw({ from: "2026-01-02T00:00:00.000Z", to: "2026-01-09T00:00:00.000Z" });
   assert.equal(rows.length, 1);
@@ -84,8 +110,8 @@ test("purgeUsageEvents requires an explicit cutoff date", async () => {
 });
 
 test("purgeUsageEvents deletes only events older than the cutoff and returns the count deleted", async () => {
-  insertEvent("2020-01-01T00:00:00.000Z");
-  insertEvent("2020-01-02T00:00:00.000Z");
+  await insertEvent("2020-01-01T00:00:00.000Z");
+  await insertEvent("2020-01-02T00:00:00.000Z");
 
   const before = await getUsageEventsRaw({});
   const oldCount = before.filter((r) => r.event_time < "2021-01-01T00:00:00.000Z").length;
