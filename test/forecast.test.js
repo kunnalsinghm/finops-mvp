@@ -4,33 +4,69 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Sweep any leftover .tmp-forecast-*.db* files from a PREVIOUS run of this
+// file that never got a chance to clean up (e.g. Ctrl+C, a crashed
+// process, a killed terminal) - test.after() below only runs on a normal
+// exit, so an interrupted run leaves orphaned temp DB files behind
+// indefinitely otherwise. Doing this at startup, not just teardown, means
+// the next run cleans up after the last one even if that one never got the
+// chance to clean up after itself.
+for (const f of fs.readdirSync(__dirname)) {
+  if (/^\.tmp-forecast-\d+\.db/.test(f)) {
+    try { fs.unlinkSync(path.join(__dirname, f)); } catch {}
+  }
+}
+
 process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-forecast-${process.pid}.db`);
 const dbPath = process.env.FINOPS_DB_PATH;
 
-test.after(() => {
-  try { db.close(); } catch {}
+// Gives this test file its own disposable Postgres schema (when running
+// against Postgres) instead of sharing "public" with every other test
+// file - the same kind of isolation SQLite gets for free via the unique
+// file above. Only takes effect if FINOPS_DB_DRIVER=postgres is already
+// set in the environment; harmless no-op otherwise.
+const isPostgres = process.env.FINOPS_DB_DRIVER === "postgres";
+if (isPostgres) {
+  process.env.FINOPS_POSTGRES_SCHEMA = `test_forecast_${process.pid}`;
+}
+
+// legacyDb is ONLY used for the SQLite-specific .close() + temp-file
+// cleanup below - it must NOT be used to seed or read fixture data,
+// because it always talks to the old sync SQLite backend regardless of
+// FINOPS_DB_DRIVER. Seeding/reading test data goes through `storage`
+// instead, so it actually lands in whichever backend is under test.
+const legacyDb = require("../server/db");
+const storage = require("../server/storage");
+
+test.after(async () => {
+  if (isPostgres && storage.schemaName) {
+    try {
+      await storage.pool.query(`DROP SCHEMA IF EXISTS ${storage.schemaName} CASCADE`);
+    } catch (err) {
+      console.warn(`[forecast.test.js] Failed to drop test schema: ${err.message}`);
+    }
+    await storage.pool.end();
+  }
+  try { legacyDb.close(); } catch {}
   for (const suffix of ["", "-shm", "-wal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch {}
   }
 });
 
-const db = require("../server/db");
 const { forecastSpend, getDailySpend, MIN_DAYS_FOR_FORECAST } = require("../server/forecast");
 
-const insertEvent = db.prepare(`
-  INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged)
-  VALUES (?, 'openai', 'gpt-4o', ?, 1)
-`);
-
-function seedDay(daysAgo, cost) {
+async function seedDay(daysAgo, cost) {
   const d = new Date();
   d.setDate(d.getDate() - daysAgo);
-  insertEvent.run(d.toISOString(), cost);
+  await storage.run(
+    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, 'openai', 'gpt-4o', ?, 1)`,
+    [d.toISOString(), cost]
+  );
 }
 
 test("forecastSpend returns null with fewer than MIN_DAYS_FOR_FORECAST days of data", async () => {
-  seedDay(0, 10);
-  seedDay(1, 12);
+  await seedDay(0, 10);
+  await seedDay(1, 12);
   // Only 2 distinct days - below the minimum of 3
   const result = await forecastSpend({ lookbackDays: 7 });
   assert.equal(result, null);
@@ -40,7 +76,7 @@ test("forecastSpend computes a simple moving average once enough days exist", as
   // Fresh DB slate isn't practical mid-file (other tests share state), so
   // seed a distinctly-dated cluster of days here and use a short lookback
   // that only captures these.
-  seedDay(2, 30); // total so far across this file: day0=10, day1=12, day2=30
+  await seedDay(2, 30); // total so far across this file: day0=10, day1=12, day2=30
   // days_with_data = 3, total = 52, avg = 52/3 = 17.333...
   const result = await forecastSpend({ lookbackDays: 7, horizonDays: 30 });
   assert.ok(result, "expected a forecast once 3+ days of data exist");
@@ -52,7 +88,7 @@ test("forecastSpend computes a simple moving average once enough days exist", as
 });
 
 test("forecastSpend respects the lookback window - older days don't count", async () => {
-  seedDay(20, 999); // way outside a 7-day lookback
+  await seedDay(20, 999); // way outside a 7-day lookback
   const result = await forecastSpend({ lookbackDays: 7, horizonDays: 30 });
   assert.ok(result);
   assert.equal(result.days_with_data, 3, "the 20-days-ago event should not be included in a 7-day lookback");

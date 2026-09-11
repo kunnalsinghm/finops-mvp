@@ -4,6 +4,18 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Sweep any leftover .tmp-data-*.db* files from a PREVIOUS run of this file
+// that never got a chance to clean up (e.g. Ctrl+C, a crashed process, a
+// killed terminal) - test.after() below only runs on a normal exit, so an
+// interrupted run leaves orphaned temp DB files behind indefinitely
+// otherwise. Doing this at startup, not just teardown, means the next run
+// cleans up after the last one even if that one never got the chance to.
+for (const f of fs.readdirSync(__dirname)) {
+  if (/^\.tmp-data-\d+\.db/.test(f)) {
+    try { fs.unlinkSync(path.join(__dirname, f)); } catch {}
+  }
+}
+
 process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-data-${process.pid}.db`);
 const dbPath = process.env.FINOPS_DB_PATH;
 
@@ -27,9 +39,6 @@ const storage = require("../server/storage");
 
 test.after(async () => {
   if (isPostgres && storage.schemaName) {
-    // Drop the whole disposable schema so re-running this file doesn't
-    // collide with leftover rows/UNIQUE constraints from a prior run -
-    // the Postgres equivalent of deleting the SQLite temp file below.
     try {
       await storage.pool.query(`DROP SCHEMA IF EXISTS ${storage.schemaName} CASCADE`);
     } catch (err) {
@@ -117,8 +126,6 @@ test("purgeUsageEvents deletes only events older than the cutoff and returns the
   const oldCount = before.filter((r) => r.event_time < "2021-01-01T00:00:00.000Z").length;
   assert.ok(oldCount >= 2);
 
-  // Also implicitly confirms logAudit() didn't throw - purgeUsageEvents awaits
-  // it before returning, so a broken audit call would surface right here.
   const deleted = await purgeUsageEvents("2021-01-01T00:00:00.000Z", "test-actor");
   assert.equal(deleted, oldCount);
 
