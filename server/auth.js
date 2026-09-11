@@ -6,7 +6,7 @@
 // deployment, API keys + roles + optional session login cover real access
 // control needs without external dependencies.
 
-const db = require("./db");
+const db = require("./storage");
 const { getSession } = require("./users");
 const logger = require("./logger");
 
@@ -49,8 +49,8 @@ function requireAuth(permission) {
 
     // Allow local/dev usage without a key ONLY if no keys AND no users exist yet
     // (fresh install bootstrap) - once you create your first key or user, auth is enforced.
-    const anyKeys = db.prepare("SELECT COUNT(*) AS n FROM api_keys").get();
-    const anyUsers = db.prepare("SELECT COUNT(*) AS n FROM users").get();
+    const anyKeys = await db.get("SELECT COUNT(*) AS n FROM api_keys");
+    const anyUsers = await db.get("SELECT COUNT(*) AS n FROM users");
     if (anyKeys.n === 0 && anyUsers.n === 0) {
       if (!warnedBootstrapAccess) {
         warnedBootstrapAccess = true;
@@ -66,7 +66,7 @@ function requireAuth(permission) {
       return res.status(401).json({ error: "Missing X-API-Key or X-Session-Token header" });
     }
 
-    const row = db.prepare("SELECT * FROM api_keys WHERE key_id = ?").get(keyId);
+    const row = await db.get("SELECT * FROM api_keys WHERE key_id = ?", [keyId]);
     if (!row) {
       return res.status(401).json({ error: "Invalid API key" });
     }

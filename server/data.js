@@ -1,4 +1,4 @@
-// data.js - export and retention controls for usage_events.
+﻿// data.js - export and retention controls for usage_events.
 //
 // Two things missing from the original build that any real deployment
 // needs: a way to get data OUT (for BI tools, backups, or compliance
@@ -6,7 +6,7 @@
 // doesn't grow forever and so you have a real answer if asked "how long do
 // you keep this data").
 
-const db = require("./db");
+const db = require("./storage");
 const { logAudit } = require("./audit");
 
 async function getUsageEventsRaw({ from, to } = {}) {
@@ -21,7 +21,7 @@ async function getUsageEventsRaw({ from, to } = {}) {
     params.push(to);
   }
   query += " ORDER BY event_time ASC";
-  return db.prepare(query).all(...params);
+  return db.all(query, params);
 }
 
 async function exportUsageEvents({ from, to, format = "json" } = {}) {
@@ -55,9 +55,9 @@ function csvEscape(value) {
 // that quietly deletes data nobody meant to lose.
 async function purgeUsageEvents(beforeIsoDate, actor) {
   if (!beforeIsoDate) throw new Error("beforeIsoDate is required");
-  const countRow = db.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE event_time < ?").get(beforeIsoDate);
+  const countRow = await db.get("SELECT COUNT(*) AS n FROM usage_events WHERE event_time < ?", [beforeIsoDate]);
   const count = countRow.n;
-  db.prepare("DELETE FROM usage_events WHERE event_time < ?").run(beforeIsoDate);
+  await db.run("DELETE FROM usage_events WHERE event_time < ?", [beforeIsoDate]);
   await logAudit(actor, "data.purge", null, { before: beforeIsoDate, rowsDeleted: count });
   return count;
 }
