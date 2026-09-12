@@ -4,17 +4,50 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Sweep any leftover .tmp-users-*.db* files from a PREVIOUS run of this
+// file that never got a chance to clean up (e.g. Ctrl+C, a crashed
+// process, a killed terminal) - test.after() below only runs on a normal
+// exit, so an interrupted run leaves orphaned temp DB files behind
+// indefinitely otherwise. Doing this at startup, not just teardown, means
+// the next run cleans up after the last one even if that one never got the
+// chance to.
+for (const f of fs.readdirSync(__dirname)) {
+  if (/^\.tmp-users-\d+\.db/.test(f)) {
+    try { fs.unlinkSync(path.join(__dirname, f)); } catch {}
+  }
+}
+
 process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-users-${process.pid}.db`);
 const dbPath = process.env.FINOPS_DB_PATH;
 
-test.after(() => {
+// Gives this test file its own disposable Postgres schema (when running
+// against Postgres) instead of sharing "public" with every other test
+// file - the same kind of isolation SQLite gets for free via the unique
+// file above. Only takes effect if FINOPS_DB_DRIVER=postgres is already
+// set in the environment; harmless no-op otherwise.
+const isPostgres = process.env.FINOPS_DB_DRIVER === "postgres";
+if (isPostgres) {
+  process.env.FINOPS_POSTGRES_SCHEMA = `test_users_${process.pid}`;
+}
+
+const db = require("../server/db");
+const storage = require("../server/storage");
+
+test.after(async () => {
+  if (isPostgres && storage.schemaName) {
+    try {
+      await storage.pool.query(`DROP SCHEMA IF EXISTS ${storage.schemaName} CASCADE`);
+    } catch (err) {
+      console.warn(`[users.test.js] Failed to drop test schema: ${err.message}`);
+    }
+    await storage.pool.end();
+  }
   try { db.close(); } catch {}
   for (const suffix of ["", "-shm", "-wal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch {}
   }
 });
 
-const db = require("../server/db");
 const {
   createUser,
   verifyLogin,
@@ -26,7 +59,7 @@ const {
 
 test("createUser inserts a new user with a hashed password, not plaintext", async () => {
   await createUser({ username: "alice", password: "correct-horse-battery", role: "viewer" });
-  const row = db.prepare("SELECT * FROM users WHERE username = ?").get("alice");
+  const row = await storage.get("SELECT * FROM users WHERE username = ?", ["alice"]);
   assert.ok(row, "expected the user row to exist");
   assert.equal(row.role, "viewer");
   assert.notEqual(row.password_hash, "correct-horse-battery");
@@ -35,7 +68,7 @@ test("createUser inserts a new user with a hashed password, not plaintext", asyn
 
 test("createUser defaults to the viewer role when none is given", async () => {
   await createUser({ username: "bob", password: "whatever123" });
-  const row = db.prepare("SELECT * FROM users WHERE username = ?").get("bob");
+  const row = await storage.get("SELECT * FROM users WHERE username = ?", ["bob"]);
   assert.equal(row.role, "viewer");
 });
 
