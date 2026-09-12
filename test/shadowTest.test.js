@@ -4,11 +4,44 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Sweep any leftover .tmp-shadowTest-*.db* files from a PREVIOUS run of
+// this file that never got a chance to clean up (e.g. Ctrl+C, a crashed
+// process, a killed terminal) - test.after() below only runs on a normal
+// exit, so an interrupted run leaves orphaned temp DB files behind
+// indefinitely otherwise. Doing this at startup, not just teardown, means
+// the next run cleans up after the last one even if that one never got the
+// chance to.
+for (const f of fs.readdirSync(__dirname)) {
+  if (/^\.tmp-shadowTest-\d+\.db/.test(f)) {
+    try { fs.unlinkSync(path.join(__dirname, f)); } catch {}
+  }
+}
+
 process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-shadowTest-${process.pid}.db`);
 const dbPath = process.env.FINOPS_DB_PATH;
 
+// Gives this test file its own disposable Postgres schema (when running
+// against Postgres) instead of sharing "public" with every other test
+// file - the same kind of isolation SQLite gets for free via the unique
+// file above. Only takes effect if FINOPS_DB_DRIVER=postgres is already
+// set in the environment; harmless no-op otherwise.
+const isPostgres = process.env.FINOPS_DB_DRIVER === "postgres";
+if (isPostgres) {
+  process.env.FINOPS_POSTGRES_SCHEMA = `test_shadowtest_${process.pid}`;
+}
+
 let db;
-test.after(() => {
+const storage = require("../server/storage");
+
+test.after(async () => {
+  if (isPostgres && storage.schemaName) {
+    try {
+      await storage.pool.query(`DROP SCHEMA IF EXISTS ${storage.schemaName} CASCADE`);
+    } catch (err) {
+      console.warn(`[shadowTest.test.js] Failed to drop test schema: ${err.message}`);
+    }
+    await storage.pool.end();
+  }
   try { db.close(); } catch {}
   for (const suffix of ["", "-shm", "-wal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch {}
