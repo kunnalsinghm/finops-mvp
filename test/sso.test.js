@@ -4,8 +4,30 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Sweep any leftover .tmp-sso-*.db* files from a PREVIOUS run of this file
+// that never got a chance to clean up (e.g. Ctrl+C, a crashed process, a
+// killed terminal) - test.after() below only runs on a normal exit, so an
+// interrupted run leaves orphaned temp DB files behind indefinitely
+// otherwise. Doing this at startup, not just teardown, means the next run
+// cleans up after the last one even if that one never got the chance to.
+for (const f of fs.readdirSync(__dirname)) {
+  if (/^\.tmp-sso-\d+\.db/.test(f)) {
+    try { fs.unlinkSync(path.join(__dirname, f)); } catch {}
+  }
+}
+
 process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-sso-${process.pid}.db`);
 const dbPath = process.env.FINOPS_DB_PATH;
+
+// Gives this test file its own disposable Postgres schema (when running
+// against Postgres) instead of sharing "public" with every other test
+// file - the same kind of isolation SQLite gets for free via the unique
+// file above. Only takes effect if FINOPS_DB_DRIVER=postgres is already
+// set in the environment; harmless no-op otherwise.
+const isPostgres = process.env.FINOPS_DB_DRIVER === "postgres";
+if (isPostgres) {
+  process.env.FINOPS_POSTGRES_SCHEMA = `test_sso_${process.pid}`;
+}
 
 const ORIGINAL_ENV = {
   OIDC_ISSUER: process.env.OIDC_ISSUER,
@@ -18,7 +40,18 @@ process.env.OIDC_CLIENT_ID = "test-client-id";
 process.env.OIDC_CLIENT_SECRET = "test-client-secret";
 process.env.OIDC_REDIRECT_URI = "http://localhost:4000/api/sso/callback";
 
-test.after(() => {
+const db = require("../server/db");
+const storage = require("../server/storage");
+
+test.after(async () => {
+  if (isPostgres && storage.schemaName) {
+    try {
+      await storage.pool.query(`DROP SCHEMA IF EXISTS ${storage.schemaName} CASCADE`);
+    } catch (err) {
+      console.warn(`[sso.test.js] Failed to drop test schema: ${err.message}`);
+    }
+    await storage.pool.end();
+  }
   try { db.close(); } catch {}
   for (const suffix of ["", "-shm", "-wal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch {}
@@ -29,7 +62,6 @@ test.after(() => {
   }
 });
 
-const db = require("../server/db");
 const {
   isConfigured,
   getDiscoveryDocument,
@@ -142,7 +174,7 @@ test("loginOrProvisionSsoUser provisions a new viewer-role user on first SSO log
   const token = await loginOrProvisionSsoUser("newperson@example.test");
   assert.ok(token, "expected a session token to be returned");
 
-  const row = db.prepare("SELECT * FROM users WHERE username = ?").get("newperson@example.test");
+  const row = await storage.get("SELECT * FROM users WHERE username = ?", ["newperson@example.test"]);
   assert.ok(row, "expected a user row to be provisioned");
   assert.equal(row.role, "viewer");
 });
@@ -151,6 +183,6 @@ test("loginOrProvisionSsoUser reuses the existing user on a second login, not cr
   await loginOrProvisionSsoUser("repeat@example.test");
   await loginOrProvisionSsoUser("repeat@example.test");
 
-  const rows = db.prepare("SELECT * FROM users WHERE username = ?").all("repeat@example.test");
+  const rows = await storage.all("SELECT * FROM users WHERE username = ?", ["repeat@example.test"]);
   assert.equal(rows.length, 1, "expected exactly one user row, not a duplicate");
 });
