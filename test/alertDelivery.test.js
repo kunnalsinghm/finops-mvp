@@ -4,11 +4,57 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Sweep any leftover .tmp-alertDelivery-*.db* files from a PREVIOUS run of
+// this file that never got a chance to clean up (e.g. Ctrl+C, a crashed
+// process, a killed terminal) - test.after() below only runs on a normal
+// exit, so an interrupted run leaves orphaned temp DB files behind
+// indefinitely otherwise. Doing this at startup, not just teardown, means
+// the next run cleans up after the last one even if that one never got the
+// chance to.
+for (const f of fs.readdirSync(__dirname)) {
+  if (/^\.tmp-alertDelivery-\d+\.db/.test(f)) {
+    try { fs.unlinkSync(path.join(__dirname, f)); } catch {}
+  }
+}
+
 process.env.FINOPS_DB_PATH = path.join(__dirname, `.tmp-alertDelivery-${process.pid}.db`);
 const dbPath = process.env.FINOPS_DB_PATH;
 
+// Gives this test file its own disposable Postgres schema (when running
+// against Postgres) instead of sharing "public" with every other test
+// file - the same kind of isolation SQLite gets for free via the unique
+// file above. Only takes effect if FINOPS_DB_DRIVER=postgres is already
+// set in the environment; harmless no-op otherwise.
+const isPostgres = process.env.FINOPS_DB_DRIVER === "postgres";
+if (isPostgres) {
+  process.env.FINOPS_POSTGRES_SCHEMA = `test_alertdelivery_${process.pid}`;
+}
+
 let db;
-test.after(() => {
+const storage = require("../server/storage");
+
+test.after(async () => {
+  if (isPostgres && storage.schemaName) {
+    // storage.ready is a background schema-creation promise kicked off the
+    // moment ../server/storage was required above. Some tests in this file
+    // may never happen to await it internally before this teardown runs -
+    // without this explicit await, pool.end() below could run WHILE that
+    // background query is still in flight, producing "Cannot use a pool
+    // after calling end on the pool" as an unhandled rejection after the
+    // test already finished.
+    try {
+      await storage.ready;
+    } catch {
+      // If schema init itself failed, there's nothing further to await -
+      // proceed to drop/end below regardless.
+    }
+    try {
+      await storage.pool.query(`DROP SCHEMA IF EXISTS ${storage.schemaName} CASCADE`);
+    } catch (err) {
+      console.warn(`[alertDelivery.test.js] Failed to drop test schema: ${err.message}`);
+    }
+    await storage.pool.end();
+  }
   try { db.close(); } catch {}
   for (const suffix of ["", "-shm", "-wal"]) {
     try { fs.unlinkSync(dbPath + suffix); } catch {}
@@ -23,9 +69,9 @@ test("deliverAlert always logs locally even when no channels are configured", as
   delete require.cache[require.resolve("../server/alertDelivery")];
   const { deliverAlert } = require("../server/alertDelivery");
 
-  const before = db.prepare("SELECT COUNT(*) AS n FROM alerts_log").get().n;
+  const before = (await storage.get("SELECT COUNT(*) AS n FROM alerts_log")).n;
   await deliverAlert("test message", "budget");
-  const after = db.prepare("SELECT COUNT(*) AS n FROM alerts_log").get().n;
+  const after = (await storage.get("SELECT COUNT(*) AS n FROM alerts_log")).n;
 
   assert.equal(after, before + 1, "expected exactly one new alerts_log row");
 });
