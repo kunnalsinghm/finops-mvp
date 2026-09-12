@@ -27,6 +27,19 @@ const storage = require("../server/storage");
 
 test.after(async () => {
   if (isPostgres && storage.schemaName) {
+    // storage.ready is a background schema-creation promise kicked off the
+    // moment ../server/storage was required above. Some tests in this file
+    // may never happen to await it internally before this teardown runs -
+    // without this explicit await, pool.end() below could run WHILE that
+    // background query is still in flight, producing "Cannot use a pool
+    // after calling end on the pool" as an unhandled rejection after the
+    // test already finished.
+    try {
+      await storage.ready;
+    } catch {
+      // If schema init itself failed, there's nothing further to await -
+      // proceed to drop/end below regardless.
+    }
     // Drop the whole disposable schema so re-running this file doesn't
     // collide with leftover rows/UNIQUE constraints from a prior run -
     // the Postgres equivalent of deleting the SQLite temp file below.
