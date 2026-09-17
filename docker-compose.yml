@@ -1,0 +1,55 @@
+# Two ways to run this:
+#
+#   docker compose up --build
+#     -> SQLite (the default backend), a named volume persists data/ across
+#        container restarts/recreates. Good enough for local/self-hosted,
+#        single-team use - see README "Deployment modes".
+#
+#   docker compose --profile postgres up --build
+#     -> Adds a Postgres service and points the app at it via
+#        FINOPS_DB_DRIVER=postgres. Still single-tenant unless you also set
+#        FINOPS_MULTI_TENANT=true (see server/tenancy.js) - multi-tenant
+#        mode additionally needs each tenant provisioned through the
+#        control-plane schema, which isn't a docker-compose-level concern.
+
+services:
+  app:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      FINOPS_HOST: "0.0.0.0"
+      # Only takes effect with the postgres profile active - ignored
+      # entirely by the default SQLite backend.
+      FINOPS_DB_DRIVER: "${FINOPS_DB_DRIVER:-sqlite}"
+      FINOPS_POSTGRES_URL: "postgres://finops:finops@postgres:5432/finops"
+      FINOPS_MULTI_TENANT: "${FINOPS_MULTI_TENANT:-false}"
+      SLACK_WEBHOOK_URL: "${SLACK_WEBHOOK_URL:-}"
+      FINOPS_WEBHOOK_URL: "${FINOPS_WEBHOOK_URL:-}"
+    volumes:
+      - finops-data:/app/data
+      - finops-logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: finops
+      POSTGRES_PASSWORD: finops
+      POSTGRES_DB: finops
+    volumes:
+      - finops-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finops"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  finops-data:
+  finops-logs:
+  finops-postgres-data:

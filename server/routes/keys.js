@@ -1,0 +1,56 @@
+﻿// routes/keys.js - create/list/quarantine/revoke API keys
+
+const express = require("express");
+const crypto = require("crypto");
+const db = require("../storage");
+const { requireAuth } = require("../auth");
+const { quarantineKey, approveKey } = require("../governance");
+const { logAudit } = require("../audit");
+const router = express.Router();
+
+function generateKey() {
+  return "fk_" + crypto.randomBytes(20).toString("hex");
+}
+
+router.get("/", requireAuth("read"), async (req, res) => {
+  const rows = await db.all(
+    "SELECT id, key_id, label, role, team, status, quarantine_reason, created_at FROM api_keys ORDER BY id DESC"
+  );
+  res.json(rows);
+});
+
+router.post("/", requireAuth("manage_keys"), async (req, res) => {
+  const { label, role = "developer", team } = req.body || {};
+  if (!label) return res.status(400).json({ error: "label is required" });
+  if (!["admin", "budget-manager", "developer", "viewer"].includes(role)) {
+    return res.status(400).json({ error: "invalid role" });
+  }
+  const key_id = generateKey();
+  await db.run("INSERT INTO api_keys (key_id, label, role, team) VALUES (?, ?, ?, ?)", [
+    key_id,
+    label,
+    role,
+    team || null,
+  ]);
+
+  // key_id is only ever shown here at creation time - treat it like a password
+  res.status(201).json({ key_id, label, role, team });
+});
+
+router.post("/:keyId/quarantine", requireAuth("approve_quarantine"), async (req, res) => {
+  const { reason = "manually quarantined" } = req.body || {};
+  await quarantineKey(req.params.keyId, reason);
+  res.json({ ok: true });
+});
+
+router.post("/:keyId/approve", requireAuth("approve_quarantine"), async (req, res) => {
+  await approveKey(req.params.keyId);
+  res.json({ ok: true });
+});
+
+router.post("/:keyId/revoke", requireAuth("manage_keys"), async (req, res) => {
+  await db.run("UPDATE api_keys SET status = 'revoked' WHERE key_id = ?", [req.params.keyId]);
+  res.json({ ok: true });
+});
+
+module.exports = router;

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-sqlite:
+    name: Test (SQLite backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # node:sqlite needs 22+ as a stable API - matches the Dockerfile's
+          # base image and this repo's own development Node version.
+          node-version: "22"
+      - run: npm ci
+      - run: npm test
+
+  test-postgres:
+    name: Test (Postgres backend)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: finops
+          POSTGRES_PASSWORD: finops
+          POSTGRES_DB: finops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U finops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      FINOPS_DB_DRIVER: postgres
+      FINOPS_POSTGRES_URL: postgres://finops:finops@localhost:5432/finops
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm test
+
+  docker-build:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build-only, not pushed anywhere - this job exists purely to catch a
+      # broken Dockerfile (missing file, failed npm ci, etc.) in CI rather
+      # than at deploy time. Wire up registry push/tagging here once there's
+      # somewhere real to publish to.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: finops-mvp:ci
