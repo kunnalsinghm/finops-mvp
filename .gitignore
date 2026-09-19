@@ -15,3 +15,9 @@ data/*.jsonl
 # restore/migration leftovers next to the live database
 data/*.replaced-*
 data/*.restoring-*
+
+# Local/test temporary files
+test/*.db-shm
+test/*.db-wal
+*.patch
+_stray_autopilot_files/
