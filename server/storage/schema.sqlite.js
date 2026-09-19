@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   environment TEXT,
   git_branch TEXT,
   user_id TEXT,
+  key_id TEXT,            -- the API key that authenticated this event (NULL for session logins / bootstrap / pre-upgrade rows that could not be matched)
   feature_id TEXT,
   customer_id TEXT,
   client_region TEXT,

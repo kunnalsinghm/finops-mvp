@@ -24,13 +24,27 @@ raw.exec(SCHEMA_SQL);
 // the column is missing. It is deliberately NOT a general migration system
 // (no ordering, no version table, no destructive changes) - see the
 // migrations item in the roadmap.
+// Returns true only when it actually added the column, so callers can run a
+// one-time backfill on exactly that upgrade and never again.
 function ensureColumn(table, column, ddl) {
   const cols = raw.prepare(`PRAGMA table_info(${table})`).all();
-  if (!cols.some((c) => c.name === column)) {
-    raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
-  }
+  if (cols.some((c) => c.name === column)) return false;
+  raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  return true;
 }
 ensureColumn("api_keys", "allow_background", "INTEGER NOT NULL DEFAULT 0");
+
+// usage_events.key_id: before it existed the proxy stored the authenticated key
+// in user_id, so for existing rows the key can be recovered whenever user_id is
+// the id of a real key. Best-effort by design: rows whose user_id isn't a known
+// key (ingest events with a client-declared user_id, deleted keys) stay NULL
+// rather than being guessed at.
+if (ensureColumn("usage_events", "key_id", "TEXT")) {
+  raw.exec(
+    `UPDATE usage_events SET key_id = user_id
+     WHERE key_id IS NULL AND user_id IN (SELECT key_id FROM api_keys)`
+  );
+}
 
 const dialect = "sqlite";
 

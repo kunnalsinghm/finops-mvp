@@ -16,7 +16,7 @@ const db = require("../storage");
 const { yearMonthExpr } = require("../storage/dialectSql");
 const { computeCost, getRate } = require("../pricing");
 const { insertUsageEvent } = require("../usageStore");
-const { resolveIdentity } = require("../keyIdentity");
+const { resolveIdentity, realKeyId } = require("../keyIdentity");
 const { spoolEvent } = require("../meteringSpool");
 const logger = require("../logger");
 const { requireAuth } = require("../auth");
@@ -123,6 +123,7 @@ function buildUsageRow({ providerName, effectiveModel, team, environment, gitBra
     environment,
     git_branch: gitBranch,
     user_id: rateLimitKey,
+    key_id: realKeyId(rateLimitKey),
     feature_id: featureId,
     customer_id: customerId,
     client_region: clientRegion,
@@ -609,7 +610,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         event_time: new Date().toISOString(),
         provider: providerName,
         model: effectiveModel,
-        team, environment, git_branch: gitBranch, user_id: rateLimitKey,
+        team, environment, git_branch: gitBranch, user_id: rateLimitKey, key_id: realKeyId(rateLimitKey),
         feature_id: featureId, customer_id: customerId, client_region: clientRegion,
         agent_id: agentId, session_id: sessionId, task_id: taskId, task_status: taskStatus, workload_type: workloadType,
         input_tokens, output_tokens,
@@ -639,7 +640,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         event_time: new Date().toISOString(),
         provider: providerName,
         model: effectiveModel,
-        team, environment, git_branch: gitBranch, user_id: rateLimitKey,
+        team, environment, git_branch: gitBranch, user_id: rateLimitKey, key_id: realKeyId(rateLimitKey),
         feature_id: featureId, customer_id: customerId, client_region: clientRegion,
         agent_id: agentId, session_id: sessionId, task_id: taskId, task_status: taskStatus, workload_type: workloadType,
         input_tokens, output_tokens,

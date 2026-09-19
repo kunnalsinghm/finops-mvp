@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   environment TEXT,
   git_branch TEXT,
   user_id TEXT,
+  key_id TEXT,
   feature_id TEXT,
   customer_id TEXT,
   client_region TEXT,
@@ -255,6 +256,22 @@ CREATE TABLE IF NOT EXISTS token_quotas (
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_quota_scope ON token_quotas(scope_type, scope_value);
+
+-- usage_events.key_id upgrade for databases created before the column existed.
+-- Adds it AND backfills once (from user_id, which the proxy used to fill with
+-- the authenticated key) - the IF NOT EXISTS guard means a database that
+-- already has the column is never touched, so the UPDATE never re-runs.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'usage_events' AND column_name = 'key_id'
+  ) THEN
+    ALTER TABLE usage_events ADD COLUMN key_id TEXT;
+    UPDATE usage_events SET key_id = user_id
+      WHERE key_id IS NULL AND user_id IN (SELECT key_id FROM api_keys);
+  END IF;
+END $$;
 `;
 
 module.exports = { SCHEMA_SQL };

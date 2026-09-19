@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   environment TEXT,
   git_branch TEXT,
   user_id TEXT,
+  key_id TEXT,
   feature_id TEXT,
   customer_id TEXT,
   client_region TEXT,
@@ -222,6 +223,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   created_at TEXT NOT NULL DEFAULT NOW()::text,
   updated_at TEXT NOT NULL DEFAULT NOW()::text
 );
+
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS key_id TEXT;
 `;
 
 module.exports = { TENANT_SCHEMA_SQL };

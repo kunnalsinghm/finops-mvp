@@ -17,6 +17,7 @@ const { detectPromptInjection } = require("../promptInjection");
 const { checkKeyFraudSignals } = require("../fraudDetection");
 const { TASK_STATUSES } = require("../agentAttribution");
 const { inferTag } = require("../smartTagging");
+const { realKeyId } = require("../keyIdentity");
 
 const router = express.Router();
 
@@ -26,10 +27,10 @@ const router = express.Router();
 async function insertUsageEvent(row) {
   const result = await db.run(
     `INSERT INTO usage_events
-       (event_time, provider, model, team, environment, git_branch, user_id,
+       (event_time, provider, model, team, environment, git_branch, user_id, key_id,
         feature_id, customer_id, client_region, agent_id, session_id, task_id,
         task_status, workload_type, input_tokens, output_tokens, cost_usd, tagged, raw_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      RETURNING id`,
     [
       row.event_time,
@@ -39,6 +40,7 @@ async function insertUsageEvent(row) {
       row.environment,
       row.git_branch,
       row.user_id,
+      row.key_id || null,
       row.feature_id,
       row.customer_id,
       row.client_region,
@@ -146,6 +148,9 @@ router.post("/", requireAuth("write"), async (req, res) => {
     environment: environment || null,
     git_branch: git_branch || null,
     user_id: user_id || req.apiKey.key_id,
+    // Unlike user_id (which a client may declare), this is always the key that
+    // actually authenticated - the one that can be quarantined or revoked.
+    key_id: realKeyId(req.apiKey),
     feature_id: feature_id || null,
     customer_id: customer_id || null,
     client_region: req.header("X-Client-Region") || null,

@@ -93,4 +93,15 @@ function resolveIdentity(apiKey, { teamHeader, workloadHeader } = {}, env = proc
   return { ok: true, team, teamSource, workloadType, backgroundExempt };
 }
 
-module.exports = { resolveIdentity, isStrictIdentity };
+// The id to store in usage_events.key_id: the authenticated API key that sent
+// the event. Dashboard-session logins ("user:<name>") and bootstrap mode are
+// not API keys - nothing can be quarantined or revoked through them - so they
+// record NULL rather than a value that looks like a key but isn't one.
+// Accepts either the key row or the bare id string.
+function realKeyId(keyOrId) {
+  const id = typeof keyOrId === "string" ? keyOrId : keyOrId?.key_id;
+  if (!id || id === BOOTSTRAP_KEY_ID || id.startsWith("user:")) return null;
+  return id;
+}
+
+module.exports = { resolveIdentity, isStrictIdentity, realKeyId };
