@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   team TEXT,
   status TEXT NOT NULL DEFAULT 'active',  -- active | quarantined | revoked
   quarantine_reason TEXT,
+  allow_background INTEGER NOT NULL DEFAULT 0, -- 1 = may send X-Workload-Type: background (budget-exempt); admin-granted, see keyIdentity.js
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

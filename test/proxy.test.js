@@ -100,14 +100,13 @@ function post(pathName, { headers = {}, body } = {}) {
 }
 
 let keyCounter = 0;
-async function makeApiKey(role = "developer") {
+async function makeApiKey(role = "developer", { team = null, allowBackground = false } = {}) {
   keyCounter++;
   const key_id = `fk_test_proxy_${role}_${keyCounter}`;
-  await storage.run("INSERT INTO api_keys (key_id, label, role, status) VALUES (?, ?, ?, 'active')", [
-    key_id,
-    `test key ${keyCounter}`,
-    role,
-  ]);
+  await storage.run(
+    "INSERT INTO api_keys (key_id, label, role, team, allow_background, status) VALUES (?, ?, ?, ?, ?, 'active')",
+    [key_id, `test key ${keyCounter}`, role, team, allowBackground ? 1 : 0]
+  );
   return key_id;
 }
 
@@ -397,8 +396,11 @@ test("budget hard block: a team under budget is never blocked, even for a model 
   assert.notEqual(res.headers["x-finops-degraded"], "true");
 });
 
-test("background workload exemption: a team over budget is NOT blocked or degraded when X-Workload-Type: background is sent", async (t) => {
-  const key_id = await makeApiKey();
+test("background workload exemption: a team over budget is NOT blocked or degraded when a key that was GRANTED background rights sends X-Workload-Type: background", async (t) => {
+  // The exemption is an admin-granted privilege on the key (allow_background),
+  // not something any caller can claim by sending the header - see
+  // keyIdentity.js and test/proxyHardening.test.js for the rejection case.
+  const key_id = await makeApiKey("developer", { allowBackground: true });
   const team = `background-exempt-team-${process.pid}`;
   await storage.run("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES ('team', ?, ?)", [team, 0.01]);
   await storage.run(

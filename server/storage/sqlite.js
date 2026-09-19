@@ -17,6 +17,21 @@ raw.exec("PRAGMA journal_mode = WAL;");
 const { SCHEMA_SQL } = require("./schema.sqlite");
 raw.exec(SCHEMA_SQL);
 
+// CREATE TABLE IF NOT EXISTS silently does nothing for a table that already
+// exists, so a column added to the schema later never reaches an existing
+// database file - the classic "no such column: X" on startup. This is the
+// smallest safe fix for ADDITIVE changes: check the live table, ALTER only if
+// the column is missing. It is deliberately NOT a general migration system
+// (no ordering, no version table, no destructive changes) - see the
+// migrations item in the roadmap.
+function ensureColumn(table, column, ddl) {
+  const cols = raw.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  }
+}
+ensureColumn("api_keys", "allow_background", "INTEGER NOT NULL DEFAULT 0");
+
 const dialect = "sqlite";
 
 // SQLite's node:sqlite module happily accepts a trailing "RETURNING id"

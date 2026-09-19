@@ -199,6 +199,18 @@ Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connecti
 
 Copy `.env.example` to `.env`. Vars worth understanding before you touch them: `FINOPS_HOST` (see "Bootstrap mode"), `FINOPS_DB_DRIVER` and `FINOPS_MULTI_TENANT` (see "Deployment modes"), `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` (see "Billing" above and `docs/stripe-live-checkout-runbook.md`).
 
+## Identity, pricing and metering guarantees
+
+These are the rules the proxy enforces so that a budget means what it says.
+
+**Who a request is acting as.** A key can be *bound* to a team (`POST /api/keys` with `team`, or `PATCH /api/keys/:keyId`). A bound key's team is authoritative: usage, budgets, allow-lists and quotas all apply to it whatever headers the client sends, and an `X-Team` that names a different team is refused `403`. An *unbound* key still falls back to the `X-Team` header for backward compatibility — but that is a self-declared label, and a client can omit it to avoid team-scoped limits. Set `FINOPS_STRICT_IDENTITY=true` to refuse unbound keys on the proxy.
+
+**Background workloads.** `X-Workload-Type: background` exempts a request from the budget degrade/hard-block, so it is a privilege an admin grants to a key (`allow_background: true`), not something a caller can assert. A key without it that sends the header gets `403`. Upgrade note: existing keys default to `allow_background = 0`, so any service that relied on sending the header must be granted it.
+
+**Pricing.** Model IDs are normalized (a dated snapshot such as `gpt-4o-2024-08-06` is priced as `gpt-4o`), and the catalogue covers current OpenAI and Anthropic models. A *new* model in a known family is priced by a family guess and labelled approximate (`X-FinOps-Price-Approximate`); a model with **no** price is never silently costed at $0 without a trace — it is flagged (`X-FinOps-Unpriced`, an alert, an `unpriced` marker on the event) or, with `FINOPS_UNPRICED_POLICY=block`, refused. `GET /api/pricing/unpriced` lists everything currently unpriced or approximate. The catalogue is a dated snapshot, not a live feed — verify against your provider's pricing page and correct with `POST /api/pricing/override`.
+
+**Metering durability.** Usage is recorded *after* the provider call, so a recording failure can't undo the spend. The proxy therefore (a) always returns the provider's response, (b) spools the un-recorded event to `data/metering-spool.jsonl` and alerts, and (c) lets you recover it with `npm run replay-spool`. A stream that is cut short — by the client or the provider — is metered with the usage seen so far and flagged `partial` (OpenAI only reports usage at the very end of a stream, so a cut-short OpenAI stream may record zero tokens). `FINOPS_METERING_FAILURE_POLICY=closed` additionally refuses requests up front while the usage store is unreachable. `FINOPS_UPSTREAM_TIMEOUT_MS` bounds how long a hung provider can hold a request (`504`).
+
 ## Bootstrap mode
 
 On a fresh install, before you've created your first API key or user, **every request is served as admin** in single-tenant mode — deliberate local-dev convenience. Once you create a key or user, this window closes automatically. (Multi-tenant mode has no bootstrap window — see "Deployment modes.")
@@ -226,6 +238,10 @@ The server binds to `127.0.0.1` by default, so the bootstrap window can't be rea
 - SQLite backups are file copies, not point-in-time/incremental; Postgres deployments are responsible for their own backup strategy
 - Dashboard session login is not yet supported in multi-tenant mode (see "Deployment modes") — API-key auth only
 - No agent-level GPU utilization ingestion beyond cluster-level totals (no per-agent GPU-hours breakdown)
+- **Multi-tenant mode isolates authentication and connection pools, but the route handlers do not yet use the tenant-bound database handle** (`req.db`); they still use the single global one, and the exact-match cache, rate-limit buckets and background alert jobs are process-global. Do not run `FINOPS_MULTI_TENANT=true` for real customers until tenant context is threaded through the data layer and covered by tests that hit the real routes. One deployment per customer is unaffected
+- `X-Disable-PII-Redaction: true` can be sent by any caller with proxy access; it is not yet an admin-controlled privilege like `allow_background`
+- Historical usage recorded at $0 before a model had a price is not retroactively re-priced (`GET /api/pricing/unpriced` finds unpriced models, not stale $0 rows)
+- Upgrading an existing database is supported only for additive column changes (see `ensureColumn` in `server/storage/sqlite.js`); there is still no general migration system
 
 ## License
 

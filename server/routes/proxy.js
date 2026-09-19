@@ -14,7 +14,11 @@
 const express = require("express");
 const db = require("../storage");
 const { yearMonthExpr } = require("../storage/dialectSql");
-const { computeCost } = require("../pricing");
+const { computeCost, getRate } = require("../pricing");
+const { insertUsageEvent } = require("../usageStore");
+const { resolveIdentity } = require("../keyIdentity");
+const { spoolEvent } = require("../meteringSpool");
+const logger = require("../logger");
 const { requireAuth } = require("../auth");
 const {
   checkRateLimit,
@@ -57,53 +61,61 @@ const PROVIDER_ENDPOINTS = {
   },
 };
 
-// Was a db.prepare(...) statement with named (@col) params under the old
-// sync db.js. Positional params + await, same pattern used everywhere else
-// in this migration - see ingest.js for the identical helper.
-async function insertUsageEvent(row) {
-  const result = await db.run(
-    `INSERT INTO usage_events
-       (event_time, provider, model, team, environment, git_branch, user_id,
-        feature_id, customer_id, client_region, agent_id, session_id, task_id,
-        task_status, workload_type, input_tokens, output_tokens, cost_usd, tagged, raw_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     RETURNING id`,
-    [
-      row.event_time,
-      row.provider,
-      row.model,
-      row.team,
-      row.environment,
-      row.git_branch,
-      row.user_id,
-      row.feature_id || null,
-      row.customer_id || null,
-      row.client_region || null,
-      row.agent_id || null,
-      row.session_id || null,
-      row.task_id || null,
-      row.task_status || null,
-      row.workload_type || null,
-      row.input_tokens,
-      row.output_tokens,
-      row.cost_usd,
-      row.tagged,
-      row.raw_json,
-    ]
-  );
-  return result.lastInsertRowid;
+// insertUsageEvent now lives in ../usageStore.js so a spooled event can be
+// replayed through the identical INSERT (see meteringSpool.js).
+
+// ---- Upstream + metering policy knobs (all env-driven, read per call so tests
+// and operators can change them without a restart-order dependency) ----
+//
+// FINOPS_UPSTREAM_TIMEOUT_MS  (default 120000)
+//   Before this existed the proxy would wait on a hung provider forever,
+//   pinning a connection (and the caller) indefinitely. Non-streaming: caps the
+//   whole request. Streaming: caps time-to-first-byte only - a healthy stream
+//   may legitimately run for minutes, so it is not cut mid-flight.
+//
+// FINOPS_UNPRICED_POLICY  ("flag" default | "block")
+//   What to do when the model has no price at all (not in the catalogue, no
+//   override, no family match). "flag": forward it but record it as unpriced,
+//   raise an alert and set X-FinOps-Unpriced - spend is visible as a gap, not
+//   silently $0. "block": refuse with 422 before calling the provider, the
+//   right choice wherever budgets are a hard control (an unpriced model
+//   otherwise sidesteps every dollar-based limit).
+//
+// FINOPS_METERING_FAILURE_POLICY  ("open" default | "closed")
+//   Metering happens AFTER the provider call, so a metering failure can't
+//   un-spend the money. "closed" therefore acts as a PRE-flight: if the usage
+//   store is unreachable, refuse (503) before forwarding anything. In both
+//   modes a failure after the call is spooled to disk (meteringSpool.js) and
+//   the client still gets the provider's response.
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 120000;
+
+function upstreamTimeoutMs() {
+  const n = Number(process.env.FINOPS_UPSTREAM_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_UPSTREAM_TIMEOUT_MS;
 }
 
-async function logUsageEvent({ providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion, agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings }) {
-  const { cost_usd } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+function isTimeoutError(err) {
+  return err && (err.name === "TimeoutError" || err.name === "AbortError");
+}
 
-  // Anomaly and fraud checks BEFORE insertion, same reasoning as ingest.js -
-  // comparing against the prior baseline, not one diluted by the event
-  // being checked. Neither check blocks the request - see fraudDetection.js.
-  await checkAnomaly({ provider: providerName, model: effectiveModel, cost_usd: cost_usd ?? 0, team });
-  await checkKeyFraudSignals({ key_id: rateLimitKey, provider: providerName, model: effectiveModel, client_region: clientRegion });
+const warnedUnpriced = new Set();
+async function noteUnpricedModel(provider, model) {
+  const id = `${provider}/${model}`;
+  if (warnedUnpriced.has(id)) return; // one alert per model per process - not one per request
+  warnedUnpriced.add(id);
+  try {
+    await logAlert(
+      "unpriced-model",
+      `No price is configured for '${id}' - its usage is being recorded at $0 and will NOT count toward any dollar budget. Add a rate with POST /api/pricing/override, or set FINOPS_UNPRICED_POLICY=block to refuse unpriced models.`
+    );
+  } catch (err) {
+    logger.warn(`[proxy] could not log unpriced-model alert: ${err.message}`);
+  }
+}
 
-  const insertedId = await insertUsageEvent({
+function buildUsageRow({ providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion, agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed, partial }, costInfo) {
+  const { cost_usd, rate_found, approximate, costComputeFailed } = costInfo;
+  return {
     event_time: new Date().toISOString(),
     provider: providerName,
     model: effectiveModel,
@@ -127,16 +139,84 @@ async function logUsageEvent({ providerName, effectiveModel, team, environment, 
       degraded,
       requestedModel,
       effectiveModel,
-      streamed: true,
+      streamed: Boolean(streamed),
+      // A $0 that means "we don't know the price" must be distinguishable
+      // from a $0 that means "this was free" - GET /api/pricing/unpriced
+      // reads these markers.
+      ...(rate_found === false ? { unpriced: true } : {}),
+      ...(approximate ? { priceApproximate: true } : {}),
+      ...(costComputeFailed ? { costComputeFailed: true } : {}),
+      ...(partial ? { partial: true } : {}),
       ...(piiFindings && Object.keys(piiFindings).length > 0 ? { piiRedacted: piiFindings } : {}),
     }),
-  });
+  };
+}
 
-  if (!team) {
-    await inferTag({ key_id: rateLimitKey, usage_event_id: insertedId });
+async function logUsageEvent(params) {
+  const { providerName, effectiveModel, team, rateLimitKey, clientRegion, input_tokens, output_tokens } = params;
+
+  let costInfo;
+  try {
+    costInfo = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+  } catch (err) {
+    // The price lookup itself hit the DB and failed. Record the tokens anyway
+    // (flagged, so it can be re-priced later) rather than losing the event.
+    logger.warn(`[proxy] cost computation failed, recording event unpriced: ${err.message}`);
+    costInfo = { cost_usd: null, rate_found: false, costComputeFailed: true };
   }
 
-  return cost_usd;
+  // Anomaly and fraud checks BEFORE insertion, same reasoning as ingest.js -
+  // comparing against the prior baseline, not one diluted by the event
+  // being checked. Neither check blocks the request - see fraudDetection.js.
+  // They are advisory, so a failure in a detector must never cost us the
+  // usage record itself.
+  try {
+    await checkAnomaly({ provider: providerName, model: effectiveModel, cost_usd: costInfo.cost_usd ?? 0, team });
+    await checkKeyFraudSignals({ key_id: rateLimitKey, provider: providerName, model: effectiveModel, client_region: clientRegion });
+  } catch (err) {
+    logger.warn(`[proxy] advisory check failed (event still recorded): ${err.message}`);
+  }
+
+  const row = buildUsageRow(params, costInfo);
+  let insertedId;
+  try {
+    insertedId = await insertUsageEvent(row);
+  } catch (err) {
+    err.usageRow = row; // so meterSafely can spool exactly what we failed to write
+    throw err;
+  }
+
+  if (!team) {
+    try {
+      await inferTag({ key_id: rateLimitKey, usage_event_id: insertedId });
+    } catch (err) {
+      logger.warn(`[proxy] smart-tag inference failed (event still recorded): ${err.message}`);
+    }
+  }
+
+  return costInfo;
+}
+
+// Meter without ever turning a completed (and already billed) provider call
+// into a failure for the client. On failure: spool the row to disk, log
+// loudly, best-effort alert. Returns { metered, cost_usd, ... }.
+async function meterSafely(params) {
+  try {
+    const costInfo = await logUsageEvent(params);
+    return { metered: true, ...costInfo };
+  } catch (err) {
+    const row =
+      err.usageRow ||
+      buildUsageRow(params, { cost_usd: null, rate_found: false, costComputeFailed: true });
+    const spool = spoolEvent(row, err.message);
+    logger.error(`[metering] FAILED to record usage for ${params.providerName}/${params.effectiveModel} (key ${params.rateLimitKey}): ${err.message} - ${spool.spooled ? "spooled to " + spool.file : "NOT spooled, event lost"}`);
+    try {
+      await logAlert("metering-failure", `Usage for ${params.providerName}/${params.effectiveModel} (key '${params.rateLimitKey}') was not recorded: ${err.message}. ${spool.spooled ? "Spooled for replay (npm run replay-spool)." : "Could not be spooled - event lost."}`);
+    } catch {
+      // the store is probably what's down - the log line above is the record
+    }
+    return { metered: false, spooled: spool.spooled, cost_usd: null };
+  }
 }
 
 // Parse OpenAI SSE stream text for the final usage object
@@ -190,7 +270,6 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     return res.status(400).json({ error: "Missing X-Provider-Key header (your real OpenAI/Anthropic key - forwarded only, never stored)" });
   }
 
-  const team = req.header("X-Team") || null;
   const environment = req.header("X-Environment") || null;
   const gitBranch = req.header("X-Git-Branch") || null;
   const featureId = req.header("X-Feature-Id") || null;
@@ -200,9 +279,32 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   const sessionId = req.header("X-Session-Id") || null;
   const taskId = req.header("X-Task-Id") || null;
   const taskStatus = req.header("X-Task-Status") || null;
-  const workloadType = req.header("X-Workload-Type") || null;
   const rateLimitKey = req.apiKey.key_id;
   const isStreaming = req.body?.stream === true;
+
+  // --- Identity: team and workload class come from the KEY, not from headers
+  // the caller controls - see keyIdentity.js for the full rules and why.
+  const identity = resolveIdentity(req.apiKey, {
+    teamHeader: req.header("X-Team"),
+    workloadHeader: req.header("X-Workload-Type"),
+  });
+  if (!identity.ok) {
+    await logAlert("identity-violation", `Blocked proxy request from key '${rateLimitKey}' - ${identity.code}: ${identity.error}`);
+    return res.status(identity.status).json({ error: identity.error, code: identity.code });
+  }
+  const { team, workloadType, backgroundExempt } = identity;
+
+  // --- Fail-closed metering (opt-in): refuse to spend money we couldn't
+  // record. Pre-flight only - see the policy notes above.
+  if (process.env.FINOPS_METERING_FAILURE_POLICY === "closed") {
+    try {
+      await db.get("SELECT 1 AS ok");
+    } catch (err) {
+      return res.status(503).json({
+        error: "Usage metering store is unavailable and this deployment is configured fail-closed (FINOPS_METERING_FAILURE_POLICY=closed). The request was NOT forwarded to the provider.",
+      });
+    }
+  }
 
   if (taskStatus && !TASK_STATUSES.includes(taskStatus)) {
     return res.status(400).json({ error: `X-Task-Status must be one of: ${TASK_STATUSES.join(", ")}` });
@@ -287,7 +389,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // alerts (see routes/budgets.js status computation) flag the overage for
   // a human to act on deliberately, rather than the system silently
   // degrading or cutting it off.
-  if (team && workloadType !== "background") {
+  if (team && !backgroundExempt) {
     const budget = await db.get("SELECT * FROM budgets WHERE scope_type = 'team' AND scope_value = ?", [team]);
     if (budget) {
       const month = new Date().toISOString().slice(0, 7);
@@ -328,6 +430,23 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       }
     }
   }
+
+  // --- Pricing check: know, BEFORE spending, whether this request can be costed.
+  const rateInfo = await getRate(providerName, effectiveModel);
+  const unpriced = !rateInfo;
+  const priceApproximate = Boolean(rateInfo?.approximate);
+  if (unpriced) {
+    await noteUnpricedModel(providerName, effectiveModel);
+    if (process.env.FINOPS_UNPRICED_POLICY === "block") {
+      return res.status(422).json({
+        error: `No price is configured for '${providerName}/${effectiveModel}', and this deployment refuses unpriced models (FINOPS_UNPRICED_POLICY=block). Add a rate via POST /api/pricing/override.`,
+      });
+    }
+  }
+  const setPricingHeaders = (setter) => {
+    if (unpriced) setter("X-FinOps-Unpriced", "true");
+    if (priceApproximate) setter("X-FinOps-Price-Approximate", "true");
+  };
 
   let outboundBody = { ...req.body, model: effectiveModel };
   if (isStreaming && providerName === "openai") {
@@ -379,12 +498,21 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
 
   // ================= STREAMING PATH =================
   if (isStreaming) {
+    // Time-to-first-byte guard only (see FINOPS_UPSTREAM_TIMEOUT_MS notes).
+    const controller = new AbortController();
+    const ttfbTimer = setTimeout(() => controller.abort(), upstreamTimeoutMs());
     try {
-      const providerRes = await fetch(endpoint.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...endpoint.authHeader(providerKey) },
-        body: JSON.stringify(outboundBody),
-      });
+      let providerRes;
+      try {
+        providerRes = await fetch(endpoint.url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...endpoint.authHeader(providerKey) },
+          body: JSON.stringify(outboundBody),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(ttfbTimer);
+      }
 
       if (!providerRes.ok || !providerRes.body) {
         const errJson = await providerRes.json().catch(() => ({ error: "Upstream error" }));
@@ -396,29 +524,71 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       res.setHeader("Connection", "keep-alive");
       if (degraded) res.setHeader("X-FinOps-Degraded", "true");
       if (Object.keys(piiFindings).length > 0) res.setHeader("X-FinOps-PII-Redacted", "true");
+      setPricingHeaders((k, v) => res.setHeader(k, v));
+
+      // If the client disconnects mid-stream, stop reading: breaking out of the
+      // loop cancels the upstream body, so we stop paying for tokens nobody is
+      // receiving. What was consumed up to that point is still metered below.
+      let clientAborted = false;
+      res.on("close", () => {
+        if (!res.writableFinished) clientAborted = true;
+      });
 
       let fullBuffer = "";
+      let streamError = null;
       const decoder = new TextDecoder();
-
-      for await (const chunk of providerRes.body) {
-        const text = decoder.decode(chunk, { stream: true });
-        fullBuffer += text;
-        res.write(chunk);
+      try {
+        for await (const chunk of providerRes.body) {
+          if (clientAborted) break;
+          fullBuffer += decoder.decode(chunk, { stream: true });
+          res.write(chunk);
+        }
+      } catch (err) {
+        streamError = err; // upstream died mid-stream
       }
-      res.end();
+
+      const partial = clientAborted || Boolean(streamError);
+      if (streamError && !res.headersSent) {
+        // Nothing reached the client yet - a clean error is still possible.
+        res.status(502).json({ error: "Upstream provider stream failed", detail: streamError.message });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
 
       const usage =
         providerName === "openai" ? parseOpenAIStreamUsage(fullBuffer) : parseAnthropicStreamUsage(fullBuffer);
 
-      await logUsageEvent({
-        providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion,
-        agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
-        input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
-        degraded, requestedModel, piiFindings,
-      });
+      // Meter whatever was actually consumed. A stream that produced nothing
+      // cost nothing, so it's skipped; anything else - complete OR cut short -
+      // is recorded, because the provider bills for tokens generated even if
+      // the client never saw them. (OpenAI only reports usage at the very end
+      // of a stream, so a cut-short OpenAI stream is recorded with whatever
+      // usage arrived - possibly none - and flagged partial.)
+      if (fullBuffer.length > 0 || usage.input_tokens > 0 || usage.output_tokens > 0) {
+        await meterSafely({
+          providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion,
+          agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
+          input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
+          degraded, requestedModel, piiFindings, streamed: true, partial,
+        });
+      }
+      if (partial) {
+        try {
+          await logAlert(
+            "stream-interrupted",
+            `Stream for ${providerName}/${effectiveModel} (key '${rateLimitKey}') ended early - ${clientAborted ? "client disconnected" : `upstream error: ${streamError.message}`}. Usage recorded may be incomplete.`
+          );
+        } catch {
+          // alerting is best-effort here
+        }
+      }
     } catch (err) {
       if (!res.headersSent) {
-        res.status(502).json({ error: "Upstream provider stream failed", detail: err.message });
+        if (isTimeoutError(err)) {
+          res.status(504).json({ error: `Upstream provider did not respond within ${upstreamTimeoutMs()}ms` });
+        } else {
+          res.status(502).json({ error: "Upstream provider stream failed", detail: err.message });
+        }
       } else {
         res.end();
       }
@@ -490,6 +660,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/json", ...endpoint.authHeader(providerKey) },
       body: JSON.stringify(outboundBody),
+      signal: AbortSignal.timeout(upstreamTimeoutMs()),
     });
 
     const responseJson = await providerRes.json();
@@ -510,13 +681,18 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     }
 
     const { input_tokens, output_tokens } = endpoint.extractUsage(responseJson);
-    const cost_usd = await logUsageEvent({
+    // The provider call already succeeded (and was billed) - a metering failure
+    // must not turn that into an error for the client. See meterSafely().
+    const metering = await meterSafely({
       providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion,
       agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
-      input_tokens, output_tokens, degraded, requestedModel, piiFindings,
+      input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed: false,
     });
+    const cost_usd = metering.cost_usd;
 
-    res.set("X-FinOps-Cost-USD", String(cost_usd ?? 0));
+    if (metering.metered) res.set("X-FinOps-Cost-USD", String(cost_usd ?? 0));
+    else res.set("X-FinOps-Metering", "failed");
+    setPricingHeaders((k, v) => res.set(k, v));
     if (cachingEnabled) res.set("X-FinOps-Cache", "MISS");
     if (degraded) res.set("X-FinOps-Degraded", "true");
     if (Object.keys(piiFindings).length > 0) res.set("X-FinOps-PII-Redacted", "true");
@@ -542,6 +718,9 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       });
     }
   } catch (err) {
+    if (isTimeoutError(err)) {
+      return res.status(504).json({ error: `Upstream provider did not respond within ${upstreamTimeoutMs()}ms` });
+    }
     res.status(502).json({ error: "Upstream provider request failed", detail: err.message });
   }
 });

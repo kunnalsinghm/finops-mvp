@@ -37,8 +37,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
   team TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   quarantine_reason TEXT,
+  allow_background INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT NOW()::text
 );
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allow_background INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_control_plane_keys_tenant ON api_keys(tenant_id);
 

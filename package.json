@@ -11,7 +11,8 @@
     "seed": "node server/seed.js",
     "test": "node --test",
     "backup": "node scripts/backup.js",
-    "loadtest": "node scripts/loadtest.js"
+    "loadtest": "node scripts/loadtest.js",
+    "replay-spool": "node scripts/replay-spool.js"
   },
   "dependencies": {
     "chart.js": "^4.4.4",

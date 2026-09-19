@@ -164,8 +164,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
   team TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   quarantine_reason TEXT,
+  allow_background INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT NOW()::text
 );
+-- Existing databases: CREATE TABLE IF NOT EXISTS won't add the column above.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allow_background INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS alerts_log (
   id SERIAL PRIMARY KEY,

@@ -4,6 +4,7 @@
 // single-process self-hosted deployment. If you outgrow one process,
 // swap the Maps below for Redis.
 
+const { normalizeModelId } = require("./pricing");
 const db = require("./storage");
 
 // ---- Rate limiting (token bucket per key) ----
@@ -76,7 +77,14 @@ const FALLBACK_MODEL = {
 };
 
 function getFallback(provider, model) {
-  return FALLBACK_MODEL[`${provider}/${model}`] || null;
+  // Exact match first, then the normalized ID (strips a date snapshot / -latest),
+  // so "gpt-4o-2024-08-06" degrades exactly like "gpt-4o" instead of silently
+  // having no fallback and hitting the hard block instead.
+  return (
+    FALLBACK_MODEL[`${provider}/${model}`] ||
+    FALLBACK_MODEL[`${provider}/${normalizeModelId(model)}`] ||
+    null
+  );
 }
 
 // ---- Alert log (shared by governance + budgets) ----
