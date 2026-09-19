@@ -11,3 +11,7 @@ data/backups/
 
 # metering spool holds un-recorded usage events - never commit
 data/*.jsonl
+
+# restore/migration leftovers next to the live database
+data/*.replaced-*
+data/*.restoring-*

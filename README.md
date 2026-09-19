@@ -213,6 +213,10 @@ These are the rules the proxy enforces so that a budget means what it says.
 
 **Metering durability.** Usage is recorded *after* the provider call, so a recording failure can't undo the spend. The proxy therefore (a) always returns the provider's response, (b) spools the un-recorded event to `data/metering-spool.jsonl` and alerts, and (c) lets you recover it with `npm run replay-spool`. A stream that is cut short — by the client or the provider — is metered with the usage seen so far and flagged `partial` (OpenAI only reports usage at the very end of a stream, so a cut-short OpenAI stream may record zero tokens). `FINOPS_METERING_FAILURE_POLICY=closed` additionally refuses requests up front while the usage store is unreachable. `FINOPS_UPSTREAM_TIMEOUT_MS` bounds how long a hung provider can hold a request (`504`).
 
+## Backups, restore and migrations
+
+SQLite backups are consistent snapshots (`VACUUM INTO`), verified the moment they are written, taken at startup and every 6 hours into `data/backups/`. `npm run backup:verify` proves the newest one is restorable by the current code; `npm run restore -- --latest --force` restores it (stop the server first; the replaced database is moved aside, never deleted). Schema changes are versioned migrations applied automatically at startup, with a verified snapshot taken first, so you no longer delete `data/finops.db` after a schema change. Full procedure: [docs/backup-restore-runbook.md](docs/backup-restore-runbook.md).
+
 ## Bootstrap mode
 
 On a fresh install, before you've created your first API key or user, **every request is served as admin** in single-tenant mode — deliberate local-dev convenience. Once you create a key or user, this window closes automatically. (Multi-tenant mode has no bootstrap window — see "Deployment modes.")
@@ -243,7 +247,8 @@ The server binds to `127.0.0.1` by default, so the bootstrap window can't be rea
 - **Multi-tenant mode isolates authentication and connection pools, but the route handlers do not yet use the tenant-bound database handle** (`req.db`); they still use the single global one, and the exact-match cache, rate-limit buckets and background alert jobs are process-global. Do not run `FINOPS_MULTI_TENANT=true` for real customers until tenant context is threaded through the data layer and covered by tests that hit the real routes. One deployment per customer is unaffected
 - `X-Disable-PII-Redaction: true` can be sent by any caller with proxy access; it is not yet an admin-controlled privilege like `allow_background`
 - Historical usage recorded at $0 before a model had a price is not retroactively re-priced (`GET /api/pricing/unpriced` finds unpriced models, not stale $0 rows)
-- Upgrading an existing database is supported only for additive column changes (see `ensureColumn` in `server/storage/sqlite.js`); there is still no general migration system
+- Schema migrations cover the single-tenant SQLite and Postgres schemas; the multi-tenant control-plane and per-tenant schemas are not migrated yet
+- Postgres has no built-in backup and no point-in-time recovery: use `pg_dump` / provider snapshots (and take one before deploying a migration)
 
 ## License
 

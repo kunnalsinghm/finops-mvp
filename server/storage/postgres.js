@@ -76,7 +76,8 @@ const ready = (async () => {
   if (schemaName) {
     await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
   }
-  await pool.query(SCHEMA_SQL);
+  await pool.query(SCHEMA_SQL); // frozen version-1 baseline
+  await require("./migrator").runPostgres(pool, { log: require("../logger") });
 })().catch((err) => {
   throw new Error(`Postgres schema initialization failed: ${err.message}`);
 });

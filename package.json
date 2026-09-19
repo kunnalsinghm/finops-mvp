@@ -11,6 +11,8 @@
     "seed": "node server/seed.js",
     "test": "node --test",
     "backup": "node scripts/backup.js",
+    "backup:verify": "node scripts/verify-backup.js",
+    "restore": "node scripts/restore.js",
     "loadtest": "node scripts/loadtest.js",
     "replay-spool": "node scripts/replay-spool.js"
   },

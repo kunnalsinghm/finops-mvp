@@ -142,7 +142,7 @@ test("upgrade: an existing SQLite database gains key_id and is backfilled only w
     const script = `
       const { DatabaseSync } = require("node:sqlite");
       const { SCHEMA_SQL } = require(${JSON.stringify(path.join(__dirname, "..", "server", "storage", "schema.sqlite.js"))});
-      // Rebuild a PRE-upgrade database: today's schema minus the key_id column.
+      // A PRE-upgrade database is exactly the frozen v1 baseline (which has no key_id / allow_background).
       const old = new DatabaseSync(${JSON.stringify(legacy)});
       old.exec(SCHEMA_SQL.replace(/^\\s*key_id TEXT,\\s*--.*$/m, ""));
       const cols = old.prepare("PRAGMA table_info(usage_events)").all().map(c => c.name);
@@ -162,7 +162,7 @@ test("upgrade: an existing SQLite database gains key_id and is backfilled only w
         // second boot must not re-run the backfill or fail
         process.exit(0);
       })();`;
-    const r = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", env: { ...process.env, FINOPS_DB_DRIVER: "" } });
+    const r = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", env: { ...process.env, FINOPS_DB_DRIVER: "", FINOPS_SKIP_PREMIGRATION_BACKUP: "true" } }); // snapshots are covered in migrator.test.js; keep the repo clean
     for (const s of ["", "-wal", "-shm"]) { try { fs.unlinkSync(legacy + s); } catch {} }
     assert.equal(r.status, 0, r.stderr);
     const rows = JSON.parse(r.stdout.split("RESULT:")[1]);
