@@ -353,3 +353,95 @@ test("CLI: `backup:verify` exits 0 for a restorable backup and 1 for a corrupt o
   assert.match(again.stderr, /already exists/);
   assert.equal(cli("restore.js", [out, "--target", target, "--force"]).status, 0);
 });
+
+// ------------------------------------------------- clock changes must not lose backups
+// Real incident: a server log showed "Database backup created and verified" immediately
+// followed by "Pruned old backup" naming that SAME file. Ordering was by the timestamp in
+// the filename, so when the clock read earlier than the existing backups the new one
+// sorted oldest and was deleted on creation - and runBackup() returned its (dead) path.
+const legacyName = (stamp) => `finops-2026-09-20T${stamp}-000Z.db`;
+
+test("REGRESSION: a new backup whose timestamp sorts BEFORE the existing ones is not pruned, and is what `latest` returns", () => {
+  const dir = tmpDir();
+  const { file, db } = makeLiveDb(dir);
+  db.close();
+  const backupDir = path.join(dir, "backups");
+  fs.mkdirSync(backupDir);
+  for (const s of ["04-03-50", "04-31-17", "05-17-19", "10-03-50", "10-31-16", "11-18-33", "15-05-20"]) fs.writeFileSync(path.join(backupDir, legacyName(s)), "older");
+
+  const realISO = Date.prototype.toISOString;
+  Date.prototype.toISOString = () => "2026-09-20T00:56:30.952Z"; // sorts before every existing backup
+  let made;
+  try { made = backup.runBackup({ dbPath: file, backupDir, retention: 7 }); } finally { Date.prototype.toISOString = realISO; }
+
+  assert.ok(made, "backup should succeed");
+  assert.equal(fs.existsSync(made), true, "the backup just created must still exist - before the fix it was deleted on the spot");
+  assert.equal(backup.latestBackup({ backupDir }), made, "restore --latest must pick the backup that was actually made last");
+  assert.equal(backup.listBackups({ backupDir }).length, 7, "retention still holds: the OLDEST existing backup was pruned instead");
+  assert.equal(fs.existsSync(path.join(backupDir, legacyName("04-03-50"))), false, "the genuinely oldest one is the one that goes");
+  assert.equal(backup.verifyBackup(made).ok, true);
+});
+
+test("a clock that keeps running BACKWARDS across several backups: order, pruning and `latest` follow creation order", (t) => {
+  const dir = tmpDir();
+  const { file, db } = makeLiveDb(dir);
+  db.close();
+  const backupDir = path.join(dir, "backups");
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-20T12:00:00Z") });
+  const made = [];
+  for (let i = 0; i < 4; i++) {
+    made.push(backup.runBackup({ dbPath: file, backupDir, retention: 3 }));
+    t.mock.timers.reset();
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-20T12:00:00Z") - (i + 1) * 3600_000 }); // an hour EARLIER each time
+  }
+  t.mock.timers.reset();
+
+  const names = backup.listBackups({ backupDir }).map((b) => b.name);
+  assert.equal(names.length, 3);
+  assert.deepEqual(names, [made[3], made[2], made[1]].map((p) => path.basename(p)), "newest = last CREATED, despite the earliest timestamp");
+  assert.equal(fs.existsSync(made[0]), false, "the first-created backup is the one pruned");
+  assert.equal(backup.latestBackup({ backupDir }), made[3]);
+  const seqs = names.map((n) => Number(/^finops-(\d{6})-/.exec(n)[1]));
+  assert.deepEqual(seqs, [4, 3, 2], "sequence numbers count creation order");
+});
+
+test("backups from before sequence numbers existed sort as OLDER than any new backup, so an upgraded install keeps and prunes correctly", () => {
+  const dir = tmpDir();
+  const { file, db } = makeLiveDb(dir);
+  db.close();
+  const backupDir = path.join(dir, "backups");
+  fs.mkdirSync(backupDir);
+  // legacy files, including one stamped far in the FUTURE relative to now
+  for (const n of ["finops-2026-01-01T00-00-00-000Z.db", "finops-2099-01-01T00-00-00-000Z.db"]) fs.writeFileSync(path.join(backupDir, n), "legacy");
+  const made = backup.runBackup({ dbPath: file, backupDir, retention: 2 });
+  assert.equal(backup.latestBackup({ backupDir }), made, "a real new backup beats a legacy file even one dated 2099");
+  const left = backup.listBackups({ backupDir }).map((b) => b.name);
+  assert.equal(left.length, 2);
+  assert.ok(left.includes(path.basename(made)));
+  assert.ok(left.includes("finops-2099-01-01T00-00-00-000Z.db"), "of the legacy files, the later-named one is kept");
+  assert.equal(fs.existsSync(path.join(backupDir, "finops-2026-01-01T00-00-00-000Z.db")), false);
+});
+
+test("a backwards clock is reported in the log rather than silently tolerated", (t) => {
+  const logger = require("../server/logger");
+  const warnings = [];
+  t.mock.method(logger, "warn", (msg) => warnings.push(String(msg)));
+  const dir = tmpDir();
+  const { file, db } = makeLiveDb(dir);
+  db.close();
+  const backupDir = path.join(dir, "backups");
+  fs.mkdirSync(backupDir);
+  fs.writeFileSync(path.join(backupDir, "finops-2099-01-01T00-00-00-000Z.db"), "future");
+  backup.runBackup({ dbPath: file, backupDir, retention: 5 });
+  assert.ok(warnings.some((w) => /clock appears to have gone BACKWARDS/.test(w)), warnings.join(" | "));
+});
+
+test("sequence numbers keep counting after pruning and never repeat", () => {
+  const dir = tmpDir();
+  const { file, db } = makeLiveDb(dir);
+  db.close();
+  const backupDir = path.join(dir, "backups");
+  const seqs = [];
+  for (let i = 0; i < 5; i++) seqs.push(Number(/^finops-(\d{6})-/.exec(path.basename(backup.runBackup({ dbPath: file, backupDir, retention: 2 })))[1]));
+  assert.deepEqual(seqs, [1, 2, 3, 4, 5]);
+});

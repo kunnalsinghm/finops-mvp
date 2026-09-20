@@ -7,7 +7,12 @@ backup - so the drill in section 3 is worth doing once, on a copy, before you ne
 ## 1. What is backed up, and when (SQLite)
 
 - The server takes a backup at startup and every 6 hours, into `data/backups/`
-  (`finops-<timestamp>.db`), keeping the newest `FINOPS_BACKUP_RETENTION` (default 7).
+  (`finops-<seq>-<timestamp>.db`), keeping the newest `FINOPS_BACKUP_RETENTION` (default 7).
+  "Newest" means **last created** (the 6-digit sequence), not the latest timestamp, so a
+  system clock that is corrected or goes backwards can never cause a fresh backup to be
+  pruned or an older one to be restored by `--latest`. The server logs a warning when it
+  notices the clock went backwards. Backups made by earlier versions have no sequence and
+  are treated as older than any new one.
 - Each backup is a **consistent snapshot** made with SQLite's `VACUUM INTO`, so it is
   correct even while the server is writing. (An earlier version copied the raw file,
   which in WAL mode could miss recent writes or contain no tables at all.)
@@ -36,7 +41,7 @@ Scheduler) and alert on a non-zero exit.
 
 1. **Stop the server.** (On Windows a running server locks the file; the restore will
    refuse and roll back rather than corrupt anything.)
-2. Choose a backup (`dir data\backups`, newest last in the name) and restore:
+2. Choose a backup (`dir data\backups`; the highest sequence number is the newest) and restore:
    ```
    npm run restore -- --latest --force
    npm run restore -- data\backups\finops-2026-09-19T10-00-00-000Z.db --force

@@ -43,6 +43,25 @@ function isBackupName(f) {
   return f.startsWith("finops-") && f.endsWith(".db");
 }
 
+// ORDER BACKUPS BY CREATION SEQUENCE, NEVER BY THE CLOCK.
+// Names are finops-<seq>-<timestamp>.db (seq = 6 digits, +1 per backup). An earlier
+// version ordered by the timestamp alone, which assumes the system clock only moves
+// forward. When it did not (NTP correction, VM resume, manual change) a fresh backup
+// sorted as the OLDEST and was pruned the instant it was created - while the log said
+// "created and verified" and `restore --latest` picked an older backup. The sequence
+// number is immune to that. Files from before this change have no sequence; they sort
+// as older than any sequenced backup, and among themselves by name as before.
+const SEQ_NAME = /^finops-(\d{6})-(.+)\.db$/;
+const backupSeq = (name) => { const m = SEQ_NAME.exec(name); return m ? Number(m[1]) : -1; };
+const backupStamp = (name) => { const m = /^finops-(?:\d{6}-)?(\d{4}-.+)\.db$/.exec(name); return m ? m[1] : ""; };
+function newestFirst(a, b) {
+  return backupSeq(b) - backupSeq(a) || b.localeCompare(a);
+}
+function nextSequence(backupDir) {
+  const names = fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter(isBackupName) : [];
+  return Math.max(0, ...names.map(backupSeq)) + 1;
+}
+
 // Consistent point-in-time copy of a live SQLite database into a new file.
 function snapshotDatabase(srcPath, destPath) {
   const src = new DatabaseSync(srcPath);
@@ -104,7 +123,14 @@ function runBackup({ dbPath = DB_PATH, backupDir = BACKUP_DIR, retention = RETEN
     return null;
   }
   fs.mkdirSync(backupDir, { recursive: true });
-  const backupPath = path.join(backupDir, `finops-${stamp()}.db`);
+  const now = stamp();
+  const existing = fs.readdirSync(backupDir).filter(isBackupName).sort(newestFirst);
+  if (existing.length && backupStamp(existing[0]) > now) {
+    logger.warn("The system clock appears to have gone BACKWARDS since the last backup; ordering by sequence, so nothing is lost", {
+      lastBackupStamp: backupStamp(existing[0]), nowStamp: now,
+    });
+  }
+  const backupPath = path.join(backupDir, `finops-${String(nextSequence(backupDir)).padStart(6, "0")}-${now}.db`);
 
   try {
     snapshotDatabase(dbPath, backupPath);
@@ -127,14 +153,18 @@ function runBackup({ dbPath = DB_PATH, backupDir = BACKUP_DIR, retention = RETEN
   }
   logger.info("Database backup created and verified", { backupPath, schemaVersion: report.schemaVersion, counts: report.counts });
 
-  pruneOldBackups({ backupDir, retention });
+  pruneOldBackups({ backupDir, retention, keep: backupPath });
   return backupPath;
 }
 
-function pruneOldBackups({ backupDir = BACKUP_DIR, retention = RETENTION_COUNT } = {}) {
+function pruneOldBackups({ backupDir = BACKUP_DIR, retention = RETENTION_COUNT, keep = null } = {}) {
   if (!fs.existsSync(backupDir)) return;
-  const files = fs.readdirSync(backupDir).filter(isBackupName).sort((a, b) => b.localeCompare(a)); // newest first - the filename embeds an ISO timestamp, so string sort is reliable (mtime is not, e.g. after a copy)
-  for (const f of files.slice(retention)) {
+  const files = fs.readdirSync(backupDir).filter(isBackupName).sort(newestFirst);
+  const protectedName = keep ? path.basename(keep) : null;
+  const keepSet = new Set(files.slice(0, retention));
+  if (protectedName) keepSet.add(protectedName); // the backup we just made must survive, whatever its name sorts as
+  for (const f of files) {
+    if (keepSet.has(f)) continue;
     fs.unlinkSync(path.join(backupDir, f));
     logger.info("Pruned old backup", { file: f });
   }
@@ -149,7 +179,7 @@ function listBackups({ backupDir = BACKUP_DIR } = {}) {
       const st = fs.statSync(path.join(backupDir, f));
       return { name: f, sizeBytes: st.size, createdAt: st.mtime.toISOString() };
     })
-    .sort((a, b) => b.name.localeCompare(a.name));
+    .sort((a, b) => newestFirst(a.name, b.name));
 }
 
 function latestBackup({ backupDir = BACKUP_DIR } = {}) {
