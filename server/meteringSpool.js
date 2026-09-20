@@ -25,13 +25,15 @@ function spoolPath() {
   return process.env.FINOPS_SPOOL_PATH || path.join(__dirname, "..", "data", "metering-spool.jsonl");
 }
 
-function spoolEvent(row, reason) {
+function spoolEvent(row, reason, { tenantSchema = null } = {}) {
   const file = spoolPath();
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.appendFileSync(
       file,
-      JSON.stringify({ spooled_at: new Date().toISOString(), reason: String(reason || ""), row }) + "\n"
+      // tenant_schema is what keeps a replayed row in the tenant it came from; absent (single-tenant
+      // mode, or a spool written before multi-tenancy) means the one shared database.
+      JSON.stringify({ spooled_at: new Date().toISOString(), reason: String(reason || ""), tenant_schema: tenantSchema, row }) + "\n"
     );
     return { spooled: true, file };
   } catch (err) {
@@ -60,7 +62,22 @@ async function replaySpool() {
       continue;
     }
     try {
-      await insertUsageEvent(entry.row);
+      let targetDb;
+      if (entry.tenant_schema) {
+        // If the tenant can't be resolved right now, the row stays in the spool - it must
+        // never be replayed into the default schema, which would attribute one customer's
+        // usage to whoever owns that schema.
+        const tenancy = require("./tenancy");
+        // getTenantDb() will CREATE SCHEMA for any well-formed name, so a row for a tenant that
+        // has since been deleted would silently resurrect its schema. Only a tenant the control
+        // plane still knows may receive a replay.
+        const { controlPlaneReady, controlPlaneDb } = tenancy.initControlPlane();
+        await controlPlaneReady;
+        const known = await controlPlaneDb.get("SELECT 1 AS ok FROM tenants WHERE schema_name = ?", [entry.tenant_schema]);
+        if (!known) throw new Error(`unknown tenant schema '${entry.tenant_schema}'`);
+        targetDb = await tenancy.getTenantDb(entry.tenant_schema);
+      }
+      await insertUsageEvent(entry.row, targetDb);
       replayed++;
     } catch {
       kept.push(line);

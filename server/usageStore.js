@@ -6,9 +6,9 @@
 // can be replayed through exactly the same INSERT, rather than a second copy
 // of the SQL that could drift from it.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 
-async function insertUsageEvent(row) {
+async function insertUsageEvent(row, db = defaultDb) {
   const result = await db.run(
     `INSERT INTO usage_events
        (event_time, provider, model, team, environment, git_branch, user_id, key_id,

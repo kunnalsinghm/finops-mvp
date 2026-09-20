@@ -205,11 +205,11 @@ function toFocusRowFromGpu(expandedRow) {
   };
 }
 
-async function exportFocus({ from, to, format = "json" } = {}) {
-  const rawRows = await getUsageEventsRaw({ from, to });
+async function exportFocus({ from, to, format = "json", db } = {}) {
+  const rawRows = await getUsageEventsRaw({ from, to, db });
   const apiFocusRows = toFocusRows(rawRows);
 
-  const gpuExpandedRows = await getGpuEventsExpanded({ from, to });
+  const gpuExpandedRows = await getGpuEventsExpanded({ from, to, db });
   const gpuFocusRows = gpuExpandedRows.map(toFocusRowFromGpu);
 
   const focusRows = [...apiFocusRows, ...gpuFocusRows];

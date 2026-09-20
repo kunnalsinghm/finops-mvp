@@ -24,12 +24,12 @@
 // in this codebase. It only becomes a real tag if a human confirms it via
 // POST /api/tags/:usageEventId/correct.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 
 const MIN_HISTORY_FOR_INFERENCE = 3;
 const MIN_MAJORITY_FRACTION = 0.6;
 
-async function inferTag({ key_id, usage_event_id }) {
+async function inferTag({ key_id, usage_event_id, db = defaultDb }) {
   const teamCounts = await db.all(
     `SELECT team, COUNT(*) AS n
      FROM usage_events
@@ -65,7 +65,7 @@ async function inferTag({ key_id, usage_event_id }) {
   return { usage_event_id, inferred_team: inferredTeam, confidence, basis };
 }
 
-async function listInferences({ onlyUncorrected = false } = {}) {
+async function listInferences({ onlyUncorrected = false, db = defaultDb } = {}) {
   const where = onlyUncorrected ? "WHERE ti.corrected_team IS NULL" : "";
   return db.all(
     `SELECT ti.*, ue.provider, ue.model, ue.cost_usd, ue.event_time, ue.user_id
@@ -83,7 +83,7 @@ async function listInferences({ onlyUncorrected = false } = {}) {
 // stays governed by the existing team+environment rule elsewhere in the
 // codebase - correcting team alone doesn't force tagged=1 if environment
 // is still missing.
-async function correctTag(usageEventId, correctedTeam) {
+async function correctTag(usageEventId, correctedTeam, db = defaultDb) {
   const existing = await db.get("SELECT * FROM tag_inferences WHERE usage_event_id = ?", [usageEventId]);
   if (!existing) {
     throw Object.assign(new Error(`No inference exists for usage_event_id ${usageEventId}`), { code: "NOT_FOUND" });

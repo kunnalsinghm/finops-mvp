@@ -17,7 +17,7 @@
 //     string returned alongside every forecast, which is meant to travel
 //     with the number wherever it's displayed, not just live in this file.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { sinceDaysAgo, dayFloorExpr } = require("./storage/dialectSql");
 
 const MIN_DAYS_FOR_FORECAST = 3;
@@ -26,7 +26,7 @@ const MIN_DAYS_FOR_FORECAST = 3;
 // round(double precision, integer) overload (only round(numeric, integer)),
 // so that errors out on that backend. Rounding is done in JS after
 // fetching instead, which produces the identical result on both dialects.
-async function getDailySpend({ days = 30 } = {}) {
+async function getDailySpend({ days = 30, db = defaultDb } = {}) {
   const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
   const rows = await db.all(
     `SELECT ${dayFloorExpr("event_time")} AS day, SUM(cost_usd) AS cost
@@ -40,8 +40,8 @@ async function getDailySpend({ days = 30 } = {}) {
 
 // Returns null if there isn't enough data yet to forecast responsibly,
 // otherwise a forecast object with the projection and its own caveat text.
-async function forecastSpend({ lookbackDays = 7, horizonDays = 30 } = {}) {
-  const daily = await getDailySpend({ days: lookbackDays });
+async function forecastSpend({ lookbackDays = 7, horizonDays = 30, db = defaultDb } = {}) {
+  const daily = await getDailySpend({ days: lookbackDays, db });
 
   if (daily.length < MIN_DAYS_FOR_FORECAST) {
     return null;

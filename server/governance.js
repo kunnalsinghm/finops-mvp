@@ -5,7 +5,7 @@
 // swap the Maps below for Redis.
 
 const { normalizeModelId } = require("./pricing");
-const db = require("./storage");
+const defaultDb = require("./storage");
 
 // ---- Rate limiting (token bucket per key) ----
 // Prevents a recursive loop / bug from draining budget in minutes.
@@ -38,7 +38,7 @@ function checkRateLimit(keyId, limit = DEFAULT_LIMIT) {
 // An isolated key can only make 1 request/minute until a human approves it.
 const quarantineBuckets = new Map(); // keyId -> lastAllowedAt
 
-async function isQuarantined(keyId) {
+async function isQuarantined(keyId, db = defaultDb) {
   const row = await db.get("SELECT status FROM api_keys WHERE key_id = ?", [keyId]);
   return row?.status === "quarantined";
 }
@@ -53,15 +53,15 @@ function checkQuarantineAllowance(keyId) {
   return { allowed: true };
 }
 
-async function quarantineKey(keyId, reason) {
+async function quarantineKey(keyId, reason, db = defaultDb, alertDb = defaultDb) {
   await db.run(
     "UPDATE api_keys SET status = 'quarantined', quarantine_reason = ? WHERE key_id = ?",
     [reason, keyId]
   );
-  await logAlert("quarantine", `Key ${keyId} quarantined: ${reason}`);
+  await logAlert("quarantine", `Key ${keyId} quarantined: ${reason}`, alertDb);
 }
 
-async function approveKey(keyId) {
+async function approveKey(keyId, db = defaultDb) {
   await db.run(
     "UPDATE api_keys SET status = 'active', quarantine_reason = NULL WHERE key_id = ?",
     [keyId]
@@ -88,7 +88,7 @@ function getFallback(provider, model) {
 }
 
 // ---- Alert log (shared by governance + budgets) ----
-async function logAlert(type, message) {
+async function logAlert(type, message, db = defaultDb) {
   // Explicit ISO timestamp - see audit.js's logAudit for why (consistent
   // format regardless of backend, matching event_time's convention).
   await db.run(

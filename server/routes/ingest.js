@@ -6,7 +6,7 @@
 // in an "untagged spend" view rather than silently vanishing or breaking traffic.
 
 const express = require("express");
-const db = require("../storage");
+const defaultDb = require("../storage");
 const { computeCost } = require("../pricing");
 const { requireAuth } = require("../auth");
 const { checkRateLimit } = require("../governance");
@@ -24,7 +24,7 @@ const router = express.Router();
 // Was a db.prepare(...) statement with named (@col) params under the old
 // sync db.js. Positional params + await, same pattern as every other
 // migrated insert in this codebase (see shadowTest.js/seed.js).
-async function insertUsageEvent(row) {
+async function insertUsageEvent(row, db = defaultDb) {
   const result = await db.run(
     `INSERT INTO usage_events
        (event_time, provider, model, team, environment, git_branch, user_id, key_id,
@@ -108,7 +108,8 @@ router.post("/", requireAuth("write"), async (req, res) => {
   if (injectionCheck.flagged) {
     await logAlert(
       "prompt-injection",
-      `Blocked ingest event from key '${req.apiKey.key_id}' - matched: ${injectionCheck.matched.join(", ")}`
+      `Blocked ingest event from key '${req.apiKey.key_id}' - matched: ${injectionCheck.matched.join(", ")}`,
+      req.db
     );
     return res.status(400).json({
       error: "Request blocked: possible prompt injection detected.",
@@ -116,7 +117,7 @@ router.post("/", requireAuth("write"), async (req, res) => {
     });
   }
 
-  const { cost_usd, rate_found } = await computeCost({ provider, model, input_tokens, output_tokens });
+  const { cost_usd, rate_found } = await computeCost({ provider, model, input_tokens, output_tokens, db: req.db });
 
   const tagged = Boolean(team && environment) ? 1 : 0;
 
@@ -135,7 +136,8 @@ router.post("/", requireAuth("write"), async (req, res) => {
         "pii-redaction",
         `Redacted PII in ingest payload - team:${team || "untagged"} - ${Object.entries(counts)
           .map(([k, v]) => `${k.toLowerCase()}:${v}`)
-          .join(", ")}`
+          .join(", ")}`,
+        req.db
       );
     }
   }
@@ -170,15 +172,16 @@ router.post("/", requireAuth("write"), async (req, res) => {
   // is inserted, so the event itself doesn't dilute the average/history it's
   // being compared to. Neither check blocks the request (see fraudDetection.js
   // for why this is flag-only, not auto-block).
-  const anomaly = await checkAnomaly({ provider, model, cost_usd: cost_usd ?? 0, team });
+  const anomaly = await checkAnomaly({ provider, model, cost_usd: cost_usd ?? 0, team, db: req.db });
   const fraud = await checkKeyFraudSignals({
     key_id: req.apiKey.key_id,
     provider,
     model,
     client_region: req.header("X-Client-Region") || null,
+    db: req.db,
   });
 
-  const insertedId = await insertUsageEvent(row);
+  const insertedId = await insertUsageEvent(row, req.db);
 
   // Smart/inferred tagging: only for events that came in genuinely
   // untagged (no team supplied at all) - never overrides or second-guesses
@@ -187,7 +190,7 @@ router.post("/", requireAuth("write"), async (req, res) => {
   // smartTagging.js header for why conflating the two would be dangerous.
   let tagInference;
   if (!team) {
-    tagInference = await inferTag({ key_id: req.apiKey.key_id, usage_event_id: insertedId });
+    tagInference = await inferTag({ key_id: req.apiKey.key_id, usage_event_id: insertedId, db: req.db });
   }
 
   res.status(201).json({

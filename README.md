@@ -60,6 +60,8 @@ Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connecti
 
 **Not yet supported in multi-tenant mode:** dashboard session login (`/api/auth/login`) — the session store is a single global in-memory map with no tenant concept, so it's deliberately disabled (`501`) rather than risk a cross-tenant leak. Use an `X-API-Key` in multi-tenant mode until this is built.
 
+**What is tenant-scoped, and what is switched off.** The data-plane routes (`ingest`, `proxy`, `costs`, `budgets`, `keys`, `pricing`, `cache`, `semantic-cache`, `agents`, `tags`, `gpu-usage`, and the allow-list / quota / residency / shadow-test / recommendation routes) read and write only the calling tenant's schema via `req.db`, and the in-memory response caches are keyed per tenant. Two-tenant tests over real HTTP against the real routes cover this (`test/multiTenantIsolation.test.js`, `test/multiTenantHardening.test.js`; Postgres only). The route groups that have **not** been converted yet — `alerts`, `commitments`, `gitops`, `reconcile`, `reports`, `query`, `tool-calls` (list in `server/tenantGuard.js`) — answer `501` in multi-tenant mode instead of silently serving the default schema. In multi-tenant mode the periodic alert / commitment / weekly-briefing jobs and the SQLite backup do not cover tenants either.
+
 ## Features
 
 ### Cost tracking & attribution
@@ -244,7 +246,7 @@ The server binds to `127.0.0.1` by default, so the bootstrap window can't be rea
 - SQLite backups are file copies, not point-in-time/incremental; Postgres deployments are responsible for their own backup strategy
 - Dashboard session login is not yet supported in multi-tenant mode (see "Deployment modes") — API-key auth only
 - No agent-level GPU utilization ingestion beyond cluster-level totals (no per-agent GPU-hours breakdown)
-- **Multi-tenant mode isolates authentication and connection pools, but the route handlers do not yet use the tenant-bound database handle** (`req.db`); they still use the single global one, and the exact-match cache, rate-limit buckets and background alert jobs are process-global. Do not run `FINOPS_MULTI_TENANT=true` for real customers until tenant context is threaded through the data layer and covered by tests that hit the real routes. One deployment per customer is unaffected
+- Multi-tenant mode is not complete: seven route groups are switched off (`501`), periodic alert / commitment / briefing jobs do not run per tenant, and the process-global in-memory rate-limit and quarantine state is keyed by API key id rather than by tenant (key ids are unique, so this cannot cross tenants, but it is not partitioned either). One deployment per customer avoids all of this
 - `X-Disable-PII-Redaction: true` can be sent by any caller with proxy access; it is not yet an admin-controlled privilege like `allow_background`
 - Historical usage recorded at $0 before a model had a price is not retroactively re-priced (`GET /api/pricing/unpriced` finds unpriced models, not stale $0 rows)
 - Schema migrations cover the single-tenant SQLite and Postgres schemas; the multi-tenant control-plane and per-tenant schemas are not migrated yet

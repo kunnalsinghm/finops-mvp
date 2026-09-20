@@ -209,17 +209,22 @@ async function createTenant({ name }) {
   return { id: inserted.lastInsertRowid, name, schema_name: schemaName, status: "active" };
 }
 
-async function createTenantApiKey({ tenant_id, label, role = "developer" }) {
+async function createTenantApiKey({ tenant_id, label, role = "developer", team = null, allow_background = false }) {
   const { controlPlaneReady, controlPlaneDb } = initControlPlane();
   await controlPlaneReady;
   const key_id = `fk_${require("crypto").randomBytes(20).toString("hex")}`;
-  await controlPlaneDb.run("INSERT INTO api_keys (tenant_id, key_id, label, role) VALUES (?, ?, ?, ?)", [
+  // team + allow_background are what make identity enforceable for this key
+  // (see keyIdentity.js): they used to be silently dropped here, so a key created
+  // through the API could never actually be bound to a team in multi-tenant mode.
+  await controlPlaneDb.run("INSERT INTO api_keys (tenant_id, key_id, label, role, team, allow_background) VALUES (?, ?, ?, ?, ?, ?)", [
     tenant_id,
     key_id,
     label,
     role,
+    team || null,
+    allow_background ? 1 : 0,
   ]);
-  return { key_id, tenant_id, label, role };
+  return { key_id, tenant_id, label, role, team: team || null, allow_background: Boolean(allow_background) };
 }
 
 // The function auth.js's requireAuth calls on every request in multi-tenant

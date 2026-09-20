@@ -6,7 +6,7 @@
 // each new event against a rolling baseline for that provider/model and
 // alerts immediately if it's a wild outlier, independent of budget status.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { sinceDaysAgo } = require("./storage/dialectSql");
 const { logAlert } = require("./governance");
 
@@ -22,7 +22,7 @@ const MIN_SAMPLE_SIZE = 10;
 const ANOMALY_MULTIPLIER = 5;
 const BASELINE_LOOKBACK_DAYS = 30;
 
-async function checkAnomaly({ provider, model, cost_usd, team }) {
+async function checkAnomaly({ provider, model, cost_usd, team, db = defaultDb }) {
   if (!cost_usd || cost_usd <= 0) return null;
 
   const baseline = await db.get(
@@ -37,7 +37,7 @@ async function checkAnomaly({ provider, model, cost_usd, team }) {
 
   if (cost_usd > baseline.avg_cost * ANOMALY_MULTIPLIER) {
     const message = `Cost anomaly: a single ${provider}/${model} request cost $${cost_usd.toFixed(4)} - ${Math.round(cost_usd / baseline.avg_cost)}x the recent average of $${baseline.avg_cost.toFixed(4)}${team ? ` (team: ${team})` : ""}.`;
-    await logAlert("anomaly", message);
+    await logAlert("anomaly", message, db);
     return { flagged: true, message, multiplier: Math.round(cost_usd / baseline.avg_cost) };
   }
 

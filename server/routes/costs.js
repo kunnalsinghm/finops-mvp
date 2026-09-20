@@ -6,7 +6,6 @@
 // on that backend. Same pattern as forecast.js/budgets.js.
 
 const express = require("express");
-const db = require("../storage");
 const { dayFloorExpr, todayClause } = require("../storage/dialectSql");
 const { requireAuth } = require("../auth");
 const { forecastSpend, MIN_DAYS_FOR_FORECAST } = require("../forecast");
@@ -20,7 +19,7 @@ function round4(n) {
 
 // Total cost + breakdown by team
 router.get("/by-team", requireAuth("read"), async (req, res) => {
-  const rows = await db.all(
+  const rows = await req.db.all(
     `SELECT COALESCE(team, 'Untagged') AS team,
             SUM(cost_usd) AS total_cost,
             COUNT(*) AS event_count
@@ -33,7 +32,7 @@ router.get("/by-team", requireAuth("read"), async (req, res) => {
 
 // Cost over time (daily buckets)
 router.get("/over-time", requireAuth("read"), async (req, res) => {
-  const rows = await db.all(
+  const rows = await req.db.all(
     `SELECT ${dayFloorExpr("event_time")} AS day,
             SUM(cost_usd) AS total_cost
      FROM usage_events
@@ -45,7 +44,7 @@ router.get("/over-time", requireAuth("read"), async (req, res) => {
 
 // Cost by provider/model (for the "which model is expensive" view)
 router.get("/by-model", requireAuth("read"), async (req, res) => {
-  const rows = await db.all(
+  const rows = await req.db.all(
     `SELECT provider, model,
             SUM(cost_usd) AS total_cost,
             SUM(input_tokens) AS input_tokens,
@@ -63,7 +62,7 @@ router.get("/by-model", requireAuth("read"), async (req, res) => {
 // 'Untagged' the same way team/environment tagging already works, rather
 // than silently dropped from this view.
 router.get("/by-feature", requireAuth("read"), async (req, res) => {
-  const rows = await db.all(
+  const rows = await req.db.all(
     `SELECT COALESCE(feature_id, 'Untagged') AS feature_id,
             SUM(cost_usd) AS total_cost,
             COUNT(*) AS event_count
@@ -79,7 +78,7 @@ router.get("/by-feature", requireAuth("read"), async (req, res) => {
 // parameterized ?group_by=) so each stays a simple, cacheable GET with an
 // obvious shape for the dashboard to consume.
 router.get("/by-customer", requireAuth("read"), async (req, res) => {
-  const rows = await db.all(
+  const rows = await req.db.all(
     `SELECT COALESCE(customer_id, 'Untagged') AS customer_id,
             SUM(cost_usd) AS total_cost,
             COUNT(*) AS event_count
@@ -92,7 +91,7 @@ router.get("/by-customer", requireAuth("read"), async (req, res) => {
 
 // Untagged spend (shadow-AI-adjacent visibility - flagged as a gap earlier)
 router.get("/untagged", requireAuth("read"), async (req, res) => {
-  const row = await db.get(
+  const row = await req.db.get(
     `SELECT SUM(cost_usd) AS total_untagged_cost, COUNT(*) AS event_count
      FROM usage_events WHERE tagged = 0`
   );
@@ -101,10 +100,10 @@ router.get("/untagged", requireAuth("read"), async (req, res) => {
 
 // Simple summary for top-of-dashboard cards
 router.get("/summary", requireAuth("read"), async (req, res) => {
-  const totals = await db.get(
+  const totals = await req.db.get(
     `SELECT SUM(cost_usd) AS total_cost, COUNT(*) AS event_count FROM usage_events`
   );
-  const today = await db.get(
+  const today = await req.db.get(
     `SELECT SUM(cost_usd) AS today_cost FROM usage_events WHERE ${todayClause("event_time")}`
   );
   res.json({ ...totals, total_cost: round4(totals.total_cost), today_cost: round4(today.today_cost) });
@@ -117,7 +116,7 @@ router.get("/summary", requireAuth("read"), async (req, res) => {
 router.get("/forecast", requireAuth("read"), async (req, res) => {
   const lookbackDays = Number(req.query.lookback_days) || 7;
   const horizonDays = Number(req.query.horizon_days) || 30;
-  const forecast = await forecastSpend({ lookbackDays, horizonDays });
+  const forecast = await forecastSpend({ lookbackDays, horizonDays, db: req.db });
   if (!forecast) {
     return res.json({
       available: false,
@@ -137,7 +136,7 @@ router.get("/forecast-variance", requireAuth("read"), async (req, res) => {
   if (!team) {
     return res.status(400).json({ error: "team query parameter is required" });
   }
-  const variance = await getForecastVariance(team);
+  const variance = await getForecastVariance(team, req.db);
   res.json(variance);
 });
 

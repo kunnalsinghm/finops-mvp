@@ -11,7 +11,7 @@ const router = express.Router();
 
 router.get("/", requireAuth("read"), async (req, res) => {
   const { scope_type, scope_value } = req.query;
-  res.json(await listRegionAllowlistEntries({ scope_type, scope_value }));
+  res.json(await listRegionAllowlistEntries({ scope_type, scope_value, db: req.db }));
 });
 
 router.post("/", requireAuth("manage_keys"), async (req, res) => {
@@ -23,8 +23,8 @@ router.post("/", requireAuth("manage_keys"), async (req, res) => {
     return res.status(400).json({ error: "scope_type must be 'key' or 'team'" });
   }
   try {
-    const id = await addRegionAllowlistEntry({ scope_type, scope_value, region });
-    await logAudit(req.apiKey.key_id, "region_allowlist.add", scope_value, { scope_type, region });
+    const id = await addRegionAllowlistEntry({ scope_type, scope_value, region, db: req.db });
+    await logAudit(req.apiKey.key_id, "region_allowlist.add", scope_value, { scope_type, region }, req.db);
     res.status(201).json({ id, scope_type, scope_value, region });
   } catch (err) {
     if (err.message && /unique/i.test(err.message)) {
@@ -35,9 +35,9 @@ router.post("/", requireAuth("manage_keys"), async (req, res) => {
 });
 
 router.delete("/:id", requireAuth("manage_keys"), async (req, res) => {
-  const removed = await removeRegionAllowlistEntry(req.params.id);
+  const removed = await removeRegionAllowlistEntry(req.params.id, req.db);
   if (!removed) return res.status(404).json({ error: "No allow-list entry with that id" });
-  await logAudit(req.apiKey.key_id, "region_allowlist.remove", req.params.id, {});
+  await logAudit(req.apiKey.key_id, "region_allowlist.remove", req.params.id, {}, req.db);
   res.json({ ok: true });
 });
 

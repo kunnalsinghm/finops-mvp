@@ -75,6 +75,11 @@ async function requireTenantAuth(permission) {
     req.tenantId = row.tenant_id;
     req.tenantSchema = row.tenant_schema;
     req.db = await tenancy.getTenantDb(row.tenant_schema);
+    // api_keys/users live in the shared control-plane schema, not in any
+    // tenant's own schema (see schema.controlPlane.js) - resolveTenantApiKey
+    // above already awaited controlPlaneReady, so this is safe to read
+    // immediately without awaiting again.
+    req.controlPlaneDb = tenancy.initControlPlane().controlPlaneDb;
     next();
   };
 }
@@ -113,6 +118,8 @@ function requireAuth(permission) {
         return res.status(403).json({ error: `Role '${session.role}' lacks '${permission}' permission` });
       }
       req.apiKey = { role: session.role, key_id: `user:${session.username}`, label: session.username };
+      req.db = db;
+      req.controlPlaneDb = db; // single-tenant: same db, no real control-plane split
       return next();
     }
 
@@ -130,6 +137,8 @@ function requireAuth(permission) {
         );
       }
       req.apiKey = { role: "admin", key_id: "bootstrap", label: "bootstrap (no keys/users created yet)" };
+      req.db = db;
+      req.controlPlaneDb = db; // single-tenant: same db, no real control-plane split
       return next();
     }
 
@@ -150,6 +159,8 @@ function requireAuth(permission) {
     }
 
     req.apiKey = row;
+    req.db = db;
+    req.controlPlaneDb = db; // single-tenant: same db, no real control-plane split
     next();
   };
 }

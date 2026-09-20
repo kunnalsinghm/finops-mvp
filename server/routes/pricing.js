@@ -1,7 +1,6 @@
 ﻿// routes/pricing.js - manual pricing override endpoint (safety net for stale catalogue rates)
 
 const express = require("express");
-const db = require("../storage");
 const { setOverride, getRate, BASELINE_CATALOGUE } = require("../pricing");
 const { requireAuth } = require("../auth");
 
@@ -19,7 +18,7 @@ router.get("/catalogue", requireAuth("read"), (req, res) => {
 // covers proxy AND ingest traffic and also finds history recorded before a
 // price existed. Fix an entry with POST /api/pricing/override.
 router.get("/unpriced", requireAuth("read"), async (req, res) => {
-  const groups = await db.all(
+  const groups = await req.db.all(
     `SELECT provider, model, COUNT(*) AS events,
             COALESCE(SUM(input_tokens), 0) AS input_tokens,
             COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -29,7 +28,7 @@ router.get("/unpriced", requireAuth("read"), async (req, res) => {
   const unpriced = [];
   const approximate = [];
   for (const g of groups) {
-    const rate = await getRate(g.provider, g.model);
+    const rate = await getRate(g.provider, g.model, req.db);
     const base = { provider: g.provider, model: g.model, events: Number(g.events), input_tokens: Number(g.input_tokens), output_tokens: Number(g.output_tokens) };
     if (!rate) unpriced.push(base);
     else if (rate.approximate) approximate.push({ ...base, matched_family: rate.matched_family, recorded_cost_usd: Number(g.cost_usd) });
@@ -49,8 +48,8 @@ router.post("/override", requireAuth("manage_budgets"), async (req, res) => {
       error: "provider, model, input_per_1k, and output_per_1k are required",
     });
   }
-  await setOverride({ provider, model, input_per_1k, output_per_1k });
-  await logAudit(req.apiKey.key_id, "pricing.override", `${provider}/${model}`, { input_per_1k, output_per_1k });
+  await setOverride({ provider, model, input_per_1k, output_per_1k, db: req.db });
+  await logAudit(req.apiKey.key_id, "pricing.override", `${provider}/${model}`, { input_per_1k, output_per_1k }, req.db);
   res.status(201).json({ ok: true });
 });
 

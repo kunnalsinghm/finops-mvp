@@ -40,6 +40,8 @@ const regionAllowlistRoute = require("./routes/regionAllowlist");
 const toolCallsRoute = require("./routes/toolCalls");
 const gpuUsageRoute = require("./routes/gpuUsage");
 const queryRoute = require("./routes/query");
+const tenantsRoute = require("./routes/tenants");
+const { NOT_TENANT_AWARE, blockInMultiTenant } = require("./tenantGuard");
 const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
 const { checkCommitmentAlerts } = require("./commitments");
 const { checkWeeklyBriefing } = require("./weeklyBriefing");
@@ -92,6 +94,10 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, uptime_seconds: Math.round(process.uptime()) });
 });
 
+// Route groups not yet converted to per-tenant databases are switched off in multi-tenant
+// mode (501) instead of silently serving the default schema. See tenantGuard.js.
+for (const { path: guarded } of NOT_TENANT_AWARE) app.use(guarded, blockInMultiTenant());
+
 app.use("/api/ingest", ingestRoute);
 app.use("/api/costs", costsRoute);
 app.use("/api/budgets", budgetsRoute);
@@ -121,6 +127,9 @@ app.use("/api/region-allowlist", regionAllowlistRoute);
 app.use("/api/tool-calls", toolCallsRoute);
 app.use("/api/gpu-usage", gpuUsageRoute);
 app.use("/api/query", queryRoute);
+// Tenant signup - deliberately unauthenticated (a new customer has no key yet) and a 404
+// unless FINOPS_MULTI_TENANT=true. See routes/tenants.js.
+app.use("/api/tenants", tenantsRoute);
 
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 

@@ -5,11 +5,11 @@ const { getSemanticCacheStats, clearSemanticCache } = require("../semanticCache"
 const router = express.Router();
 
 router.get("/stats", requireAuth("read"), (req, res) => {
-  res.json(getSemanticCacheStats());
+  res.json(getSemanticCacheStats(req.tenantId));
 });
 
 router.post("/clear", requireAuth("manage_keys"), (req, res) => {
-  clearSemanticCache();
+  clearSemanticCache(req.tenantId);
   res.json({ ok: true });
 });
 

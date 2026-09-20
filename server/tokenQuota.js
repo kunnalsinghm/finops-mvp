@@ -32,7 +32,7 @@
 //     rolling 24h/7d window. See storage/dialectSql.js's todayClause /
 //     thisWeekClause for how each dialect expresses that boundary.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { todayClause, thisWeekClause } = require("./storage/dialectSql");
 
 function periodClause(period) {
@@ -41,12 +41,12 @@ function periodClause(period) {
   throw new Error(`Unknown period '${period}'`);
 }
 
-async function getQuotaRows(scopeType, scopeValue) {
+async function getQuotaRows(scopeType, scopeValue, db = defaultDb) {
   if (!scopeValue) return [];
   return db.all("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ?", [scopeType, scopeValue]);
 }
 
-async function tokensUsedInPeriod(column, scopeValue, period) {
+async function tokensUsedInPeriod(column, scopeValue, period, db = defaultDb) {
   const row = await db.get(
     `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total
      FROM usage_events
@@ -59,10 +59,10 @@ async function tokensUsedInPeriod(column, scopeValue, period) {
 // Returns { allowed, scope, violations }. scope is 'key', 'team', or null
 // (unrestricted). violations lists every exceeded period with its limit
 // and actual usage, so a block response/audit entry shows the full picture.
-async function checkTokenQuota({ keyId, team }) {
-  const keyRows = await getQuotaRows("key", keyId);
+async function checkTokenQuota({ keyId, team, db = defaultDb }) {
+  const keyRows = await getQuotaRows("key", keyId, db);
   const scope = keyRows.length > 0 ? "key" : null;
-  const rows = keyRows.length > 0 ? keyRows : await getQuotaRows("team", team);
+  const rows = keyRows.length > 0 ? keyRows : await getQuotaRows("team", team, db);
   const resolvedScope = scope || (rows.length > 0 ? "team" : null);
 
   if (rows.length === 0) return { allowed: true, scope: null, violations: [] };
@@ -72,7 +72,7 @@ async function checkTokenQuota({ keyId, team }) {
 
   const violations = [];
   for (const row of rows) {
-    const used = await tokensUsedInPeriod(scopeColumn, scopeValue, row.period);
+    const used = await tokensUsedInPeriod(scopeColumn, scopeValue, row.period, db);
     if (used >= row.token_limit) {
       violations.push({ period: row.period, limit: row.token_limit, used });
     }
@@ -84,7 +84,7 @@ async function checkTokenQuota({ keyId, team }) {
 // RETURNING id: required for the Postgres backend to report the new row's
 // id via result.lastInsertRowid - a no-op for SQLite (see modelAllowlist.js
 // for the same pattern and why).
-async function addQuota({ scope_type, scope_value, period, token_limit }) {
+async function addQuota({ scope_type, scope_value, period, token_limit, db = defaultDb }) {
   const result = await db.run(
     "INSERT INTO token_quotas (scope_type, scope_value, period, token_limit) VALUES (?, ?, ?, ?) RETURNING id",
     [scope_type, scope_value, period, token_limit]
@@ -92,12 +92,12 @@ async function addQuota({ scope_type, scope_value, period, token_limit }) {
   return result.lastInsertRowid;
 }
 
-async function removeQuota(id) {
+async function removeQuota(id, db = defaultDb) {
   const result = await db.run("DELETE FROM token_quotas WHERE id = ?", [id]);
   return result.changes > 0;
 }
 
-async function listQuotas({ scope_type, scope_value } = {}) {
+async function listQuotas({ scope_type, scope_value, db = defaultDb } = {}) {
   if (scope_type && scope_value) {
     return db.all("SELECT * FROM token_quotas WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC", [
       scope_type,

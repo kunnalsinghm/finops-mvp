@@ -5,7 +5,7 @@
 // table, since the blueprint flagged auto-scraped pricing as a trust-risk if
 // it silently goes stale. Overrides always win.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 
 // Baseline rates in USD per 1,000 tokens. THESE ARE ILLUSTRATIVE PLACEHOLDERS -
 // check current vendor pricing pages before relying on them for real billing,
@@ -100,7 +100,7 @@ function familyFallback(providerCatalogue, normalized) {
   return best;
 }
 
-async function getRate(provider, model) {
+async function getRate(provider, model, db = defaultDb) {
   const p = String(provider || "").toLowerCase();
   const m = String(model || "");
   const normalized = normalizeModelId(m);
@@ -130,7 +130,7 @@ async function getRate(provider, model) {
   return null; // unknown provider/model - caller MUST flag, not silently cost $0
 }
 
-async function setOverride({ provider, model, input_per_1k, output_per_1k }) {
+async function setOverride({ provider, model, input_per_1k, output_per_1k, db = defaultDb }) {
   // EXCLUDED works identically in this ON CONFLICT clause on both SQLite and
   // Postgres (same pseudo-table name in both dialects) - no dialect helper
   // needed here. updated_at is passed explicitly (see audit.js/governance.js
@@ -146,8 +146,8 @@ async function setOverride({ provider, model, input_per_1k, output_per_1k }) {
   );
 }
 
-async function computeCost({ provider, model, input_tokens = 0, output_tokens = 0 }) {
-  const rate = await getRate(provider, model);
+async function computeCost({ provider, model, input_tokens = 0, output_tokens = 0, db = defaultDb }) {
+  const rate = await getRate(provider, model, db);
   if (!rate) {
     return { cost_usd: null, rate_found: false };
   }

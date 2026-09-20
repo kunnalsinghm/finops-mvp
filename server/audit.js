@@ -5,9 +5,9 @@
 // a budget, who revoked a key, who overrode a price. Required for SOC2/audit
 // readiness per the original blueprint's compliance section.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 
-async function logAudit(actor, action, target, details = {}) {
+async function logAudit(actor, action, target, details = {}, db = defaultDb) {
   // created_at is set explicitly here (JS ISO string) rather than relying on
   // the schema's dialect-native DEFAULT, for the same reason event_time
   // always is: a single consistent format regardless of backend. Nothing
@@ -20,7 +20,7 @@ async function logAudit(actor, action, target, details = {}) {
   );
 }
 
-async function getAuditLog({ limit = 100, action, actor } = {}) {
+async function getAuditLog({ limit = 100, action, actor, db = defaultDb } = {}) {
   let query = "SELECT * FROM audit_log";
   const conditions = [];
   const params = [];

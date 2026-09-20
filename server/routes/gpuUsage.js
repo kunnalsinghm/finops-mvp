@@ -10,7 +10,7 @@ const router = express.Router();
 
 router.post("/ingest", requireAuth("write"), async (req, res) => {
   try {
-    const id = await ingestGpuUsage(req.body || {});
+    const id = await ingestGpuUsage({ ...(req.body || {}), db: req.db }); // db LAST: a client-supplied "db" field must never win
     res.status(201).json({ ok: true, id });
   } catch (err) {
     const status = err.code === "VALIDATION" ? 400 : 500;
@@ -19,7 +19,7 @@ router.post("/ingest", requireAuth("write"), async (req, res) => {
 });
 
 router.get("/blended", requireAuth("read"), async (req, res) => {
-  res.json(await getBlendedCostByTeam());
+  res.json(await getBlendedCostByTeam(req.db));
 });
 
 module.exports = router;

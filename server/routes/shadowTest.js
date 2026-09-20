@@ -10,12 +10,12 @@ const router = express.Router();
 
 router.get("/summary", requireAuth("read"), async (req, res) => {
   const days = Number(req.query.days) || 90;
-  res.json(await getShadowTestSummary({ days }));
+  res.json(await getShadowTestSummary({ days, db: req.db }));
 });
 
 router.get("/comparisons", requireAuth("read"), async (req, res) => {
   const limit = Number(req.query.limit) || 50;
-  res.json(await getShadowComparisons({ limit }));
+  res.json(await getShadowComparisons({ limit, db: req.db }));
 });
 
 module.exports = router;

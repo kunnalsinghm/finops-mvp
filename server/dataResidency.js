@@ -13,23 +13,23 @@
 // well-behaved clients, which is what most enterprise procurement
 // requirements are actually asking for at this layer.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 
-async function getEntriesForScope(scopeType, scopeValue) {
+async function getEntriesForScope(scopeType, scopeValue, db = defaultDb) {
   if (!scopeValue) return [];
   return db.all("SELECT region FROM region_allowlist WHERE scope_type = ? AND scope_value = ?", [scopeType, scopeValue]);
 }
 
-async function checkRegionAllowed({ keyId, team, region }) {
+async function checkRegionAllowed({ keyId, team, region, db = defaultDb }) {
   if (!region) return { allowed: true, scope: null, allowedRegions: [] };
 
-  const keyEntries = await getEntriesForScope("key", keyId);
+  const keyEntries = await getEntriesForScope("key", keyId, db);
   if (keyEntries.length > 0) {
     const allowed = keyEntries.some((e) => e.region === region);
     return { allowed, scope: "key", allowedRegions: keyEntries.map((e) => e.region) };
   }
 
-  const teamEntries = await getEntriesForScope("team", team);
+  const teamEntries = await getEntriesForScope("team", team, db);
   if (teamEntries.length > 0) {
     const allowed = teamEntries.some((e) => e.region === region);
     return { allowed, scope: "team", allowedRegions: teamEntries.map((e) => e.region) };
@@ -38,7 +38,7 @@ async function checkRegionAllowed({ keyId, team, region }) {
   return { allowed: true, scope: null, allowedRegions: [] };
 }
 
-async function addRegionAllowlistEntry({ scope_type, scope_value, region }) {
+async function addRegionAllowlistEntry({ scope_type, scope_value, region, db = defaultDb }) {
   const result = await db.run(
     "INSERT INTO region_allowlist (scope_type, scope_value, region) VALUES (?, ?, ?) RETURNING id",
     [scope_type, scope_value, region]
@@ -46,12 +46,12 @@ async function addRegionAllowlistEntry({ scope_type, scope_value, region }) {
   return result.lastInsertRowid;
 }
 
-async function removeRegionAllowlistEntry(id) {
+async function removeRegionAllowlistEntry(id, db = defaultDb) {
   const result = await db.run("DELETE FROM region_allowlist WHERE id = ?", [id]);
   return result.changes > 0;
 }
 
-async function listRegionAllowlistEntries({ scope_type, scope_value } = {}) {
+async function listRegionAllowlistEntries({ scope_type, scope_value, db = defaultDb } = {}) {
   if (scope_type && scope_value) {
     return db.all("SELECT * FROM region_allowlist WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC", [
       scope_type,

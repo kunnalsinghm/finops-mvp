@@ -6,10 +6,10 @@
 // doesn't grow forever and so you have a real answer if asked "how long do
 // you keep this data").
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { logAudit } = require("./audit");
 
-async function getUsageEventsRaw({ from, to } = {}) {
+async function getUsageEventsRaw({ from, to, db = defaultDb } = {}) {
   let query = "SELECT * FROM usage_events WHERE 1=1";
   const params = [];
   if (from) {
@@ -24,8 +24,8 @@ async function getUsageEventsRaw({ from, to } = {}) {
   return db.all(query, params);
 }
 
-async function exportUsageEvents({ from, to, format = "json" } = {}) {
-  const rows = await getUsageEventsRaw({ from, to });
+async function exportUsageEvents({ from, to, format = "json", db = defaultDb } = {}) {
+  const rows = await getUsageEventsRaw({ from, to, db });
 
   if (format === "csv") {
     if (!rows.length) return "";
@@ -53,12 +53,12 @@ function csvEscape(value) {
 // Deliberately requires an explicit cutoff rather than a vague "days ago"
 // default - retention policy should be a conscious decision, not a default
 // that quietly deletes data nobody meant to lose.
-async function purgeUsageEvents(beforeIsoDate, actor) {
+async function purgeUsageEvents(beforeIsoDate, actor, db = defaultDb) {
   if (!beforeIsoDate) throw new Error("beforeIsoDate is required");
   const countRow = await db.get("SELECT COUNT(*) AS n FROM usage_events WHERE event_time < ?", [beforeIsoDate]);
   const count = countRow.n;
   await db.run("DELETE FROM usage_events WHERE event_time < ?", [beforeIsoDate]);
-  await logAudit(actor, "data.purge", null, { before: beforeIsoDate, rowsDeleted: count });
+  await logAudit(actor, "data.purge", null, { before: beforeIsoDate, rowsDeleted: count }, db);
   return count;
 }
 
