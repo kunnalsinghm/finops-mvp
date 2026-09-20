@@ -8,7 +8,7 @@ const router = express.Router();
 
 router.get("/", requireAuth("manage_keys"), async (req, res) => {
   const { limit, action, actor } = req.query;
-  res.json(await getAuditLog({ limit: Number(limit) || 100, action, actor }));
+  res.json(await getAuditLog({ limit: Number(limit) || 100, action, actor, db: req.db }));
 });
 
 module.exports = router;

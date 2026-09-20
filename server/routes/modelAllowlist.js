@@ -11,7 +11,7 @@ const router = express.Router();
 
 router.get("/", requireAuth("read"), async (req, res) => {
   const { scope_type, scope_value } = req.query;
-  res.json(await listAllowlistEntries({ scope_type, scope_value }));
+  res.json(await listAllowlistEntries({ scope_type, scope_value, db: req.db }));
 });
 
 router.post("/", requireAuth("manage_keys"), async (req, res) => {
@@ -23,8 +23,8 @@ router.post("/", requireAuth("manage_keys"), async (req, res) => {
     return res.status(400).json({ error: "scope_type must be 'key' or 'team'" });
   }
   try {
-    const id = await addAllowlistEntry({ scope_type, scope_value, provider, model });
-    await logAudit(req.apiKey.key_id, "model_allowlist.add", scope_value, { scope_type, provider, model });
+    const id = await addAllowlistEntry({ scope_type, scope_value, provider, model, db: req.db });
+    await logAudit(req.apiKey.key_id, "model_allowlist.add", scope_value, { scope_type, provider, model }, req.db);
     res.status(201).json({ id, scope_type, scope_value, provider, model });
   } catch (err) {
     if (err.message && /unique/i.test(err.message)) {
@@ -35,9 +35,9 @@ router.post("/", requireAuth("manage_keys"), async (req, res) => {
 });
 
 router.delete("/:id", requireAuth("manage_keys"), async (req, res) => {
-  const removed = await removeAllowlistEntry(req.params.id);
+  const removed = await removeAllowlistEntry(req.params.id, req.db);
   if (!removed) return res.status(404).json({ error: "No allow-list entry with that id" });
-  await logAudit(req.apiKey.key_id, "model_allowlist.remove", req.params.id, {});
+  await logAudit(req.apiKey.key_id, "model_allowlist.remove", req.params.id, {}, req.db);
   res.json({ ok: true });
 });
 

@@ -8,7 +8,7 @@
 // category (see blueprint risk notes). This engine surfaces *opportunities*
 // for a human to evaluate, not autonomous decisions.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { sinceDaysAgo } = require("./storage/dialectSql");
 const { computeCost } = require("./pricing");
 const { CHEAPER_ALTERNATIVES } = require("./modelAlternatives");
@@ -17,7 +17,7 @@ const { getShadowStatsForPair, MIN_SAMPLES_FOR_CONFIDENCE, SIMILARITY_CONFIDENCE
 // Pairs of (expensive model -> cheaper same-provider alternative) worth testing
 // now live in modelAlternatives.js (shared with shadowTest.js).
 
-async function getModelSwitchRecommendations({ days = 30 } = {}) {
+async function getModelSwitchRecommendations({ days = 30, db = defaultDb } = {}) {
   const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
   const rows = await db.all(
     `SELECT provider, model, SUM(cost_usd) AS total_cost,
@@ -40,6 +40,7 @@ async function getModelSwitchRecommendations({ days = 30 } = {}) {
       model: alt.model,
       input_tokens: row.input_tokens,
       output_tokens: row.output_tokens,
+      db,
     });
 
     if (!altCost.rate_found || altCost.cost_usd == null) continue;
@@ -53,7 +54,7 @@ async function getModelSwitchRecommendations({ days = 30 } = {}) {
     // real traffic (see shadowTest.js), replace the "unverified" guess with
     // an actual measured confidence - including the honest case where the
     // cheaper model's outputs turned out to diverge too much to recommend.
-    const shadowStats = await getShadowStatsForPair(row.provider, row.model, alt.model);
+    const shadowStats = await getShadowStatsForPair(row.provider, row.model, alt.model, { db });
     let confidence = "unverified";
     let caveat =
       "Cost-only estimate. Output quality has NOT been evaluated - test on a sample of real traffic (shadow A/B) before switching production workloads. Enable via X-Enable-Shadow-Test on the proxy.";
@@ -86,7 +87,7 @@ async function getModelSwitchRecommendations({ days = 30 } = {}) {
 // Caching opportunity heuristic: flags providers/models with high call volume
 // but low token variance per call, which often indicates repeated/templated
 // prompts that could benefit from semantic or provider-native prompt caching.
-async function getCachingOpportunities({ days = 30 } = {}) {
+async function getCachingOpportunities({ days = 30, db = defaultDb } = {}) {
   const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
   const rows = await db.all(
     `SELECT provider, model, input_tokens

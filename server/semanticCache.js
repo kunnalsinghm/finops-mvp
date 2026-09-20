@@ -27,9 +27,24 @@ const THRESHOLD = Number(process.env.FINOPS_SEMANTIC_CACHE_THRESHOLD) || (MODE =
 const EMBEDDING_API_KEY = process.env.FINOPS_EMBEDDING_API_KEY || null;
 const DEFAULT_TTL_SECONDS = 300;
 
-const store = []; // { provider, model, promptText, vectorType, vector, value, expiresAt }
-const stats = { hits: 0, misses: 0 };
+// Multi-tenant note: see cache.js's header for the identical reasoning.
+// Without a tenant discriminator, findSemanticMatch's scan-and-compare
+// loop would happily return tenant B's cached response for tenant A's
+// similar-but-not-identical prompt - a cross-tenant leak, and a subtler
+// one than exact-match's since it doesn't even require the SAME prompt.
+const NO_TENANT = "__single_tenant__";
+const tenantStores = new Map(); // tenantId -> { store: [], stats: {hits, misses} }
 let warnedEmbeddingFailure = false;
+
+function getTenantState(tenantId) {
+  const key = tenantId || NO_TENANT;
+  let state = tenantStores.get(key);
+  if (!state) {
+    state = { store: [], stats: { hits: 0, misses: 0 } };
+    tenantStores.set(key, state);
+  }
+  return state;
+}
 
 // Pulls plain text out of an OpenAI or Anthropic chat request body so it
 // can be tokenized/embedded, regardless of which shape it came in.
@@ -118,7 +133,7 @@ async function computeVector(text, mode, embeddingApiKey) {
   return { vectorType: "local", vector: termFrequency(tokenize(text)) };
 }
 
-function pruneExpired() {
+function pruneExpired(store) {
   const now = Date.now();
   for (let i = store.length - 1; i >= 0; i--) {
     if (store[i].expiresAt <= now) store.splice(i, 1);
@@ -129,8 +144,9 @@ async function findSemanticMatch(provider, model, promptText, options = {}) {
   const mode = options.mode || MODE;
   const threshold = options.threshold ?? THRESHOLD;
   const embeddingApiKey = options.embeddingApiKey ?? EMBEDDING_API_KEY;
+  const { store, stats } = getTenantState(options.tenantId);
 
-  pruneExpired();
+  pruneExpired(store);
   const { vectorType, vector } = await computeVector(promptText, mode, embeddingApiKey);
 
   let best = null;
@@ -153,8 +169,9 @@ async function findSemanticMatch(provider, model, promptText, options = {}) {
 async function setSemanticCache(provider, model, promptText, value, ttlSeconds, options = {}) {
   const mode = options.mode || MODE;
   const embeddingApiKey = options.embeddingApiKey ?? EMBEDDING_API_KEY;
+  const { store } = getTenantState(options.tenantId);
 
-  pruneExpired();
+  pruneExpired(store);
   const { vectorType, vector } = await computeVector(promptText, mode, embeddingApiKey);
   store.push({
     provider,
@@ -167,8 +184,9 @@ async function setSemanticCache(provider, model, promptText, value, ttlSeconds, 
   });
 }
 
-function getSemanticCacheStats() {
-  pruneExpired();
+function getSemanticCacheStats(tenantId = null) {
+  const { store, stats } = getTenantState(tenantId);
+  pruneExpired(store);
   return {
     hits: stats.hits,
     misses: stats.misses,
@@ -179,13 +197,16 @@ function getSemanticCacheStats() {
   };
 }
 
-function clearSemanticCache() {
+function clearSemanticCache(tenantId = null) {
+  const { store, stats } = getTenantState(tenantId);
   store.length = 0;
   stats.hits = 0;
   stats.misses = 0;
 }
 
-setInterval(pruneExpired, 5 * 60 * 1000).unref();
+setInterval(() => {
+  for (const { store } of tenantStores.values()) pruneExpired(store);
+}, 5 * 60 * 1000).unref();
 
 module.exports = {
   findSemanticMatch,

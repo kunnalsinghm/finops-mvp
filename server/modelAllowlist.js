@@ -22,9 +22,9 @@
 //     nothing to "allow" or "deny" there. Blocking ingest of an already-
 //     incurred cost wouldn't undo the spend, only hide it from the dashboard.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 
-async function getEntriesForScope(scopeType, scopeValue) {
+async function getEntriesForScope(scopeType, scopeValue, db = defaultDb) {
   if (!scopeValue) return [];
   return db.all("SELECT provider, model FROM model_allowlist WHERE scope_type = ? AND scope_value = ?", [
     scopeType,
@@ -35,14 +35,14 @@ async function getEntriesForScope(scopeType, scopeValue) {
 // Returns { allowed, scope, allowedModels }. scope is which list (if any)
 // was actually enforced - 'key', 'team', or null (neither scope had any
 // entries, so the call was unrestricted) - useful for a clear error message.
-async function checkModelAllowed({ keyId, team, provider, model }) {
-  const keyEntries = await getEntriesForScope("key", keyId);
+async function checkModelAllowed({ keyId, team, provider, model, db = defaultDb }) {
+  const keyEntries = await getEntriesForScope("key", keyId, db);
   if (keyEntries.length > 0) {
     const allowed = keyEntries.some((e) => e.provider === provider && e.model === model);
     return { allowed, scope: "key", allowedModels: keyEntries };
   }
 
-  const teamEntries = await getEntriesForScope("team", team);
+  const teamEntries = await getEntriesForScope("team", team, db);
   if (teamEntries.length > 0) {
     const allowed = teamEntries.some((e) => e.provider === provider && e.model === model);
     return { allowed, scope: "team", allowedModels: teamEntries };
@@ -54,7 +54,7 @@ async function checkModelAllowed({ keyId, team, provider, model }) {
 // RETURNING id: required for the Postgres backend to report the new row's
 // id via result.lastInsertRowid - a no-op for SQLite, which populates
 // lastInsertRowid on its own regardless (see storage/sqlite.js).
-async function addAllowlistEntry({ scope_type, scope_value, provider, model }) {
+async function addAllowlistEntry({ scope_type, scope_value, provider, model, db = defaultDb }) {
   const result = await db.run(
     "INSERT INTO model_allowlist (scope_type, scope_value, provider, model) VALUES (?, ?, ?, ?) RETURNING id",
     [scope_type, scope_value, provider, model]
@@ -62,12 +62,12 @@ async function addAllowlistEntry({ scope_type, scope_value, provider, model }) {
   return result.lastInsertRowid;
 }
 
-async function removeAllowlistEntry(id) {
+async function removeAllowlistEntry(id, db = defaultDb) {
   const result = await db.run("DELETE FROM model_allowlist WHERE id = ?", [id]);
   return result.changes > 0;
 }
 
-async function listAllowlistEntries({ scope_type, scope_value } = {}) {
+async function listAllowlistEntries({ scope_type, scope_value, db = defaultDb } = {}) {
   if (scope_type && scope_value) {
     return db.all("SELECT * FROM model_allowlist WHERE scope_type = ? AND scope_value = ? ORDER BY id DESC", [
       scope_type,

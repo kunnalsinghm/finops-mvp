@@ -18,13 +18,13 @@
 // for GPU cost under this method, and vice versa. Flagging this clearly
 // rather than presenting a split cost as if it were precisely measured.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 
 function round4(n) {
   return Math.round((n || 0) * 10000) / 10000;
 }
 
-async function ingestGpuUsage({ event_time, cluster_name, gpu_type, utilization_pct, cost_usd, team, shared_across_teams }) {
+async function ingestGpuUsage({ event_time, cluster_name, gpu_type, utilization_pct, cost_usd, team, shared_across_teams, db = defaultDb }) {
   if (!cluster_name || cost_usd === undefined || cost_usd === null) {
     throw Object.assign(new Error("cluster_name and cost_usd are required"), { code: "VALIDATION" });
   }
@@ -58,7 +58,7 @@ async function ingestGpuUsage({ event_time, cluster_name, gpu_type, utilization_
 // the exact same allocation method to a specific value - keeping this in
 // one place means the two views can never quietly compute a shared row's
 // split two different ways.
-async function computeSharedSplitFractions(teams) {
+async function computeSharedSplitFractions(teams, db = defaultDb) {
   const apiTotals = await Promise.all(
     teams.map((t) => db.get("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM usage_events WHERE team = ?", [t]))
   );
@@ -71,7 +71,7 @@ async function computeSharedSplitFractions(teams) {
   }));
 }
 
-async function getBlendedCostByTeam() {
+async function getBlendedCostByTeam(db = defaultDb) {
   const apiTotals = await db.all(
     `SELECT COALESCE(team, 'Untagged') AS team, SUM(cost_usd) AS total FROM usage_events GROUP BY COALESCE(team, 'Untagged')`
   );
@@ -95,7 +95,7 @@ async function getBlendedCostByTeam() {
     const teams = row.shared_across_teams.split(",").map((t) => t.trim()).filter(Boolean);
     if (teams.length === 0) continue;
 
-    const splits = await computeSharedSplitFractions(teams);
+    const splits = await computeSharedSplitFractions(teams, db);
     for (const { team, fraction } of splits) {
       ensure(team).gpu_cost_usd += Number(row.total || 0) * fraction;
     }
@@ -119,7 +119,7 @@ async function getBlendedCostByTeam() {
 // split_method so a FOCUS reader can tell an allocated number apart from
 // a directly-measured one, per this file's own honesty principle about
 // not presenting an approximation as a precise measurement.
-async function getGpuEventsExpanded({ from, to } = {}) {
+async function getGpuEventsExpanded({ from, to, db = defaultDb } = {}) {
   const clauses = [];
   const params = [];
   if (from) {
@@ -141,7 +141,7 @@ async function getGpuEventsExpanded({ from, to } = {}) {
     }
     const teams = (row.shared_across_teams || "").split(",").map((t) => t.trim()).filter(Boolean);
     if (teams.length === 0) continue;
-    const splits = await computeSharedSplitFractions(teams);
+    const splits = await computeSharedSplitFractions(teams, db);
     for (const { team, fraction } of splits) {
       expanded.push({
         ...row,

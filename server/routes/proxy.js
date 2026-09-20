@@ -12,7 +12,7 @@
 // buffering); usage parsing happens on our copy of the same bytes in parallel.
 
 const express = require("express");
-const db = require("../storage");
+const defaultDb = require("../storage");
 const { yearMonthExpr } = require("../storage/dialectSql");
 const { computeCost, getRate } = require("../pricing");
 const { insertUsageEvent } = require("../usageStore");
@@ -61,6 +61,7 @@ const PROVIDER_ENDPOINTS = {
   },
 };
 
+<<<<<<< ours
 // insertUsageEvent now lives in ../usageStore.js so a spooled event can be
 // replayed through the identical INSERT (see meteringSpool.js).
 
@@ -112,6 +113,53 @@ async function noteUnpricedModel(provider, model) {
     logger.warn(`[proxy] could not log unpriced-model alert: ${err.message}`);
   }
 }
+=======
+// Was a db.prepare(...) statement with named (@col) params under the old
+// sync db.js. Positional params + await, same pattern used everywhere else
+// in this migration - see ingest.js for the identical helper.
+async function insertUsageEvent(row, db = defaultDb) {
+  const result = await db.run(
+    `INSERT INTO usage_events
+       (event_time, provider, model, team, environment, git_branch, user_id,
+        feature_id, customer_id, client_region, agent_id, session_id, task_id,
+        task_status, workload_type, input_tokens, output_tokens, cost_usd, tagged, raw_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     RETURNING id`,
+    [
+      row.event_time,
+      row.provider,
+      row.model,
+      row.team,
+      row.environment,
+      row.git_branch,
+      row.user_id,
+      row.feature_id || null,
+      row.customer_id || null,
+      row.client_region || null,
+      row.agent_id || null,
+      row.session_id || null,
+      row.task_id || null,
+      row.task_status || null,
+      row.workload_type || null,
+      row.input_tokens,
+      row.output_tokens,
+      row.cost_usd,
+      row.tagged,
+      row.raw_json,
+    ]
+  );
+  return result.lastInsertRowid;
+}
+
+async function logUsageEvent({ providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion, agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings, db = defaultDb }) {
+  const { cost_usd } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens, db });
+
+  // Anomaly and fraud checks BEFORE insertion, same reasoning as ingest.js -
+  // comparing against the prior baseline, not one diluted by the event
+  // being checked. Neither check blocks the request - see fraudDetection.js.
+  await checkAnomaly({ provider: providerName, model: effectiveModel, cost_usd: cost_usd ?? 0, team, db });
+  await checkKeyFraudSignals({ key_id: rateLimitKey, provider: providerName, model: effectiveModel, client_region: clientRegion, db });
+>>>>>>> theirs
 
 function buildUsageRow({ providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion, agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed, partial }, costInfo) {
   const { cost_usd, rate_found, approximate, costComputeFailed } = costInfo;
@@ -150,6 +198,7 @@ function buildUsageRow({ providerName, effectiveModel, team, environment, gitBra
       ...(partial ? { partial: true } : {}),
       ...(piiFindings && Object.keys(piiFindings).length > 0 ? { piiRedacted: piiFindings } : {}),
     }),
+<<<<<<< ours
   };
 }
 
@@ -193,6 +242,12 @@ async function logUsageEvent(params) {
     } catch (err) {
       logger.warn(`[proxy] smart-tag inference failed (event still recorded): ${err.message}`);
     }
+=======
+  }, db);
+
+  if (!team) {
+    await inferTag({ key_id: rateLimitKey, usage_event_id: insertedId, db });
+>>>>>>> theirs
   }
 
   return costInfo;
@@ -316,11 +371,12 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // alongside quarantine/rate-limiting, since (like those) it's a
   // should-this-request-happen-at-all gate, not a cost-shaping decision
   // like the budget circuit breaker below.
-  const residency = await checkRegionAllowed({ keyId: rateLimitKey, team, region: clientRegion });
+  const residency = await checkRegionAllowed({ keyId: rateLimitKey, team, region: clientRegion, db: req.db });
   if (!residency.allowed) {
     await logAlert(
       "data-residency-violation",
-      `Blocked proxy request from key '${rateLimitKey}' - region '${clientRegion}' is not on the ${residency.scope}-level allow-list`
+      `Blocked proxy request from key '${rateLimitKey}' - region '${clientRegion}' is not on the ${residency.scope}-level allow-list`,
+      req.db
     );
     return res.status(403).json({
       error: `Region '${clientRegion}' is not approved for this ${residency.scope}. Approved regions: ${residency.allowedRegions.join(", ")}`,
@@ -328,7 +384,10 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   }
 
   // --- Governance: quarantine + rate limiting (shared by both paths) ---
-  if (await isQuarantined(rateLimitKey)) {
+  // isQuarantined/quarantineKey touch api_keys, which lives in the shared
+  // control-plane schema in multi-tenant mode, NOT a tenant's own schema -
+  // see auth.js's req.controlPlaneDb and governance.js's header.
+  if (await isQuarantined(rateLimitKey, req.controlPlaneDb)) {
     const allowance = checkQuarantineAllowance(rateLimitKey);
     if (!allowance.allowed) {
       return res.status(429).json({
@@ -353,11 +412,12 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // that's about to be rejected for model-access reasons anyway. Checked
   // against the REQUESTED model, not any later fallback - see
   // modelAllowlist.js for the full key-vs-team precedence rules.
-  const allowlistCheck = await checkModelAllowed({ keyId: rateLimitKey, team, provider: providerName, model: requestedModel });
+  const allowlistCheck = await checkModelAllowed({ keyId: rateLimitKey, team, provider: providerName, model: requestedModel, db: req.db });
   if (!allowlistCheck.allowed) {
     await logAlert(
       "model-allowlist",
-      `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - '${providerName}/${requestedModel}' is not on the ${allowlistCheck.scope}-level allow-list`
+      `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - '${providerName}/${requestedModel}' is not on the ${allowlistCheck.scope}-level allow-list`,
+      req.db
     );
     return res.status(403).json({
       error: `Model '${requestedModel}' is not allowed for this ${allowlistCheck.scope}.`,
@@ -369,12 +429,13 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // request, since its own token cost isn't known until the response comes
   // back) - see tokenQuota.js header for the full reasoning and the
   // documented tradeoff this implies.
-  const quotaCheck = await checkTokenQuota({ keyId: rateLimitKey, team });
+  const quotaCheck = await checkTokenQuota({ keyId: rateLimitKey, team, db: req.db });
   if (!quotaCheck.allowed) {
     const v = quotaCheck.violations[0];
     await logAlert(
       "token-quota",
-      `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - ${quotaCheck.scope}-level ${v.period} token quota exceeded (${v.used}/${v.limit})`
+      `Blocked proxy request from key '${rateLimitKey}'${team ? ` (team '${team}')` : ""} - ${quotaCheck.scope}-level ${v.period} token quota exceeded (${v.used}/${v.limit})`,
+      req.db
     );
     return res.status(429).json({
       error: `Token quota exceeded for this ${quotaCheck.scope}.`,
@@ -390,11 +451,16 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // alerts (see routes/budgets.js status computation) flag the overage for
   // a human to act on deliberately, rather than the system silently
   // degrading or cutting it off.
+<<<<<<< ours
   if (team && !backgroundExempt) {
     const budget = await db.get("SELECT * FROM budgets WHERE scope_type = 'team' AND scope_value = ?", [team]);
+=======
+  if (team && workloadType !== "background") {
+    const budget = await req.db.get("SELECT * FROM budgets WHERE scope_type = 'team' AND scope_value = ?", [team]);
+>>>>>>> theirs
     if (budget) {
       const month = new Date().toISOString().slice(0, 7);
-      const spend = await db.get(
+      const spend = await req.db.get(
         `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events WHERE team = ? AND ${yearMonthExpr("event_time")} = ?`,
         [team, month]
       );
@@ -408,7 +474,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
           // there's actually a cheaper model to fall back to.
           effectiveModel = fallback.model;
           degraded = true;
-          await logAlert("circuit-breaker", `Team '${team}' over budget - degraded ${providerName}/${requestedModel} -> ${fallback.model}`);
+          await logAlert("circuit-breaker", `Team '${team}' over budget - degraded ${providerName}/${requestedModel} -> ${fallback.model}`, req.db);
         } else {
           // No cheaper fallback is configured for this provider/model (see
           // FALLBACK_MODEL in governance.js) - there's nothing left to
@@ -420,7 +486,8 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
           // resort when the circuit breaker has no cheaper model to use.
           await logAlert(
             "budget-hard-block",
-            `Blocked proxy request from key '${rateLimitKey}' (team '${team}') - over its $${budget.monthly_limit_usd} monthly budget ($${spend.spend.toFixed(2)} spent) with no configured fallback for ${providerName}/${requestedModel}`
+            `Blocked proxy request from key '${rateLimitKey}' (team '${team}') - over its $${budget.monthly_limit_usd} monthly budget ($${spend.spend.toFixed(2)} spent) with no configured fallback for ${providerName}/${requestedModel}`,
+            req.db
           );
           return res.status(402).json({
             error: `Team '${team}' has exceeded its monthly budget of $${budget.monthly_limit_usd} (current spend: $${spend.spend.toFixed(2)}), and no cheaper fallback model is configured for '${providerName}/${requestedModel}' to degrade to instead.`,
@@ -492,7 +559,8 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         "pii-redaction",
         `Redacted PII in proxy request - team:${team || "untagged"} - ${Object.entries(counts)
           .map(([k, v]) => `${k.toLowerCase()}:${v}`)
-          .join(", ")}`
+          .join(", ")}`,
+        req.db
       );
     }
   }
@@ -559,6 +627,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       const usage =
         providerName === "openai" ? parseOpenAIStreamUsage(fullBuffer) : parseAnthropicStreamUsage(fullBuffer);
 
+<<<<<<< ours
       // Meter whatever was actually consumed. A stream that produced nothing
       // cost nothing, so it's skipped; anything else - complete OR cut short -
       // is recorded, because the provider bills for tokens generated even if
@@ -583,6 +652,14 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
           // alerting is best-effort here
         }
       }
+=======
+      await logUsageEvent({
+        providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion,
+        agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
+        input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
+        degraded, requestedModel, piiFindings, db: req.db,
+      });
+>>>>>>> theirs
     } catch (err) {
       if (!res.headersSent) {
         if (isTimeoutError(err)) {
@@ -599,13 +676,13 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
 
   // ================= NON-STREAMING PATH (with opt-in caching) =================
   const cachingEnabled = req.header("X-Enable-Cache") === "true";
-  const cacheKey = cachingEnabled ? makeCacheKey(providerName, effectiveModel, outboundBody) : null;
+  const cacheKey = cachingEnabled ? makeCacheKey(providerName, effectiveModel, outboundBody, req.tenantId) : null;
 
   if (cachingEnabled) {
-    const cachedResponse = getCached(cacheKey);
+    const cachedResponse = getCached(cacheKey, req.tenantId);
     if (cachedResponse) {
       const { input_tokens, output_tokens } = endpoint.extractUsage(cachedResponse);
-      const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+      const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens, db: req.db });
       await insertUsageEvent({
         event_time: new Date().toISOString(),
         provider: providerName,
@@ -617,7 +694,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         cost_usd: 0,
         tagged: team && environment ? 1 : 0,
         raw_json: JSON.stringify({ cacheHit: true, would_have_cost_usd: wouldHaveCost ?? 0 }),
-      });
+      }, req.db);
       res.set("X-FinOps-Cache", "HIT");
       res.set("X-FinOps-Cost-USD", "0");
       res.set("X-FinOps-Cache-Savings-USD", String(wouldHaveCost ?? 0));
@@ -632,10 +709,10 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   const promptText = semanticEnabled ? extractPromptText(outboundBody) : null;
 
   if (semanticEnabled && promptText) {
-    const match = await findSemanticMatch(providerName, effectiveModel, promptText);
+    const match = await findSemanticMatch(providerName, effectiveModel, promptText, { tenantId: req.tenantId });
     if (match) {
       const { input_tokens, output_tokens } = endpoint.extractUsage(match.value);
-      const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens });
+      const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens, db: req.db });
       await insertUsageEvent({
         event_time: new Date().toISOString(),
         provider: providerName,
@@ -647,7 +724,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         cost_usd: 0,
         tagged: team && environment ? 1 : 0,
         raw_json: JSON.stringify({ semanticCacheHit: true, similarity: match.similarity, would_have_cost_usd: wouldHaveCost ?? 0 }),
-      });
+      }, req.db);
       res.set("X-FinOps-Cache", "SEMANTIC-HIT");
       res.set("X-FinOps-Cache-Similarity", match.similarity.toFixed(4));
       res.set("X-FinOps-Cost-USD", "0");
@@ -671,12 +748,12 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
 
     if (cachingEnabled) {
       const ttl = Number(req.header("X-Cache-TTL-Seconds")) || undefined;
-      setCached(cacheKey, responseJson, ttl);
+      setCached(cacheKey, responseJson, ttl, req.tenantId);
     }
 
     if (semanticEnabled && promptText) {
       const ttl = Number(req.header("X-Cache-TTL-Seconds")) || undefined;
-      setSemanticCache(providerName, effectiveModel, promptText, responseJson, ttl).catch((err) => {
+      setSemanticCache(providerName, effectiveModel, promptText, responseJson, ttl, { tenantId: req.tenantId }).catch((err) => {
         console.warn(`[semanticCache] Failed to store entry: ${err.message}`);
       });
     }
@@ -687,7 +764,11 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     const metering = await meterSafely({
       providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion,
       agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
+<<<<<<< ours
       input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed: false,
+=======
+      input_tokens, output_tokens, degraded, requestedModel, piiFindings, db: req.db,
+>>>>>>> theirs
     });
     const cost_usd = metering.cost_usd;
 
@@ -714,6 +795,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         team,
         endpoint,
         sampleRate,
+        db: req.db,
       }).catch((err) => {
         console.warn(`[shadowTest] Unexpected failure: ${err.message}`);
       });

@@ -9,17 +9,17 @@ const { listAgentSummaries, getAgentSummary, getAgentTaskBreakdown } = require("
 const router = express.Router();
 
 router.get("/", requireAuth("read"), async (req, res) => {
-  const summaries = await listAgentSummaries();
+  const summaries = await listAgentSummaries(req.db);
   res.json(summaries);
 });
 
 router.get("/:agentId", requireAuth("read"), async (req, res) => {
-  const summary = await getAgentSummary(req.params.agentId);
+  const summary = await getAgentSummary(req.params.agentId, req.db);
   res.json(summary);
 });
 
 router.get("/:agentId/tasks", requireAuth("read"), async (req, res) => {
-  const tasks = await getAgentTaskBreakdown(req.params.agentId);
+  const tasks = await getAgentTaskBreakdown(req.params.agentId, req.db);
   res.json(tasks);
 });
 

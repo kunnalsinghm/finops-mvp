@@ -21,7 +21,7 @@
 // swapping in real IP-based geolocation is a natural follow-up, not part
 // of this pass.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { sinceDaysAgo, dayFloorExpr, todayClause } = require("./storage/dialectSql");
 const { logAlert } = require("./governance");
 
@@ -31,7 +31,7 @@ const MIN_AVG_DAILY_REQUESTS_FOR_VOLUME_CHECK = 1; // avoid flagging a key that 
 const MIN_HISTORY_FOR_MODEL_CHECK = 20; // key needs an established pattern before "new model" means anything
 const MIN_HISTORY_FOR_REGION_CHECK = 5;
 
-async function checkVolumeSpike(key_id) {
+async function checkVolumeSpike(key_id, db = defaultDb) {
   const todayRow = await db.get(
     `SELECT COUNT(*) AS n FROM usage_events WHERE user_id = ? AND ${todayClause("event_time")}`,
     [key_id]
@@ -61,7 +61,7 @@ async function checkVolumeSpike(key_id) {
   return null;
 }
 
-async function checkNewModelMix(key_id, provider, model) {
+async function checkNewModelMix(key_id, provider, model, db = defaultDb) {
   const historyRow = await db.get("SELECT COUNT(*) AS n FROM usage_events WHERE user_id = ?", [key_id]);
   if (Number(historyRow?.n || 0) < MIN_HISTORY_FOR_MODEL_CHECK) return null;
 
@@ -74,7 +74,7 @@ async function checkNewModelMix(key_id, provider, model) {
   return { type: "new-model-mix", detail: `first-ever use of ${provider}/${model} on an established key` };
 }
 
-async function checkNewRegion(key_id, client_region) {
+async function checkNewRegion(key_id, client_region, db = defaultDb) {
   if (!client_region) return null;
 
   const historyRow = await db.get("SELECT COUNT(*) AS n FROM usage_events WHERE user_id = ?", [key_id]);
@@ -92,20 +92,20 @@ async function checkNewRegion(key_id, client_region) {
 // Call once per ingest/proxy request, BEFORE the event is inserted (same
 // ordering reason as anomaly.js: the event being checked shouldn't already
 // be part of the history it's being compared against).
-async function checkKeyFraudSignals({ key_id, provider, model, client_region }) {
+async function checkKeyFraudSignals({ key_id, provider, model, client_region, db = defaultDb }) {
   if (!key_id) return null;
 
   const [volume, modelMix, region] = await Promise.all([
-    checkVolumeSpike(key_id),
-    checkNewModelMix(key_id, provider, model),
-    checkNewRegion(key_id, client_region),
+    checkVolumeSpike(key_id, db),
+    checkNewModelMix(key_id, provider, model, db),
+    checkNewRegion(key_id, client_region, db),
   ]);
 
   const reasons = [volume, modelMix, region].filter(Boolean);
   if (reasons.length === 0) return null;
 
   const message = `Fraud signal on key '${key_id}': ${reasons.map((r) => r.detail).join("; ")}. Not auto-blocked - review at GET /api/alerts and quarantine via POST /api/keys/:id/quarantine if this looks real.`;
-  await logAlert("fraud-signal", message);
+  await logAlert("fraud-signal", message, db);
 
   return { flagged: true, reasons: reasons.map((r) => r.type), message };
 }

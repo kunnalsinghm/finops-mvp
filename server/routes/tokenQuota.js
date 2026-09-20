@@ -12,7 +12,7 @@ const router = express.Router();
 
 router.get("/", requireAuth("read"), async (req, res) => {
   const { scope_type, scope_value } = req.query;
-  res.json(await listQuotas({ scope_type, scope_value }));
+  res.json(await listQuotas({ scope_type, scope_value, db: req.db }));
 });
 
 router.post("/", requireAuth("manage_budgets"), async (req, res) => {
@@ -27,8 +27,8 @@ router.post("/", requireAuth("manage_budgets"), async (req, res) => {
     return res.status(400).json({ error: "period must be 'daily' or 'weekly'" });
   }
   try {
-    const id = await addQuota({ scope_type, scope_value, period, token_limit });
-    await logAudit(req.apiKey.key_id, "token_quota.add", scope_value, { scope_type, period, token_limit });
+    const id = await addQuota({ scope_type, scope_value, period, token_limit, db: req.db });
+    await logAudit(req.apiKey.key_id, "token_quota.add", scope_value, { scope_type, period, token_limit }, req.db);
     res.status(201).json({ id, scope_type, scope_value, period, token_limit });
   } catch (err) {
     if (err.message && /unique/i.test(err.message)) {
@@ -39,9 +39,9 @@ router.post("/", requireAuth("manage_budgets"), async (req, res) => {
 });
 
 router.delete("/:id", requireAuth("manage_budgets"), async (req, res) => {
-  const removed = await removeQuota(req.params.id);
+  const removed = await removeQuota(req.params.id, req.db);
   if (!removed) return res.status(404).json({ error: "No quota with that id" });
-  await logAudit(req.apiKey.key_id, "token_quota.remove", req.params.id, {});
+  await logAudit(req.apiKey.key_id, "token_quota.remove", req.params.id, {}, req.db);
   res.json({ ok: true });
 });
 

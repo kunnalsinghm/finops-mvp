@@ -3,7 +3,6 @@
 // the underlying threshold math and an endpoint the dashboard/cron can poll.)
 
 const express = require("express");
-const db = require("../storage");
 const { thisMonthClause } = require("../storage/dialectSql");
 const { logAudit } = require("../audit");
 const { requireAuth } = require("../auth");
@@ -11,7 +10,7 @@ const { requireAuth } = require("../auth");
 const router = express.Router();
 
 router.get("/", requireAuth("read"), async (req, res) => {
-  const budgets = await db.all("SELECT * FROM budgets ORDER BY id DESC");
+  const budgets = await req.db.all("SELECT * FROM budgets ORDER BY id DESC");
   res.json(budgets);
 });
 
@@ -22,11 +21,11 @@ router.post("/", requireAuth("manage_budgets"), async (req, res) => {
       .status(400)
       .json({ error: "scope_type, scope_value, and monthly_limit_usd are required" });
   }
-  const result = await db.run(
+  const result = await req.db.run(
     "INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?) RETURNING id",
     [scope_type, scope_value, monthly_limit_usd]
   );
-  await logAudit(req.apiKey.key_id, "budget.create", scope_value, { scope_type, monthly_limit_usd });
+  await logAudit(req.apiKey.key_id, "budget.create", scope_value, { scope_type, monthly_limit_usd }, req.db);
   res.status(201).json({ id: result.lastInsertRowid });
 });
 
@@ -37,7 +36,7 @@ router.post("/", requireAuth("manage_budgets"), async (req, res) => {
 // so that errors out on that backend. Rounding is done in JS after
 // fetching instead, same pattern as forecast.js.
 router.get("/status", requireAuth("read"), async (req, res) => {
-  const budgets = await db.all("SELECT * FROM budgets");
+  const budgets = await req.db.all("SELECT * FROM budgets");
 
   const results = [];
   for (const b of budgets) {
@@ -57,7 +56,7 @@ router.get("/status", requireAuth("read"), async (req, res) => {
       col = b.scope_type === "team" ? "team" : b.scope_type === "key" ? "user_id" : "environment";
       extraClause = "";
     }
-    const spend = await db.get(
+    const spend = await req.db.get(
       `SELECT SUM(cost_usd) AS spend
        FROM usage_events
        WHERE ${col} = ? ${extraClause} AND ${thisMonthClause("event_time")}`,

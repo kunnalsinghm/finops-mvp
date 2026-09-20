@@ -30,7 +30,7 @@
 //     whole point is spending a little to find out whether you can spend
 //     a lot less, but that "little" is real money if left on unbounded.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { sinceDaysAgo } = require("./storage/dialectSql");
 const { computeCost } = require("./pricing");
 const { CHEAPER_ALTERNATIVES } = require("./modelAlternatives");
@@ -49,7 +49,7 @@ function clamp01(n, fallback) {
 // Note: was a db.prepare(...) statement with named (@col) params under the
 // old sync db.js. The storage adapter takes positional (?) params, so this
 // is now a plain async helper instead of a prepared-statement object.
-async function insertShadowRow(row) {
+async function insertShadowRow(row, db = defaultDb) {
   await db.run(
     `INSERT INTO shadow_comparisons
        (provider, primary_model, shadow_model, team, primary_cost_usd, shadow_cost_usd,
@@ -110,6 +110,7 @@ async function runShadowTest({
   team,
   endpoint,
   sampleRate = DEFAULT_SAMPLE_RATE,
+  db = defaultDb,
 } = {}) {
   const alt = CHEAPER_ALTERNATIVES[`${providerName}/${primaryModel}`];
   if (!alt) return; // no known cheaper alternative for this model - nothing to test
@@ -146,7 +147,7 @@ async function runShadowTest({
       row.shadow_error = `HTTP ${res.status}${json?.error?.message ? `: ${json.error.message}` : ""}`;
     } else {
       const { input_tokens, output_tokens } = endpoint.extractUsage(json);
-      const { cost_usd } = await computeCost({ provider: providerName, model: alt.model, input_tokens, output_tokens });
+      const { cost_usd } = await computeCost({ provider: providerName, model: alt.model, input_tokens, output_tokens, db });
       row.shadow_cost_usd = cost_usd ?? 0;
 
       const primaryText = extractResponseText(providerName, primaryResponseJson);
@@ -166,7 +167,7 @@ async function runShadowTest({
     row.shadow_error = err.message;
   }
 
-  await insertShadowRow(row);
+  await insertShadowRow(row, db);
 }
 
 // Aggregate stats for one specific (current -> suggested) pair, used by
@@ -177,7 +178,7 @@ async function runShadowTest({
 // function's own `async` keyword - a pre-existing latent bug that this
 // migration also fixes, since the old db.js sync path won't exist once the
 // rest of the app has moved to server/storage.
-async function getShadowStatsForPair(provider, primaryModel, shadowModel, { days = 90 } = {}) {
+async function getShadowStatsForPair(provider, primaryModel, shadowModel, { days = 90, db = defaultDb } = {}) {
   const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
   const row = await db.get(
     `SELECT COUNT(*) AS n,
@@ -202,7 +203,7 @@ async function getShadowStatsForPair(provider, primaryModel, shadowModel, { days
 }
 
 // Every distinct pair tested, for a dashboard/API summary view.
-async function getShadowTestSummary({ days = 90 } = {}) {
+async function getShadowTestSummary({ days = 90, db = defaultDb } = {}) {
   const safeDays = Math.max(0, Math.trunc(Number(days) || 0));
   const rows = await db.all(
     `SELECT provider, primary_model, shadow_model,
@@ -231,7 +232,7 @@ async function getShadowTestSummary({ days = 90 } = {}) {
 }
 
 // Raw recent rows, including failures, for debugging/audit.
-async function getShadowComparisons({ limit = 50 } = {}) {
+async function getShadowComparisons({ limit = 50, db = defaultDb } = {}) {
   const capped = Math.min(Math.max(Number(limit) || 50, 1), 500);
   return db.all(`SELECT * FROM shadow_comparisons ORDER BY created_at DESC LIMIT ?`, [capped]);
 }

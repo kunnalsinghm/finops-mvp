@@ -41,7 +41,7 @@
 //     signal - but it is NOT a measure of whether the successful output
 //     was actually good. Don't oversell this number.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { sinceDaysAgo, dayFloorExpr } = require("./storage/dialectSql");
 
 const TASK_STATUSES = ["success", "failed", "aborted"];
@@ -50,7 +50,7 @@ function round4(n) {
   return Math.round((n || 0) * 10000) / 10000;
 }
 
-async function getAgentSummary(agentId) {
+async function getAgentSummary(agentId, db = defaultDb) {
   const totals = await db.get(
     `SELECT COALESCE(SUM(cost_usd), 0) AS total_cost,
             COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
@@ -97,14 +97,14 @@ async function getAgentSummary(agentId) {
   };
 }
 
-async function listAgentSummaries() {
+async function listAgentSummaries(db = defaultDb) {
   const agentRows = await db.all(
     "SELECT DISTINCT agent_id FROM usage_events WHERE agent_id IS NOT NULL"
   );
-  return Promise.all(agentRows.map((r) => getAgentSummary(r.agent_id)));
+  return Promise.all(agentRows.map((r) => getAgentSummary(r.agent_id, db)));
 }
 
-async function getAgentTaskBreakdown(agentId) {
+async function getAgentTaskBreakdown(agentId, db = defaultDb) {
   const rows = await db.all(
     `SELECT task_id,
             COUNT(*) AS event_count,
@@ -140,7 +140,7 @@ async function getAgentTaskBreakdown(agentId) {
 // scoping to them would have meant either changing their signature (risk
 // to existing callers) or bolting on an optional param that only this
 // caller uses. A parallel, narrowly-scoped function was the safer edit.
-async function getForecastVariance(team) {
+async function getForecastVariance(team, db = defaultDb) {
   const priorWindow = await db.get(
     `SELECT COALESCE(SUM(cost_usd), 0) AS total, COUNT(DISTINCT ${dayFloorExpr("event_time")}) AS days
      FROM usage_events

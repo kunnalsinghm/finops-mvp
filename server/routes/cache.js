@@ -7,11 +7,11 @@ const { getCacheStats, clearCache } = require("../cache");
 const router = express.Router();
 
 router.get("/stats", requireAuth("read"), (req, res) => {
-  res.json(getCacheStats());
+  res.json(getCacheStats(req.tenantId));
 });
 
 router.post("/clear", requireAuth("manage_keys"), (req, res) => {
-  clearCache();
+  clearCache(req.tenantId);
   res.json({ ok: true });
 });
 

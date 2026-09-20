@@ -49,8 +49,8 @@ router.post("/override", requireAuth("manage_budgets"), async (req, res) => {
       error: "provider, model, input_per_1k, and output_per_1k are required",
     });
   }
-  await setOverride({ provider, model, input_per_1k, output_per_1k });
-  await logAudit(req.apiKey.key_id, "pricing.override", `${provider}/${model}`, { input_per_1k, output_per_1k });
+  await setOverride({ provider, model, input_per_1k, output_per_1k, db: req.db });
+  await logAudit(req.apiKey.key_id, "pricing.override", `${provider}/${model}`, { input_per_1k, output_per_1k }, req.db);
   res.status(201).json({ ok: true });
 });
 
