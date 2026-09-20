@@ -73,11 +73,31 @@ function snapshotDatabase(srcPath, destPath) {
   }
 }
 
-// Reads a database file and reports whether it is sound and what is in it.
-// Never throws: a file that can't even be opened is reported, not raised.
+// SQLite records its journal mode in the file header (bytes 18-19; 2 = WAL). Opening a
+// WAL-flagged file - even read-only - creates "-shm" and "-wal" files BESIDE it. Backups
+// made by the old file-copy implementation are all WAL-flagged, so inspecting one in place
+// would litter (and modify) the backup folder.
+function hasWalHeader(file) {
+  const buf = Buffer.alloc(20);
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    if (fs.readSync(fd, buf, 0, 20, 0) < 20) return false;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ }
+  }
+  return buf[18] === 2 || buf[19] === 2;
+}
+
+// Reads a database file and reports whether it is sound and what is in it. The file is
+// never modified and nothing is created beside it. Never throws: a file that can't even
+// be opened is reported, not raised.
 function inspectDatabase(file) {
   const report = { file, ok: false, problems: [], integrity: null, tables: [], counts: {}, schemaVersion: null };
   let db;
+  let scratchDir = null;
   try {
     if (!fs.existsSync(file)) {
       report.problems.push("file does not exist");
@@ -86,7 +106,14 @@ function inspectDatabase(file) {
     if (fs.existsSync(file + "-wal") && fs.statSync(file + "-wal").size > 0) {
       report.problems.push("an unmerged -wal file sits beside it; copying only the main file would silently lose recent data");
     }
-    db = new DatabaseSync(file, { readOnly: true });
+    let openPath = file;
+    if (hasWalHeader(file)) {
+      // Inspect a throwaway copy so SQLite's sidecar files land in a temp dir, not next to the backup.
+      scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "finops-inspect-"));
+      openPath = path.join(scratchDir, "inspect.db");
+      fs.copyFileSync(file, openPath);
+    }
+    db = new DatabaseSync(openPath, { readOnly: true });
     report.integrity = db.prepare("PRAGMA integrity_check").all().map((r) => r.integrity_check);
     if (!(report.integrity.length === 1 && report.integrity[0] === "ok")) {
       report.problems.push(`integrity check failed: ${report.integrity.slice(0, 3).join("; ")}`);
@@ -108,6 +135,7 @@ function inspectDatabase(file) {
     report.problems.push(`cannot be read as a SQLite database: ${err.message}`);
   } finally {
     try { db?.close(); } catch { /* ignore */ }
+    if (scratchDir) try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
   report.ok = report.problems.length === 0;
   return report;
@@ -166,7 +194,24 @@ function pruneOldBackups({ backupDir = BACKUP_DIR, retention = RETENTION_COUNT, 
   for (const f of files) {
     if (keepSet.has(f)) continue;
     fs.unlinkSync(path.join(backupDir, f));
+    for (const ext of ["-wal", "-shm"]) fs.rmSync(path.join(backupDir, f + ext), { force: true });
     logger.info("Pruned old backup", { file: f });
+  }
+  sweepOrphanSidecars(backupDir);
+}
+
+// "-wal"/"-shm" files whose database file no longer exists are meaningless leftovers (an
+// earlier version created them while verifying old-format backups and never removed them).
+// Only ever touches sidecars of OUR backup files, and only when the main file is gone.
+function sweepOrphanSidecars(backupDir) {
+  if (!fs.existsSync(backupDir)) return;
+  const all = new Set(fs.readdirSync(backupDir));
+  for (const name of all) {
+    const m = /^((?:finops|pre-migration)-.+\.db)-(?:wal|shm)$/.exec(name);
+    if (m && !all.has(m[1])) {
+      fs.rmSync(path.join(backupDir, name), { force: true });
+      logger.info("Removed orphaned SQLite sidecar file", { file: name });
+    }
   }
 }
 

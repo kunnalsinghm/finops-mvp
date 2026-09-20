@@ -445,3 +445,72 @@ test("sequence numbers keep counting after pruning and never repeat", () => {
   for (let i = 0; i < 5; i++) seqs.push(Number(/^finops-(\d{6})-/.exec(path.basename(backup.runBackup({ dbPath: file, backupDir, retention: 2 })))[1]));
   assert.deepEqual(seqs, [1, 2, 3, 4, 5]);
 });
+
+// -------------------------------- old-format backups must not litter the backup folder
+// Backups made by the previous file-copy implementation are WAL-flagged in their header.
+// SQLite creates "-shm"/"-wal" files BESIDE a WAL-flagged database whenever it is opened,
+// even read-only, so verifying one used to leave sidecars next to it - and pruning only
+// deleted the ".db", leaving those sidecars behind forever.
+function makeLegacyBackup(dir, name) {
+  const live = path.join(dir, `live-for-${name}`);
+  const d = new DatabaseSync(live);
+  d.exec("PRAGMA journal_mode = WAL");
+  d.exec(SCHEMA_SQL);
+  d.prepare("INSERT INTO api_keys (key_id,label,role) VALUES ('k','l','admin')").run();
+  d.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  const out = path.join(dir, name);
+  fs.copyFileSync(live, out); // exactly what the old implementation did
+  d.close();
+  for (const ext of ["", "-wal", "-shm"]) fs.rmSync(live + ext, { force: true });
+  return out;
+}
+const sidecars = (dir) => fs.readdirSync(dir).filter((f) => /\.db-(wal|shm)$/.test(f));
+
+test("REGRESSION: verifying/inspecting an old WAL-flagged backup neither modifies it nor creates files beside it", () => {
+  const dir = tmpDir();
+  const bdir = path.join(dir, "backups"); fs.mkdirSync(bdir);
+  const legacy = makeLegacyBackup(bdir, "finops-2026-09-20T04-31-17-447Z.db");
+  const before = { hash: sha(legacy), files: fs.readdirSync(bdir).sort() };
+
+  assert.equal(backup.inspectDatabase(legacy).ok, true);
+  const v = backup.verifyBackup(legacy);
+  assert.equal(v.ok, true, v.problems.join(";"));
+
+  assert.deepEqual(fs.readdirSync(bdir).sort(), before.files, "no -shm/-wal (or anything else) may appear in the backup folder");
+  assert.equal(sha(legacy), before.hash, "and the backup itself is byte-for-byte unchanged");
+});
+
+test("pruning a backup also removes its -wal/-shm, and sweeps orphans left behind by older versions - but nothing else", () => {
+  const dir = tmpDir();
+  const bdir = path.join(dir, "backups"); fs.mkdirSync(bdir);
+  const { file, db } = makeLiveDb(dir);
+  db.close();
+  const old1 = "finops-2026-09-20T01-00-00-000Z.db", old2 = "finops-2026-09-20T02-00-00-000Z.db";
+  for (const n of [old1, old2]) { fs.writeFileSync(path.join(bdir, n), "x"); for (const e of ["-wal", "-shm"]) fs.writeFileSync(path.join(bdir, n + e), ""); }
+  // orphans exactly like the ones seen in the wild: the main .db is already gone
+  for (const n of ["finops-2026-09-20T04-31-17-447Z.db", "finops-2026-09-20T14-34-14-044Z.db"]) for (const e of ["-wal", "-shm"]) fs.writeFileSync(path.join(bdir, n + e), "");
+  fs.writeFileSync(path.join(bdir, "notes.txt"), "mine");
+  fs.writeFileSync(path.join(bdir, "pre-migration-v1-to-v3-2026-09-20T14-40-47-712Z.db"), "snapshot");
+  fs.writeFileSync(path.join(bdir, "unrelated.db-wal"), "not ours"); // does not match our naming: must be left alone
+
+  const made = backup.runBackup({ dbPath: file, backupDir: bdir, retention: 2 });
+  assert.ok(made);
+
+  const left = fs.readdirSync(bdir).sort();
+  assert.ok(!left.some((f) => f.startsWith(old1) || f.startsWith("finops-2026-09-20T04-31") || f.startsWith("finops-2026-09-20T14-34")), `all sidecars of pruned/absent backups are gone: ${left.join(", ")}`);
+  assert.ok(left.includes(path.basename(made)));
+  assert.ok(left.includes("notes.txt"), "unrelated files are never touched");
+  assert.ok(left.includes("pre-migration-v1-to-v3-2026-09-20T14-40-47-712Z.db"), "pre-migration snapshots are never touched");
+  assert.ok(left.includes("unrelated.db-wal"), "files that are not our backups' sidecars are left alone");
+});
+
+test("restoring an old WAL-flagged backup leaves no stray sidecar or staging files anywhere", () => {
+  const dir = tmpDir();
+  const bdir = path.join(dir, "backups"); fs.mkdirSync(bdir);
+  const legacy = makeLegacyBackup(bdir, "finops-2026-09-20T04-31-17-447Z.db");
+  const target = path.join(dir, "data", "finops.db");
+  const r = backup.restoreBackup({ backupPath: legacy, targetPath: target });
+  assert.equal(r.backupSchemaVersion, 1);
+  assert.deepEqual(fs.readdirSync(path.dirname(target)).sort(), ["finops.db"], "the data folder holds only the restored database");
+  assert.deepEqual(sidecars(bdir), [], "the backup folder gained nothing");
+});
