@@ -8,3 +8,6 @@ test/*.db
 
 logs/
 data/backups/
+
+# metering spool holds un-recorded usage events - never commit
+data/*.jsonl
