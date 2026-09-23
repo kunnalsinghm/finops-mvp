@@ -10,7 +10,7 @@
 // exactly the "shadow AI" signal the blueprint calls for, without needing
 // any paid integration.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { dayFloorExpr } = require("./storage/dialectSql");
 const crypto = require("crypto");
 
@@ -27,7 +27,7 @@ const crypto = require("crypto");
 // The delete-then-insert-per-row work all happens inside a single
 // storage.transaction() so it's genuinely atomic on both backends - see
 // storage/postgres.js's transaction() comment for why that matters.
-async function importCsv(csvText) {
+async function importCsv(csvText, db = defaultDb) {
   const batch_id = crypto.randomUUID();
   const lines = csvText.trim().split("\n").map((l) => l.trim()).filter(Boolean);
   if (!lines.length) throw new Error("Empty CSV");
@@ -82,7 +82,7 @@ async function importCsv(csvText) {
 // Compare reported (billing export) vs tracked (our usage_events) per day+provider.
 // Flags days where reported spend meaningfully exceeds what we tracked -
 // that gap is spend we never saw, i.e. shadow usage.
-async function getReconciliationReport({ thresholdPct = 10 } = {}) {
+async function getReconciliationReport({ thresholdPct = 10, db = defaultDb } = {}) {
   const reported = await db.all(
     `SELECT day, provider, SUM(reported_cost_usd) AS reported_cost
      FROM reconciliation_rows

@@ -1,4 +1,4 @@
-﻿// routes/ingest.js - Log Integrator webhook receiver (Phase 1 of the roadmap)
+// routes/ingest.js - Log Integrator webhook receiver (Phase 1 of the roadmap)
 //
 // Accepts usage events from client SDKs, CI jobs, or manual curl/webhook calls.
 // Tagging policy default is WARN, not reject (see blueprint gap notes) - an
@@ -19,6 +19,7 @@ const { TASK_STATUSES } = require("../agentAttribution");
 const { inferTag } = require("../smartTagging");
 const { applyTagRules } = require("../tagRules");
 const { realKeyId } = require("../keyIdentity");
+const { checkMonthlyEventQuota } = require("../tenantQuota");
 
 const router = express.Router();
 
@@ -68,9 +69,13 @@ async function insertUsageEvent(row, db = defaultDb) {
 const INGEST_LIMIT = { capacity: 120, refillPerSec: 2 };
 
 router.post("/", requireAuth("write"), async (req, res) => {
-  const rl = checkRateLimit(`ingest:${req.apiKey.key_id}`, INGEST_LIMIT);
+  const rl = checkRateLimit(`ingest:${req.apiKey.key_id}`, INGEST_LIMIT, req.tenantId);
   if (!rl.allowed) {
     return res.status(429).json({ error: "Rate limit exceeded", retryAfterSec: rl.retryAfterSec });
+  }
+  const quota = await checkMonthlyEventQuota(req);
+  if (!quota.allowed) {
+    return res.status(429).json({ error: quota.message, limit: quota.limit, count: quota.count });
   }
 
   const body = req.body || {};

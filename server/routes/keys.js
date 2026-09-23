@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const { requireAuth } = require("../auth");
 const { quarantineKey, approveKey } = require("../governance");
 const { logAudit } = require("../audit");
+const { checkApiKeyQuota } = require("../tenantQuota");
 const tenancy = require("../tenancy");
 const router = express.Router();
 
@@ -40,6 +41,11 @@ router.post("/", requireAuth("manage_keys"), async (req, res) => {
   }
   if (!["admin", "budget-manager", "developer", "viewer"].includes(role)) {
     return res.status(400).json({ error: "invalid role" });
+  }
+
+  const quota = await checkApiKeyQuota(req);
+  if (!quota.allowed) {
+    return res.status(429).json({ error: quota.message, limit: quota.limit, count: quota.count });
   }
 
   // Multi-tenant mode: go through tenancy.js's own key-creation path, which

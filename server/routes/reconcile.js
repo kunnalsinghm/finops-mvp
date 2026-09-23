@@ -10,7 +10,7 @@ const router = express.Router();
 // Headers required: date,provider,cost
 router.post("/upload", requireAuth("manage_budgets"), express.text({ type: "*/*", limit: "5mb" }), async (req, res) => {
   try {
-    const result = await importCsv(req.body);
+    const result = await importCsv(req.body, req.db);
     res.status(201).json({ ok: true, ...result });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -19,7 +19,7 @@ router.post("/upload", requireAuth("manage_budgets"), express.text({ type: "*/*"
 
 router.get("/report", requireAuth("read"), async (req, res) => {
   const thresholdPct = Number(req.query.threshold) || 10;
-  res.json(await getReconciliationReport({ thresholdPct }));
+  res.json(await getReconciliationReport({ thresholdPct, db: req.db }));
 });
 
 module.exports = router;

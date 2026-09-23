@@ -48,6 +48,62 @@ function assertSafeSchemaName(name) {
   return name;
 }
 
+// ---- Tenant status classification - shared by both auth.js branches
+// (API-key and session-token) and by tenantLifecycle.js's own checks, so
+// "is this tenant allowed to authenticate right now" is decided in exactly
+// one place regardless of which credential type a request used. ----
+
+function isTrialExpired(tenantRow) {
+  return Boolean(
+    tenantRow &&
+      tenantRow.status === "trial" &&
+      tenantRow.trial_ends_at &&
+      new Date(tenantRow.trial_ends_at).getTime() < Date.now()
+  );
+}
+
+// Returns a human-readable reason a request should be REJECTED, or null if
+// the tenant is fine. Pure/sync - classification only. A 'trial' tenant
+// whose trial_ends_at is still in the future is treated the same as
+// 'active'; once it's past, the tenant is blocked exactly like
+// 'trial_expired' even if the periodic sweep (tenantLifecycle.js's
+// checkTrialExpirations) hasn't flipped the stored status yet - a request
+// arriving one second after the trial ends shouldn't have to wait for the
+// next timer tick to actually be blocked.
+function tenantAccessDenialReason(tenantRow) {
+  if (!tenantRow) return null;
+  switch (tenantRow.status) {
+    case "active":
+      return null;
+    case "trial":
+      return isTrialExpired(tenantRow) ? "This tenant's trial period has ended" : null;
+    case "trial_expired":
+      return "This tenant's trial period has ended";
+    case "suspended":
+      return tenantRow.suspended_reason
+        ? `This tenant's account is suspended: ${tenantRow.suspended_reason}`
+        : "This tenant's account is suspended";
+    case "offboarding":
+      return "This tenant's account is being offboarded and is no longer accepting requests";
+    case "deleted":
+      return "This tenant's account no longer exists";
+    default:
+      return "This tenant's account is not active";
+  }
+}
+
+// Self-healing: called from the request path the first time a trial's
+// expiry is actually OBSERVED, so the stored status reflects reality
+// immediately rather than staying 'trial' until tenantLifecycle.js's
+// periodic sweep next runs (up to one check interval later). The extra
+// `AND status = 'trial'` guard makes this safe to call unconditionally on
+// every denied request without a race against a concurrent reactivation.
+async function markTrialExpiredIfObserved(tenantRow) {
+  if (!isTrialExpired(tenantRow)) return;
+  const { controlPlaneDb } = initControlPlane();
+  await controlPlaneDb.run("UPDATE tenants SET status = 'trial_expired' WHERE id = ? AND status = 'trial'", [tenantRow.id]);
+}
+
 function toPositional(sql) {
   let i = 0;
   return sql.replace(/\?/g, () => `$${++i}`);
@@ -184,7 +240,7 @@ function generateSchemaName() {
   return `tenant_${suffix}`;
 }
 
-async function createTenant({ name }) {
+async function createTenant({ name, trial_days = null, max_api_keys = null, max_budgets = null, max_monthly_events = null }) {
   if (!MULTI_TENANT) {
     throw new Error("createTenant() called but FINOPS_MULTI_TENANT is not enabled");
   }
@@ -195,9 +251,20 @@ async function createTenant({ name }) {
   await controlPlaneReady;
 
   const schemaName = generateSchemaName();
+  const status = trial_days ? "trial" : "active";
+  const trialEndsAt = trial_days ? new Date(Date.now() + trial_days * 24 * 60 * 60 * 1000).toISOString() : null;
+
+  const columns = ["name", "schema_name", "status"];
+  const values = [name, schemaName, status];
+  if (trialEndsAt) { columns.push("trial_ends_at"); values.push(trialEndsAt); }
+  if (max_api_keys != null) { columns.push("max_api_keys"); values.push(max_api_keys); }
+  if (max_budgets != null) { columns.push("max_budgets"); values.push(max_budgets); }
+  if (max_monthly_events != null) { columns.push("max_monthly_events"); values.push(max_monthly_events); }
+
+  const placeholders = columns.map(() => "?").join(", ");
   const inserted = await controlPlaneDb.run(
-    "INSERT INTO tenants (name, schema_name) VALUES (?, ?) RETURNING id",
-    [name, schemaName]
+    `INSERT INTO tenants (${columns.join(", ")}) VALUES (${placeholders}) RETURNING id`,
+    values
   );
 
   // Provision the tenant's own schema/tables up front (rather than lazily
@@ -206,7 +273,7 @@ async function createTenant({ name }) {
   // silently on someone's very first API call against a half-set-up tenant.
   await getTenantDb(schemaName);
 
-  return { id: inserted.lastInsertRowid, name, schema_name: schemaName, status: "active" };
+  return { id: inserted.lastInsertRowid, name, schema_name: schemaName, status, trial_ends_at: trialEndsAt };
 }
 
 async function createTenantApiKey({ tenant_id, label, role = "developer", team = null, allow_background = false }) {
@@ -236,11 +303,48 @@ async function resolveTenantApiKey(keyId) {
   const { controlPlaneReady, controlPlaneDb } = initControlPlane();
   await controlPlaneReady;
   return controlPlaneDb.get(
-    `SELECT api_keys.*, tenants.schema_name AS tenant_schema, tenants.status AS tenant_status
+    `SELECT api_keys.*, tenants.schema_name AS tenant_schema, tenants.status AS tenant_status,
+            tenants.trial_ends_at AS tenant_trial_ends_at, tenants.suspended_reason AS tenant_suspended_reason,
+            tenants.max_api_keys AS tenant_max_api_keys, tenants.max_budgets AS tenant_max_budgets,
+            tenants.max_monthly_events AS tenant_max_monthly_events
      FROM api_keys JOIN tenants ON tenants.id = api_keys.tenant_id
      WHERE api_keys.key_id = ?`,
     [keyId]
   );
+}
+
+// Session-token auth (see tenantUsers.js) already knows which tenant a
+// session belongs to (tenantId, cached at login) but NOT whether that
+// tenant has since been suspended or offboarded mid-session - a session can
+// live up to 24h, far longer than it'd take an operator to suspend an
+// abusive tenant, so every session-authenticated request re-checks status
+// here rather than trusting whatever was true at login time.
+async function getTenantStatus(tenantId) {
+  const { controlPlaneReady, controlPlaneDb } = initControlPlane();
+  await controlPlaneReady;
+  return controlPlaneDb.get("SELECT * FROM tenants WHERE id = ?", [tenantId]);
+}
+
+// The list the periodic background-job scheduler (tenantJobs.js) and the
+// trial-expiry sweep (tenantLifecycle.js) both iterate over. 'trial' tenants
+// are included deliberately - a trial customer still gets budget alerts and
+// weekly briefings right up until (and not after) their trial actually
+// expires; 'suspended'/'offboarding'/'trial_expired'/'deleted' tenants are
+// excluded because there is no legitimate reason to spend a background
+// job's Postgres connection on a tenant that can't even log in right now.
+async function listActiveTenants() {
+  const { controlPlaneReady, controlPlaneDb } = initControlPlane();
+  await controlPlaneReady;
+  return controlPlaneDb.all("SELECT * FROM tenants WHERE status IN ('active', 'trial') ORDER BY id");
+}
+
+// Every tenant, any status - used by admin/reporting tooling
+// (tenantLifecycle.js's listTenantsForAdmin) that needs to see suspended
+// and offboarding tenants too, not just the ones background jobs run for.
+async function listAllTenants() {
+  const { controlPlaneReady, controlPlaneDb } = initControlPlane();
+  await controlPlaneReady;
+  return controlPlaneDb.all("SELECT * FROM tenants ORDER BY id");
 }
 
 // Test/shutdown helper: closes every pool this module has ever opened
@@ -259,6 +363,20 @@ async function closeAll() {
   controlPlaneDb = null;
 }
 
+// Closes and forgets ONE tenant's pool - called by tenantLifecycle.js's
+// purgeTenant right after DROP SCHEMA, so a purged tenant's now-pointless
+// (its schema no longer exists) pool doesn't linger holding connections,
+// and so a schema_name reused far in the future (extremely unlikely given
+// generateSchemaName's randomness, but not impossible) can't accidentally
+// pick up a stale cached pool/ready-promise from a tenant that no longer
+// exists. A no-op if this schema was never opened (nothing to close).
+async function closeTenantPool(schemaName) {
+  const entry = tenantPools.get(schemaName);
+  if (!entry) return;
+  tenantPools.delete(schemaName);
+  await entry.pool.end();
+}
+
 module.exports = {
   MULTI_TENANT,
   controlPlaneSchema,
@@ -267,7 +385,14 @@ module.exports = {
   createTenant,
   createTenantApiKey,
   resolveTenantApiKey,
+  getTenantStatus,
+  listActiveTenants,
+  listAllTenants,
+  isTrialExpired,
+  tenantAccessDenialReason,
+  markTrialExpiredIfObserved,
   closeAll,
+  closeTenantPool,
   // exposed for tests that need to inspect pool identity/count, not for
   // route code
   _tenantPools: tenantPools,

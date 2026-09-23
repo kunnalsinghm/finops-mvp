@@ -1,4 +1,4 @@
-﻿// routes/gitops.js - "FinOps as Code": sync budgets AND declarative tagging
+// routes/gitops.js - "FinOps as Code": sync budgets AND declarative tagging
 // rules from finops.yaml
 //
 // Simple version of the blueprint's GitOps idea: no GitHub Action wiring yet
@@ -14,7 +14,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const yaml = require("js-yaml");
-const db = require("../storage");
+const defaultDb = require("../storage");
 const { requireAuth } = require("../auth");
 const { logAudit } = require("../audit");
 const { ASSIGNABLE_FIELDS } = require("../tagRules");
@@ -22,7 +22,7 @@ const { ASSIGNABLE_FIELDS } = require("../tagRules");
 const router = express.Router();
 const CONFIG_PATH = path.join(__dirname, "..", "..", "finops.yaml");
 
-async function syncBudgets(desired) {
+async function syncBudgets(desired, db) {
   const existing = await db.all("SELECT * FROM budgets");
   const desiredKeys = new Set(desired.map((b) => `${b.scope_type}:${b.scope_value}`));
 
@@ -73,7 +73,7 @@ function normalizeTagRule(entry) {
   return row;
 }
 
-async function syncTagRules(desiredRaw) {
+async function syncTagRules(desiredRaw, db) {
   const desired = desiredRaw.map(normalizeTagRule);
   const existing = await db.all("SELECT * FROM tag_rules");
   const desiredPrefixes = new Set(desired.map((r) => r.api_key_prefix));
@@ -111,14 +111,14 @@ async function syncTagRules(desiredRaw) {
   return { created, updated, removed, total: desired.length };
 }
 
-async function syncFromFile() {
+async function syncFromFile(db = defaultDb) {
   if (!fs.existsSync(CONFIG_PATH)) {
     throw new Error(`finops.yaml not found at ${CONFIG_PATH}`);
   }
   const doc = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8")) || {};
 
-  const budgetsResult = await syncBudgets(doc.budgets || []);
-  const tagRulesResult = await syncTagRules(doc.tagging_rules || []);
+  const budgetsResult = await syncBudgets(doc.budgets || [], db);
+  const tagRulesResult = await syncTagRules(doc.tagging_rules || [], db);
 
   // Top-level created/updated/removed/total stay budgets-only, for
   // backward compatibility with anything already reading this response
@@ -128,7 +128,8 @@ async function syncFromFile() {
 
 router.post("/sync", requireAuth("manage_budgets"), async (req, res) => {
   try {
-    const result = await syncFromFile();
+    const result = await syncFromFile(req.db);
+    await logAudit(req.apiKey.key_id, "gitops.sync", "finops.yaml", result, req.db);
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(400).json({ error: err.message });

@@ -24,7 +24,7 @@
 //     volume-spike method (today's count vs. a rolling per-agent daily
 //     average), applied to tool-call volume instead of LLM-request volume.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { sinceDaysAgo, dayFloorExpr, todayClause } = require("./storage/dialectSql");
 const { checkRegionAllowed } = require("./dataResidency");
 
@@ -47,7 +47,7 @@ function detectRiskyCommand(text) {
 const VOLUME_BASELINE_LOOKBACK_DAYS = 14;
 const VOLUME_SPIKE_MULTIPLIER = 5;
 
-async function checkToolCallVolumeSpike(agentId) {
+async function checkToolCallVolumeSpike(agentId, db = defaultDb) {
   if (!agentId) return null;
   const todayRow = await db.get(
     `SELECT COUNT(*) AS n FROM tool_calls WHERE agent_id = ? AND ${todayClause("event_time")}`,
@@ -75,7 +75,7 @@ async function checkToolCallVolumeSpike(agentId) {
   return null;
 }
 
-async function logToolCall({ agent_id, session_id, task_id, tool_name, target, region, keyId, team, raw }) {
+async function logToolCall({ agent_id, session_id, task_id, tool_name, target, region, keyId, team, raw, db = defaultDb }) {
   const reasons = [];
 
   const riskyMatches = detectRiskyCommand(`${tool_name} ${target || ""}`);
@@ -83,12 +83,12 @@ async function logToolCall({ agent_id, session_id, task_id, tool_name, target, r
     reasons.push(...riskyMatches.map((m) => `risky-command:${m}`));
   }
 
-  const volumeSignal = await checkToolCallVolumeSpike(agent_id);
+  const volumeSignal = await checkToolCallVolumeSpike(agent_id, db);
   if (volumeSignal) reasons.push(volumeSignal);
 
   let residency = null;
   if (region) {
-    residency = await checkRegionAllowed({ keyId, team, region });
+    residency = await checkRegionAllowed({ keyId, team, region, db });
     if (!residency.allowed) reasons.push(`data-residency-violation: region '${region}' not in the ${residency.scope}-level allow-list`);
   }
 
@@ -115,7 +115,7 @@ async function logToolCall({ agent_id, session_id, task_id, tool_name, target, r
   return { id: result.lastInsertRowid, risk_level: riskLevel, flagged, reasons };
 }
 
-async function listToolCalls({ onlyFlagged = false, agent_id } = {}) {
+async function listToolCalls({ onlyFlagged = false, agent_id, db = defaultDb } = {}) {
   const clauses = [];
   const params = [];
   if (onlyFlagged) clauses.push("flagged = 1");

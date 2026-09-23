@@ -8,6 +8,7 @@
 // behaves exactly like the original Slack-only version: local log only.
 
 const { logAlert } = require("./governance");
+const defaultDb = require("./storage");
 const logger = require("./logger");
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || "";
@@ -84,8 +85,13 @@ async function sendEmail(message) {
 // configured channel fails, deliverAlert throws so the caller (alerts.js)
 // knows this alert was NOT actually delivered anywhere and can avoid
 // marking it as fired, letting the next scheduled check retry it.
-async function deliverAlert(message, type = "budget") {
-  await logAlert(type, message);
+// `db` defaults to the single global database (single-tenant mode). In
+// multi-tenant mode every caller in the request path passes req.db so the
+// local alerts_log entry lands in the right tenant's own schema - Slack/
+// webhook/email delivery itself has no tenant concept (those are configured
+// per-process via env vars, not per-tenant), only the local log row does.
+async function deliverAlert(message, type = "budget", db = defaultDb) {
+  await logAlert(type, message, db);
 
   const channels = [];
   if (SLACK_WEBHOOK_URL) channels.push(["slack", sendSlack(message)]);

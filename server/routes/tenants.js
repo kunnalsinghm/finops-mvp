@@ -15,6 +15,7 @@
 
 const express = require("express");
 const tenancy = require("../tenancy");
+const { createTenantUser } = require("../tenantUsers");
 const logger = require("../logger");
 
 const router = express.Router();
@@ -56,23 +57,49 @@ router.post("/", async (req, res) => {
     return res.status(429).json({ error: "Too many signups right now - please try again in a minute." });
   }
 
-  const { name, admin_label } = req.body || {};
+  const { name, admin_label, admin_username, admin_password, trial_days } = req.body || {};
   if (!name || typeof name !== "string" || !name.trim()) {
     return res.status(400).json({ error: "'name' (organization/tenant name) is required" });
   }
   if (name.length > NAME_MAX_LENGTH) {
     return res.status(400).json({ error: `'name' must be ${NAME_MAX_LENGTH} characters or fewer` });
   }
+  // Dashboard login is opt-in at signup: give both or neither. A customer
+  // that only wants an API key (e.g. scripting straight against the proxy)
+  // shouldn't be forced to also pick a dashboard password.
+  if ((admin_username && !admin_password) || (admin_password && !admin_username)) {
+    return res.status(400).json({ error: "admin_username and admin_password must be provided together" });
+  }
+  if (admin_password && admin_password.length < 8) {
+    return res.status(400).json({ error: "admin_password must be at least 8 characters" });
+  }
+  const trialDays = trial_days != null ? Number(trial_days) : null;
+  if (trialDays != null && (!Number.isInteger(trialDays) || trialDays <= 0)) {
+    return res.status(400).json({ error: "trial_days must be a positive integer" });
+  }
 
   try {
-    const tenant = await tenancy.createTenant({ name: name.trim() });
+    const tenant = await tenancy.createTenant({ name: name.trim(), trial_days: trialDays });
     const key = await tenancy.createTenantApiKey({
       tenant_id: tenant.id,
       label: admin_label && typeof admin_label === "string" ? admin_label.trim().slice(0, NAME_MAX_LENGTH) : "First admin key",
       role: "admin",
     });
 
-    logger.info("New tenant provisioned via signup", { tenantId: tenant.id, name: tenant.name });
+    let dashboardUsername = null;
+    if (admin_username && admin_password) {
+      const { controlPlaneDb } = tenancy.initControlPlane();
+      await createTenantUser({
+        tenant_id: tenant.id,
+        username: String(admin_username).trim().slice(0, NAME_MAX_LENGTH),
+        password: admin_password,
+        role: "admin",
+        db: controlPlaneDb,
+      });
+      dashboardUsername = String(admin_username).trim().slice(0, NAME_MAX_LENGTH);
+    }
+
+    logger.info("New tenant provisioned via signup", { tenantId: tenant.id, name: tenant.name, trial: Boolean(trialDays), dashboardUser: Boolean(dashboardUsername) });
 
     // key_id is shown here exactly once - the same "treat it like a
     // password" convention as routes/keys.js's POST /. There is no
@@ -82,9 +109,10 @@ router.post("/", async (req, res) => {
     // why this response (and whatever UI calls it) should make clear this
     // is the one and only time this value is shown.
     res.status(201).json({
-      tenant: { id: tenant.id, name: tenant.name },
+      tenant: { id: tenant.id, name: tenant.name, status: tenant.status, trial_ends_at: tenant.trial_ends_at },
       api_key: key.key_id,
       role: key.role,
+      dashboard_login: dashboardUsername ? { username: dashboardUsername, note: "Log in at POST /api/auth/login with this tenant_id, username, and the password you chose." } : null,
       warning: "Save this API key now - it will not be shown again.",
     });
   } catch (err) {

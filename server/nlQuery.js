@@ -22,7 +22,7 @@
 // engine. If a query doesn't match a known shape, it says so, plainly,
 // rather than guessing.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const { sinceDaysAgo, yearMonthExpr, todayClause } = require("./storage/dialectSql");
 
 function round4(n) {
@@ -46,14 +46,14 @@ function extractTimeframe(text) {
   return { label: "all time", clause: "1=1" };
 }
 
-async function extractTeamMention(text) {
+async function extractTeamMention(text, db = defaultDb) {
   const knownTeams = await db.all("SELECT DISTINCT team FROM usage_events WHERE team IS NOT NULL");
   const lower = text.toLowerCase();
   const match = knownTeams.find((r) => lower.includes(String(r.team).toLowerCase()));
   return match ? match.team : null;
 }
 
-async function queryDashboard(text) {
+async function queryDashboard(text, db = defaultDb) {
   if (!text || typeof text !== "string" || !text.trim()) {
     return { understood: false, answer_text: "Ask something like \"what did we spend on the growth team last week\" or \"top spenders this month\"." };
   }
@@ -74,7 +74,7 @@ async function queryDashboard(text) {
     return { understood: true, intent: "top_spenders", timeframe: timeframe.label, answer_text: answerText, data };
   }
 
-  const team = await extractTeamMention(text);
+  const team = await extractTeamMention(text, db);
   const wantsSpend = /\bspend\b|\bspent\b|\bcost\b/i.test(text);
 
   if (wantsSpend) {

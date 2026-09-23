@@ -12,7 +12,7 @@ router.get("/", requireAuth("read"), async (req, res) => {
   if (!q) {
     return res.status(400).json({ error: "q query parameter is required" });
   }
-  res.json(await queryDashboard(q));
+  res.json(await queryDashboard(q, req.db));
 });
 
 module.exports = router;

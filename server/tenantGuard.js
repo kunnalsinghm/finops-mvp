@@ -1,27 +1,24 @@
 // tenantGuard.js - fail loudly, not silently, where multi-tenant support is incomplete.
 //
 // In multi-tenant mode each tenant's data lives in its own Postgres schema, reached
-// through req.db. The route groups below were written against ONE global database
-// and have not been converted: left mounted, they would read and write the default
-// schema for every tenant - so tenant A could see tenant B's commitments, alerts or
-// logged tool calls. A 501 that says so is safe; a quiet leak is not.
+// through req.db. Any route group written against a hardcoded global database instead
+// of req.db would, left mounted, read and write the default schema for every tenant -
+// so tenant A could see tenant B's commitments, alerts or logged tool calls. A 501 that
+// says so is safe; a quiet leak is not.
 //
-// This is a stopgap, not a feature: converting a group means threading req.db through
-// its module (see how routes/budgets.js and budgets/alerts callers do it), adding a
-// two-tenant test to test/multiTenantIsolation.test.js, and deleting its line here.
-// Single-tenant mode is unaffected - the guard is a no-op unless multi-tenant is on.
+// NOT_TENANT_AWARE is empty: alerts, commitments, gitops, reconcile, reports, query and
+// tool-calls have all been converted to thread req.db through (see routes/budgets.js for
+// the pattern this project follows) and are covered by two-tenant isolation tests in
+// test/multiTenantIsolation.test.js. The mechanism below is kept, not deleted - it's the
+// safety net for the NEXT route group that ships before its multi-tenant conversion is
+// done, not a one-time migration script. To add a group: list it here BEFORE it is
+// mounted in index.js, and remove it once req.db is threaded through and isolation-tested.
+// Single-tenant mode is unaffected either way - the guard is a no-op unless multi-tenant
+// is on.
 
 const tenancy = require("./tenancy");
 
-const NOT_TENANT_AWARE = [
-  { path: "/api/alerts", why: "alert log and alert checks run against the default database" },
-  { path: "/api/commitments", why: "commitments are stored in the default database" },
-  { path: "/api/gitops", why: "budget sync writes to the default database" },
-  { path: "/api/reconcile", why: "provider invoice imports use the default database" },
-  { path: "/api/reports", why: "weekly briefings read the default database" },
-  { path: "/api/query", why: "the natural-language query reads the default database" },
-  { path: "/api/tool-calls", why: "the tool-call audit log is stored in the default database" },
-];
+const NOT_TENANT_AWARE = [];
 
 function blockInMultiTenant({ isMultiTenant = () => tenancy.MULTI_TENANT } = {}) {
   return function notTenantAware(req, res, next) {

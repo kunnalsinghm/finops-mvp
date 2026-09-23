@@ -12,7 +12,7 @@
 // the dashboard can show a live preview (GET /api/reports/weekly/preview)
 // without that preview counting as an actual send.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const logger = require("./logger");
 const { sinceDaysAgo } = require("./storage/dialectSql");
 const { deliverAlert } = require("./alertDelivery");
@@ -32,7 +32,7 @@ function getIsoWeekKey(date) {
   return `${d.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
 }
 
-async function buildWeeklyBriefing() {
+async function buildWeeklyBriefing(db = defaultDb) {
   const thisWeekRow = await db.get(
     `SELECT COALESCE(SUM(cost_usd), 0) AS total FROM usage_events WHERE event_time >= ${sinceDaysAgo(7)}`
   );
@@ -79,14 +79,14 @@ function formatBriefingMessage(briefing) {
   );
 }
 
-async function alreadySent(weekKey) {
+async function alreadySent(weekKey, db = defaultDb) {
   const row = await db.get("SELECT 1 AS found FROM weekly_briefing_state WHERE week_key = ?", [weekKey]);
   return Boolean(row);
 }
 
-async function sendWeeklyBriefing() {
-  const briefing = await buildWeeklyBriefing();
-  await deliverAlert(formatBriefingMessage(briefing), "weekly-briefing");
+async function sendWeeklyBriefing(db = defaultDb) {
+  const briefing = await buildWeeklyBriefing(db);
+  await deliverAlert(formatBriefingMessage(briefing), "weekly-briefing", db);
   return briefing;
 }
 
@@ -95,15 +95,15 @@ async function sendWeeklyBriefing() {
 // happens on or after Monday 00:00 UTC - an hourly timer means the actual
 // send lands within an hour of the week rolling over, not necessarily at
 // exactly midnight.
-async function checkWeeklyBriefing() {
+async function checkWeeklyBriefing(db = defaultDb) {
   const now = new Date();
   if (now.getUTCDay() !== 1) return; // only proceed on Mondays (UTC)
 
   const weekKey = getIsoWeekKey(now);
-  if (await alreadySent(weekKey)) return;
+  if (await alreadySent(weekKey, db)) return;
 
   try {
-    await sendWeeklyBriefing();
+    await sendWeeklyBriefing(db);
     await db.run("INSERT INTO weekly_briefing_state (week_key) VALUES (?)", [weekKey]);
   } catch (err) {
     logger.error("Weekly briefing delivery failed - will retry on next check", { weekKey, error: err.message });

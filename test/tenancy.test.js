@@ -186,9 +186,53 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
     assert.equal(res.status, 401);
   });
 
-  test("end-to-end: X-Session-Token is rejected with 501 in multi-tenant mode, not silently accepted", async () => {
+  test("end-to-end: an unrecognized/garbage X-Session-Token is rejected with 401, not silently accepted", async () => {
     const res = await request("/whoami", { headers: { "X-Session-Token": "whatever" } });
-    assert.equal(res.status, 501);
+    assert.equal(res.status, 401);
+  });
+
+  test("end-to-end: a valid tenant dashboard session authenticates and resolves to the right tenant's own db", async () => {
+    const tenantUsers = require("../server/tenantUsers");
+    const tenant = await makeTenant(`SessionLogin-${process.pid}`);
+    const { controlPlaneDb } = tenancy.initControlPlane();
+    await tenantUsers.createTenantUser({ tenant_id: tenant.id, username: "alice", password: "correct horse battery", role: "admin", db: controlPlaneDb });
+
+    const user = await controlPlaneDb.get("SELECT * FROM users WHERE tenant_id = ? AND username = ?", [tenant.id, "alice"]);
+    const verified = await tenantUsers.verifyTenantLogin({ tenant_id: tenant.id, username: "alice", password: "correct horse battery", db: controlPlaneDb });
+    assert.ok(verified, "correct password should verify");
+    const token = tenantUsers.createTenantSession(verified, tenant.schema_name);
+
+    const res = await request("/whoami", { headers: { "X-Session-Token": token } });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.role, "admin");
+    assert.equal(res.json.tenantId, tenant.id);
+
+    tenantUsers.destroyTenantSession(token);
+    const afterLogout = await request("/whoami", { headers: { "X-Session-Token": token } });
+    assert.equal(afterLogout.status, 401, "a destroyed session must not keep authenticating");
+    void user;
+  });
+
+  test("end-to-end: a session for tenant A cannot be used to read tenant B's data", async () => {
+    const tenantUsers = require("../server/tenantUsers");
+    const { controlPlaneDb } = tenancy.initControlPlane();
+    const tenantA = await makeTenant(`SessionIsoA-${process.pid}`);
+    const tenantB = await makeTenant(`SessionIsoB-${process.pid}`);
+    await tenantUsers.createTenantUser({ tenant_id: tenantA.id, username: "bob", password: "hunter2hunter2", role: "admin", db: controlPlaneDb });
+    const verified = await tenantUsers.verifyTenantLogin({ tenant_id: tenantA.id, username: "bob", password: "hunter2hunter2", db: controlPlaneDb });
+    const token = tenantUsers.createTenantSession(verified, tenantA.schema_name);
+
+    const keyB = await tenancy.createTenantApiKey({ tenant_id: tenantB.id, label: "B key" });
+    await request("/write-budget", {
+      method: "POST",
+      headers: { "X-API-Key": keyB.key_id },
+      body: { scope_value: "b-only", monthly_limit_usd: 10 },
+    });
+
+    const res = await request("/whoami", { headers: { "X-Session-Token": token } });
+    assert.equal(res.status, 200);
+    assert.notEqual(res.json.tenantId, tenantB.id, "tenant A's session must resolve to tenant A, never tenant B");
+    tenantUsers.destroyTenantSession(token);
   });
 
   test("end-to-end: a revoked key is rejected with 403", async () => {

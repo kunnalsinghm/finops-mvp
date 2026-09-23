@@ -41,7 +41,9 @@ const toolCallsRoute = require("./routes/toolCalls");
 const gpuUsageRoute = require("./routes/gpuUsage");
 const queryRoute = require("./routes/query");
 const tenantsRoute = require("./routes/tenants");
+const platformAdminRoute = require("./routes/platformAdmin");
 const { NOT_TENANT_AWARE, blockInMultiTenant } = require("./tenantGuard");
+const tenancy = require("./tenancy");
 const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
 const { checkCommitmentAlerts } = require("./commitments");
 const { checkWeeklyBriefing } = require("./weeklyBriefing");
@@ -130,6 +132,10 @@ app.use("/api/query", queryRoute);
 // Tenant signup - deliberately unauthenticated (a new customer has no key yet) and a 404
 // unless FINOPS_MULTI_TENANT=true. See routes/tenants.js.
 app.use("/api/tenants", tenantsRoute);
+// Operator/ops surface for tenant lifecycle - gated by its own shared
+// secret (FINOPS_PLATFORM_ADMIN_TOKEN), not a tenant API key or session.
+// See routes/platformAdmin.js's header for the full reasoning.
+app.use("/api/platform", platformAdminRoute);
 
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
@@ -171,10 +177,28 @@ process.on("unhandledRejection", (reason) => {
 });
 
 setInterval(() => {
-  checkBudgetAlerts().catch((e) => logger.error("Budget alert check failed", { error: e.message }));
-  checkBurnRate().catch((e) => logger.error("Burn-rate check failed", { error: e.message }));
-  checkCommitmentAlerts().catch((e) => logger.error("Commitment alert check failed", { error: e.message }));
-  checkWeeklyBriefing().catch((e) => logger.error("Weekly briefing check failed", { error: e.message }));
+  if (tenancy.MULTI_TENANT) {
+    // Runs the same four checks once PER TENANT instead of once against a
+    // single global database - see tenantJobs.js's header comment for why
+    // that distinction matters. A tenant-iteration failure (e.g. the
+    // control-plane connection is briefly down) is caught inside
+    // tenantJobs.js per-tenant already; this outer catch only guards
+    // against listActiveTenants() itself failing.
+    require("./tenantJobs")
+      .runPeriodicChecksForAllTenants()
+      .catch((e) => logger.error("Per-tenant periodic check run failed", { error: e.message }));
+    // Trial-expiry + offboarding-purge sweep - see tenantLifecycle.js's
+    // runLifecycleSweep header comment for why this can't just rely on the
+    // reactive per-request check in auth.js alone.
+    require("./tenantLifecycle")
+      .runLifecycleSweep()
+      .catch((e) => logger.error("Tenant lifecycle sweep failed", { error: e.message }));
+  } else {
+    checkBudgetAlerts().catch((e) => logger.error("Budget alert check failed", { error: e.message }));
+    checkBurnRate().catch((e) => logger.error("Burn-rate check failed", { error: e.message }));
+    checkCommitmentAlerts().catch((e) => logger.error("Commitment alert check failed", { error: e.message }));
+    checkWeeklyBriefing().catch((e) => logger.error("Weekly briefing check failed", { error: e.message }));
+  }
 }, 5 * 60 * 1000);
 
 runBackup();

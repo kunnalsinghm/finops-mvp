@@ -10,7 +10,7 @@ const router = express.Router();
 // Computes the briefing WITHOUT sending it or marking a week as sent - safe
 // to call as often as the dashboard wants, purely a read.
 router.get("/weekly/preview", requireAuth("read"), async (req, res) => {
-  const briefing = await buildWeeklyBriefing();
+  const briefing = await buildWeeklyBriefing(req.db);
   res.json(briefing);
 });
 
@@ -20,7 +20,7 @@ router.get("/weekly/preview", requireAuth("read"), async (req, res) => {
 // cadence. Deliberately does NOT touch weekly_briefing_state, so it can't
 // suppress or duplicate the automatic Monday send.
 router.post("/weekly/send-now", requireAuth("read"), async (req, res) => {
-  const briefing = await sendWeeklyBriefing();
+  const briefing = await sendWeeklyBriefing(req.db);
   res.json({ ok: true, briefing });
 });
 

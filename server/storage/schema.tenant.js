@@ -1,4 +1,4 @@
-﻿// storage/schema.tenant.js - applied to EVERY tenant's own private schema in
+// storage/schema.tenant.js - applied to EVERY tenant's own private schema in
 // a multi-tenant (FINOPS_MULTI_TENANT=true) deployment.
 //
 // Deliberately just the api_keys/users/sessions-free subset of
@@ -248,4 +248,35 @@ CREATE INDEX IF NOT EXISTS idx_usage_project ON usage_events(project_id);
 CREATE INDEX IF NOT EXISTS idx_usage_cost_center ON usage_events(cost_center);
 `;
 
-module.exports = { TENANT_SCHEMA_SQL };
+// Every table a tenant's own schema contains - used by
+// tenantLifecycle.js's exportTenantData to dump a complete tenant export
+// without hardcoding the table list a second time in a different file.
+// Keep this in sync with the CREATE TABLE statements above (deliberately
+// listed once, by hand, rather than introspected from information_schema -
+// an explicit list makes it obvious at a glance whether a new table was
+// wired into exports, instead of silently picking up anything anyone adds
+// to this file later, tenant-data table or not).
+const TENANT_TABLES = [
+  "usage_events",
+  "gpu_usage_events",
+  "tool_calls",
+  "tag_inferences",
+  "region_allowlist",
+  "budgets",
+  "tag_rules",
+  "pricing_overrides",
+  "alerts_log",
+  "budget_alert_state",
+  "reconciliation_rows",
+  "audit_log",
+  "shadow_comparisons",
+  "model_allowlist",
+  "token_quotas",
+  "commitments",
+  "commitment_alert_state",
+  "weekly_briefing_state",
+  "subscriptions",
+];
+
+module.exports = { TENANT_SCHEMA_SQL, TENANT_TABLES };
+

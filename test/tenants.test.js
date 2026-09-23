@@ -42,6 +42,7 @@ if (!isPostgres) {
   const tenancy = require("../server/tenancy");
   const tenantsRoute = require("../server/routes/tenants");
   const costsRoute = require("../server/routes/costs");
+  const authRoute = require("../server/routes/auth");
 
   let server;
 
@@ -50,6 +51,7 @@ if (!isPostgres) {
     app.use(express.json());
     app.use("/api/tenants", tenantsRoute);
     app.use("/api/costs", costsRoute);
+    app.use("/api/auth", authRoute);
     server = await new Promise((resolve, reject) => {
       const s = app.listen(0, "127.0.0.1", () => resolve(s));
       s.on("error", reject);
@@ -149,5 +151,44 @@ if (!isPostgres) {
     const rowA = await tenancy.initControlPlane().controlPlaneDb.get("SELECT schema_name FROM tenants WHERE id = ?", [a.body.tenant.id]);
     const rowB = await tenancy.initControlPlane().controlPlaneDb.get("SELECT schema_name FROM tenants WHERE id = ?", [b.body.tenant.id]);
     createdSchemas.push(rowA.schema_name, rowB.schema_name);
+  });
+
+  test("signup with admin_username + admin_password provisions a working dashboard login", async () => {
+    const result = await post("/api/tenants", { name: "Dashboard Co", admin_username: "founder", admin_password: "super secret pw" });
+    assert.equal(result.status, 201);
+    assert.equal(result.body.dashboard_login.username, "founder");
+
+    const tenantRow = await tenancy.initControlPlane().controlPlaneDb.get("SELECT schema_name FROM tenants WHERE id = ?", [result.body.tenant.id]);
+    createdSchemas.push(tenantRow.schema_name);
+
+    const login = await post("/api/auth/login", { tenant_id: result.body.tenant.id, username: "founder", password: "super secret pw" });
+    assert.equal(login.status, 200);
+    assert.equal(login.body.role, "admin");
+    assert.ok(login.body.token);
+
+    // The session must actually work against a real protected route.
+    const check = await get("/api/costs/summary", { "X-Session-Token": login.body.token });
+    assert.equal(check.status, 200);
+  });
+
+  test("signup rejects admin_username without admin_password (and vice versa)", async () => {
+    const onlyUsername = await post("/api/tenants", { name: "Half Co A", admin_username: "someone" });
+    assert.equal(onlyUsername.status, 400);
+    const onlyPassword = await post("/api/tenants", { name: "Half Co B", admin_password: "irrelevant123" });
+    assert.equal(onlyPassword.status, 400);
+  });
+
+  test("signup with trial_days provisions a trial tenant with trial_ends_at set", async () => {
+    const result = await post("/api/tenants", { name: "Trial Co", trial_days: 14 });
+    assert.equal(result.status, 201);
+    assert.equal(result.body.tenant.status, "trial");
+    assert.ok(result.body.tenant.trial_ends_at);
+
+    const tenantRow = await tenancy.initControlPlane().controlPlaneDb.get("SELECT schema_name FROM tenants WHERE id = ?", [result.body.tenant.id]);
+    createdSchemas.push(tenantRow.schema_name);
+
+    // A trial tenant's key must work like any active tenant's key right now.
+    const check = await get("/api/costs/summary", { "X-API-Key": result.body.api_key });
+    assert.equal(check.status, 200);
   });
 }

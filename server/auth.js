@@ -35,19 +35,35 @@ function hasPermission(role, permission) {
 // comment for the isolation model this resolves into.
 async function requireTenantAuth(permission) {
   const tenancy = require("./tenancy");
+  const { getTenantSession } = require("./tenantUsers");
   return async (req, res, next) => {
-    // Session-token (dashboard login) auth isn't built for multi-tenant
-    // mode yet - the single-tenant session store is one global in-memory
-    // Map with no tenant concept, so silently falling through to it here
-    // would be a real cross-tenant risk, not just a missing feature. Fail
-    // loudly and specifically instead of quietly doing the wrong thing.
-    if (req.header("X-Session-Token")) {
-      return res.status(501).json({ error: "Dashboard session login is not yet supported in multi-tenant mode - use an X-API-Key" });
+    const sessionToken = req.header("X-Session-Token");
+    if (sessionToken) {
+      const session = getTenantSession(sessionToken);
+      if (!session) {
+        return res.status(401).json({ error: "Invalid or expired session token" });
+      }
+      if (permission && !hasPermission(session.role, permission)) {
+        return res.status(403).json({ error: `Role '${session.role}' lacks '${permission}' permission` });
+      }
+      const tenantRow = await tenancy.getTenantStatus(session.tenantId);
+      const denialReason = tenancy.tenantAccessDenialReason(tenantRow);
+      if (denialReason) {
+        await tenancy.markTrialExpiredIfObserved(tenantRow).catch(() => {});
+        return res.status(403).json({ error: denialReason });
+      }
+      req.apiKey = { role: session.role, key_id: `user:${session.username}`, label: session.username, tenant_id: session.tenantId };
+      req.tenantId = session.tenantId;
+      req.tenantSchema = session.tenantSchema;
+      req.tenantLimits = { max_api_keys: tenantRow.max_api_keys, max_budgets: tenantRow.max_budgets, max_monthly_events: tenantRow.max_monthly_events };
+      req.db = await tenancy.getTenantDb(session.tenantSchema);
+      req.controlPlaneDb = tenancy.initControlPlane().controlPlaneDb;
+      return next();
     }
 
     const keyId = req.header("X-API-Key");
     if (!keyId) {
-      return res.status(401).json({ error: "Missing X-API-Key header" });
+      return res.status(401).json({ error: "Missing X-API-Key or X-Session-Token header" });
     }
 
     // No bootstrap mode here, unlike single-tenant: "no keys exist yet"
@@ -61,8 +77,15 @@ async function requireTenantAuth(permission) {
     if (!row) {
       return res.status(401).json({ error: "Invalid API key" });
     }
-    if (row.tenant_status && row.tenant_status !== "active") {
-      return res.status(403).json({ error: "This tenant's account is not active" });
+    const denialReason = tenancy.tenantAccessDenialReason({
+      id: row.tenant_id,
+      status: row.tenant_status,
+      trial_ends_at: row.tenant_trial_ends_at,
+      suspended_reason: row.tenant_suspended_reason,
+    });
+    if (denialReason) {
+      await tenancy.markTrialExpiredIfObserved({ id: row.tenant_id, status: row.tenant_status, trial_ends_at: row.tenant_trial_ends_at }).catch(() => {});
+      return res.status(403).json({ error: denialReason });
     }
     if (row.status === "revoked") {
       return res.status(403).json({ error: "This API key has been revoked" });
@@ -74,6 +97,7 @@ async function requireTenantAuth(permission) {
     req.apiKey = row;
     req.tenantId = row.tenant_id;
     req.tenantSchema = row.tenant_schema;
+    req.tenantLimits = { max_api_keys: row.tenant_max_api_keys, max_budgets: row.tenant_max_budgets, max_monthly_events: row.tenant_max_monthly_events };
     req.db = await tenancy.getTenantDb(row.tenant_schema);
     // api_keys/users live in the shared control-plane schema, not in any
     // tenant's own schema (see schema.controlPlane.js) - resolveTenantApiKey

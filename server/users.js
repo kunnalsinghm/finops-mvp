@@ -8,14 +8,10 @@
 
 const crypto = require("crypto");
 const db = require("./storage");
+const { hashPassword, passwordMatches } = require("./passwordHash");
 
 const sessions = new Map(); // token -> { username, role, expiresAt }
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-
-function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
-  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
-  return { hash, salt };
-}
 
 async function createUser({ username, password, role = "viewer" }) {
   const { hash, salt } = hashPassword(password);
@@ -31,10 +27,7 @@ async function verifyLogin(username, password) {
   const user = await db.get("SELECT * FROM users WHERE username = ?", [username]);
   if (!user) return null;
   const { hash } = hashPassword(password, user.salt);
-  // Constant-time comparison to avoid timing attacks
-  const a = Buffer.from(hash, "hex");
-  const b = Buffer.from(user.password_hash, "hex");
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  if (!passwordMatches(hash, user.password_hash)) return null;
   return user;
 }
 

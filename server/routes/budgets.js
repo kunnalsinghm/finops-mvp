@@ -6,6 +6,7 @@ const express = require("express");
 const { thisMonthClause } = require("../storage/dialectSql");
 const { logAudit } = require("../audit");
 const { requireAuth } = require("../auth");
+const { checkBudgetQuota } = require("../tenantQuota");
 
 const router = express.Router();
 
@@ -20,6 +21,10 @@ router.post("/", requireAuth("manage_budgets"), async (req, res) => {
     return res
       .status(400)
       .json({ error: "scope_type, scope_value, and monthly_limit_usd are required" });
+  }
+  const quota = await checkBudgetQuota(req);
+  if (!quota.allowed) {
+    return res.status(429).json({ error: quota.message, limit: quota.limit, count: quota.count });
   }
   const result = await req.db.run(
     "INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES (?, ?, ?) RETURNING id",

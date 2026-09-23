@@ -23,13 +23,14 @@ router.post("/", requireAuth("write"), async (req, res) => {
     team,
     keyId: req.apiKey.key_id,
     raw: req.body,
+    db: req.db,
   });
   res.status(201).json(result);
 });
 
 router.get("/", requireAuth("read"), async (req, res) => {
   const onlyFlagged = req.query.flagged === "true";
-  const rows = await listToolCalls({ onlyFlagged, agent_id: req.query.agent_id });
+  const rows = await listToolCalls({ onlyFlagged, agent_id: req.query.agent_id, db: req.db });
   res.json(rows);
 });
 

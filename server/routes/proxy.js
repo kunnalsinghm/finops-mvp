@@ -1,4 +1,4 @@
-﻿// routes/proxy.js - Gateway Proxy (Phase 2), now with streaming (SSE) support
+// routes/proxy.js - Gateway Proxy (Phase 2), now with streaming (SSE) support
 //
 // Non-streaming requests work exactly as before. For streaming requests
 // (body.stream === true):
@@ -37,6 +37,7 @@ const { checkModelAllowed } = require("../modelAllowlist");
 const { checkTokenQuota } = require("../tokenQuota");
 const { checkKeyFraudSignals } = require("../fraudDetection");
 const { checkRegionAllowed } = require("../dataResidency");
+const { checkMonthlyEventQuota } = require("../tenantQuota");
 const { TASK_STATUSES } = require("../agentAttribution");
 const { inferTag } = require("../smartTagging");
 const { applyTagRules } = require("../tagRules");
@@ -367,7 +368,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // control-plane schema in multi-tenant mode, NOT a tenant's own schema -
   // see auth.js's req.controlPlaneDb and governance.js's header.
   if (await isQuarantined(rateLimitKey, req.controlPlaneDb)) {
-    const allowance = checkQuarantineAllowance(rateLimitKey);
+    const allowance = checkQuarantineAllowance(rateLimitKey, req.tenantId);
     if (!allowance.allowed) {
       return res.status(429).json({
         error: "This key is quarantined and limited to 1 request/minute pending human approval.",
@@ -375,10 +376,20 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       });
     }
   } else {
-    const rl = checkRateLimit(rateLimitKey);
+    const rl = checkRateLimit(rateLimitKey, undefined, req.tenantId);
     if (!rl.allowed) {
       return res.status(429).json({ error: "Rate limit exceeded", retryAfterSec: rl.retryAfterSec });
     }
+  }
+
+  // Per-tenant monthly usage-event quota (see tenantQuota.js) - a no-op in
+  // single-tenant mode (req.tenantId unset). Checked here rather than only
+  // at ingest.js's webhook, since the proxy path writes its own
+  // usage_events row too (see insertUsageEvent below) and is the higher-
+  // volume of the two paths in practice.
+  const eventQuota = await checkMonthlyEventQuota(req);
+  if (!eventQuota.allowed) {
+    return res.status(429).json({ error: eventQuota.message, limit: eventQuota.limit, count: eventQuota.count });
   }
 
   // --- Governance: budget circuit breaker (graceful degradation) ---

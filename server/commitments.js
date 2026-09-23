@@ -16,7 +16,7 @@
 // the framing that matters here - 80% burned and 20% remaining are the same
 // number, but only one of those is the sentence a customer wants to see.
 
-const db = require("./storage");
+const defaultDb = require("./storage");
 const logger = require("./logger");
 const { deliverAlert } = require("./alertDelivery");
 
@@ -26,7 +26,7 @@ const REMAINING_TIERS = [
   { tier: "exhausted", threshold: 0 },
 ];
 
-async function computeCommitmentStatus(commitment) {
+async function computeCommitmentStatus(commitment, db = defaultDb) {
   const burnRow = await db.get(
     `SELECT COALESCE(SUM(cost_usd), 0) AS burned
      FROM usage_events
@@ -51,12 +51,12 @@ async function computeCommitmentStatus(commitment) {
   };
 }
 
-async function listCommitmentsWithStatus() {
+async function listCommitmentsWithStatus(db = defaultDb) {
   const commitments = await db.all("SELECT * FROM commitments ORDER BY id DESC");
-  return Promise.all(commitments.map(computeCommitmentStatus));
+  return Promise.all(commitments.map((c) => computeCommitmentStatus(c, db)));
 }
 
-async function hasFired(commitmentId, tier) {
+async function hasFired(commitmentId, tier, db = defaultDb) {
   const row = await db.get(
     "SELECT 1 AS found FROM commitment_alert_state WHERE commitment_id = ? AND tier = ?",
     [commitmentId, tier]
@@ -64,8 +64,8 @@ async function hasFired(commitmentId, tier) {
   return Boolean(row);
 }
 
-async function markFired(commitmentId, tier) {
-  const already = await hasFired(commitmentId, tier);
+async function markFired(commitmentId, tier, db = defaultDb) {
+  const already = await hasFired(commitmentId, tier, db);
   if (already) return;
   await db.run("INSERT INTO commitment_alert_state (commitment_id, tier) VALUES (?, ?)", [commitmentId, tier]);
 }
@@ -74,23 +74,28 @@ async function markFired(commitmentId, tier) {
 // fire remaining-balance alerts exactly once per tier per commitment - not
 // once per month like budget alerts, since a prepaid commitment doesn't
 // reset on a monthly cycle the way a budget does.
-async function checkCommitmentAlerts() {
+//
+// `db` defaults to the single global database (single-tenant mode); in
+// multi-tenant mode tenantJobs.js calls this once per active tenant with
+// that tenant's own db.
+async function checkCommitmentAlerts(db = defaultDb) {
   const commitments = await db.all("SELECT * FROM commitments");
 
   for (const c of commitments) {
-    const status = await computeCommitmentStatus(c);
+    const status = await computeCommitmentStatus(c, db);
     const pctRemainingFraction = status.pct_remaining / 100;
 
     for (const { tier, threshold } of REMAINING_TIERS) {
       if (pctRemainingFraction > threshold) continue;
-      const already = await hasFired(c.id, tier);
+      const already = await hasFired(c.id, tier, db);
       if (already) continue;
       try {
         await deliverAlert(
           `:money_with_wings: Commitment alert - *${c.label}* (${c.provider}) has $${status.remaining_usd.toFixed(2)} of its $${c.initial_amount_usd.toFixed(2)} prepaid balance left (${status.pct_remaining}% remaining).`,
-          "commitment"
+          "commitment",
+          db
         );
-        await markFired(c.id, tier);
+        await markFired(c.id, tier, db);
       } catch (err) {
         logger.error("Commitment alert delivery failed - will retry on next check", {
           commitmentId: c.id,
