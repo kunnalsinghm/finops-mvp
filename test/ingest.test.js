@@ -191,6 +191,81 @@ test("records a tagged event, computes real cost from the baseline catalogue whe
   assert.equal(row.tagged, 1);
 });
 
+test("a declarative tagging rule (finops.yaml tagging_rules:, synced into tag_rules) fills in team/environment on ingest when the caller sends neither", async () => {
+  const key_id = await makeApiKey();
+  const team = `rule-team-${process.pid}`;
+  const environment = `rule-env-${process.pid}`;
+  // Keyed on this exact key_id (not just its role prefix) so this rule
+  // can't leak onto any other test's key in this same test file.
+  await storage.run(
+    "INSERT INTO tag_rules (api_key_prefix, team, environment) VALUES (?, ?, ?)",
+    [key_id, team, environment]
+  );
+
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id },
+    body: { provider: "openai", model: "gpt-4o-mini", input_tokens: 10, output_tokens: 10 },
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.json.tagged, true, "a rule-filled team+environment must count as tagged");
+
+  const row = await getLatestEventForUser(key_id);
+  assert.equal(row.team, team);
+  assert.equal(row.environment, environment);
+});
+
+test("a declarative tagging rule never overrides a team the caller actually sent", async () => {
+  const key_id = await makeApiKey();
+  await storage.run(
+    "INSERT INTO tag_rules (api_key_prefix, team) VALUES (?, 'rule-team-should-not-apply')",
+    [key_id]
+  );
+
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id },
+    body: { provider: "openai", model: "gpt-4o-mini", team: "caller-team", environment: "prod", input_tokens: 10, output_tokens: 10 },
+  });
+  assert.equal(res.status, 201);
+
+  const row = await getLatestEventForUser(key_id);
+  assert.equal(row.team, "caller-team");
+});
+
+test("records project_id and cost_center as their own columns, independent of team/environment tagging", async () => {
+  const key_id = await makeApiKey();
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id },
+    body: {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      team: "eng",
+      environment: "prod",
+      project_id: "checkout-svc",
+      cost_center: "cc-4821",
+      input_tokens: 100,
+      output_tokens: 100,
+    },
+  });
+  assert.equal(res.status, 201);
+
+  const row = await getLatestEventForUser(key_id);
+  assert.equal(row.project_id, "checkout-svc");
+  assert.equal(row.cost_center, "cc-4821");
+});
+
+test("leaves project_id/cost_center null, not an error, when the caller doesn't supply them", async () => {
+  const key_id = await makeApiKey();
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id },
+    body: { provider: "openai", model: "gpt-4o-mini", team: "eng", environment: "prod", input_tokens: 10, output_tokens: 10 },
+  });
+  assert.equal(res.status, 201);
+
+  const row = await getLatestEventForUser(key_id);
+  assert.equal(row.project_id, null);
+  assert.equal(row.cost_center, null);
+});
+
 test("records an untagged event with a warning when team or environment is missing, cost still computed", async () => {
   const key_id = await makeApiKey();
   const res = await post("/api/ingest", {

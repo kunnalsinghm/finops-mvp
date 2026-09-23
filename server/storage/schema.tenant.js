@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
   key_id TEXT,
   feature_id TEXT,
   customer_id TEXT,
+  project_id TEXT,
+  cost_center TEXT,
   client_region TEXT,
   agent_id TEXT,
   session_id TEXT,
@@ -42,6 +44,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_events(event_time);
 CREATE INDEX IF NOT EXISTS idx_usage_provider_model ON usage_events(provider, model);
 CREATE INDEX IF NOT EXISTS idx_usage_feature ON usage_events(feature_id);
 CREATE INDEX IF NOT EXISTS idx_usage_customer ON usage_events(customer_id);
+CREATE INDEX IF NOT EXISTS idx_usage_project ON usage_events(project_id);
+CREATE INDEX IF NOT EXISTS idx_usage_cost_center ON usage_events(cost_center);
 CREATE INDEX IF NOT EXISTS idx_usage_agent ON usage_events(agent_id);
 CREATE INDEX IF NOT EXISTS idx_usage_task ON usage_events(task_id);
 
@@ -104,6 +108,19 @@ CREATE TABLE IF NOT EXISTS budgets (
   monthly_limit_usd DOUBLE PRECISION NOT NULL,
   created_at TEXT NOT NULL DEFAULT NOW()::text
 );
+
+CREATE TABLE IF NOT EXISTS tag_rules (
+  id SERIAL PRIMARY KEY,
+  api_key_prefix TEXT NOT NULL,
+  team TEXT,
+  environment TEXT,
+  project_id TEXT,
+  cost_center TEXT,
+  customer_id TEXT,
+  feature_id TEXT,
+  created_at TEXT NOT NULL DEFAULT NOW()::text
+);
+CREATE INDEX IF NOT EXISTS idx_tag_rules_prefix ON tag_rules(api_key_prefix);
 
 CREATE TABLE IF NOT EXISTS pricing_overrides (
   id SERIAL PRIMARY KEY,
@@ -225,6 +242,10 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 );
 
 ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS key_id TEXT;
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS project_id TEXT;
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS cost_center TEXT;
+CREATE INDEX IF NOT EXISTS idx_usage_project ON usage_events(project_id);
+CREATE INDEX IF NOT EXISTS idx_usage_cost_center ON usage_events(cost_center);
 `;
 
 module.exports = { TENANT_SCHEMA_SQL };

@@ -137,8 +137,15 @@ router.post("/:keyId/quarantine", requireAuth("approve_quarantine"), async (req,
   const { reason = "manually quarantined" } = req.body || {};
   // api_keys lives in the control-plane schema; alerts_log lives in the
   // tenant's own schema - see governance.js's quarantineKey signature.
-  await quarantineKey(req.params.keyId, reason, req.controlPlaneDb, req.db);
-  res.json({ ok: true });
+  // quarantineKey now throws when key_id doesn't exist (see governance.js) -
+  // caught here and surfaced as a real 404 instead of an unhandled
+  // rejection falling through to a generic 500.
+  try {
+    await quarantineKey(req.params.keyId, reason, req.controlPlaneDb, req.db);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
 });
 
 router.post("/:keyId/approve", requireAuth("approve_quarantine"), async (req, res) => {
@@ -147,8 +154,12 @@ router.post("/:keyId/approve", requireAuth("approve_quarantine"), async (req, re
   } catch (err) {
     return res.status(err.statusCode || 500).json({ error: err.message });
   }
-  await approveKey(req.params.keyId, req.controlPlaneDb);
-  res.json({ ok: true });
+  try {
+    await approveKey(req.params.keyId, req.controlPlaneDb);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
 });
 
 router.post("/:keyId/revoke", requireAuth("manage_keys"), async (req, res) => {

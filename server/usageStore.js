@@ -12,9 +12,9 @@ async function insertUsageEvent(row, db = defaultDb) {
   const result = await db.run(
     `INSERT INTO usage_events
        (event_time, provider, model, team, environment, git_branch, user_id, key_id,
-        feature_id, customer_id, client_region, agent_id, session_id, task_id,
+        feature_id, customer_id, project_id, cost_center, client_region, agent_id, session_id, task_id,
         task_status, workload_type, input_tokens, output_tokens, cost_usd, tagged, raw_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      RETURNING id`,
     [
       row.event_time,
@@ -27,6 +27,8 @@ async function insertUsageEvent(row, db = defaultDb) {
       row.key_id || null,
       row.feature_id || null,
       row.customer_id || null,
+      row.project_id || null,
+      row.cost_center || null,
       row.client_region || null,
       row.agent_id || null,
       row.session_id || null,

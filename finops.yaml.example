@@ -1,0 +1,53 @@
+﻿# Copy this file to finops.yaml and edit, then run:
+#   POST /api/gitops/sync  (requires an API key with manage_budgets permission)
+#
+# Both sections are optional and independent - you can have budgets: with no
+# tagging_rules:, or vice versa. Syncing removes anything previously synced
+# that is no longer listed here (drift removal), for both sections
+# separately, so this file is the full source of truth for both once you
+# start syncing it.
+
+budgets:
+  - scope_type: team          # 'team' | 'key' | 'environment' | 'background'
+    scope_value: growth
+    monthly_limit_usd: 5000
+  - scope_type: team
+    scope_value: platform
+    monthly_limit_usd: 12000
+
+# Declarative tagging rules ("FinOps as Code" Level 2): any usage event from
+# a key whose id starts with `match.api_key_prefix` gets the fields under
+# `assign` filled in - but ONLY for fields the request itself left blank.
+# An explicit team/environment/etc the caller actually sent always wins over
+# a rule, and a rule never overrides a key that's been bound to a team via
+# PATCH /api/keys/:keyId. When more than one rule's prefix matches the same
+# key, the LONGEST matching prefix wins - so you can set a broad default and
+# a narrower override without the two rules being order-dependent.
+#
+# Assignable fields: team, environment, project_id, cost_center,
+# customer_id, feature_id. (Not assignable here: git_branch, agent_id,
+# session_id, task_id, task_status, workload_type - those describe a single
+# call, not a key, so a static per-key rule can't meaningfully set them.)
+tagging_rules:
+  - match:
+      api_key_prefix: "fk_growth_"
+    assign:
+      team: growth
+      environment: prod
+
+  # A more specific prefix than the one above - wins for any key starting
+  # with fk_growth_eu_ specifically, e.g. fk_growth_eu_007.
+  - match:
+      api_key_prefix: "fk_growth_eu_"
+    assign:
+      team: growth
+      environment: prod
+      project_id: eu-checkout
+      cost_center: cc-4821
+
+  - match:
+      api_key_prefix: "fk_platform_"
+    assign:
+      team: platform
+      environment: prod
+      cost_center: cc-1000

@@ -89,6 +89,56 @@ router.get("/by-customer", requireAuth("read"), async (req, res) => {
   res.json(rows.map((r) => ({ ...r, total_cost: round4(r.total_cost) })));
 });
 
+// Cost-per-project: same shape as by-feature/by-customer, keyed on
+// X-Project-Id (proxy) / project_id (ingest). This is the Guard spec's own
+// canonical event schema (§5.1) and cost-breakdown dimension list (§2.3) -
+// team/environment/feature/customer/agent/git-branch already had this
+// treatment; project didn't, until now.
+router.get("/by-project", requireAuth("read"), async (req, res) => {
+  const rows = await req.db.all(
+    `SELECT COALESCE(project_id, 'Untagged') AS project_id,
+            SUM(cost_usd) AS total_cost,
+            COUNT(*) AS event_count
+     FROM usage_events
+     GROUP BY COALESCE(project_id, 'Untagged')
+     ORDER BY total_cost DESC`
+  );
+  res.json(rows.map((r) => ({ ...r, total_cost: round4(r.total_cost) })));
+});
+
+// Cost-per-cost-center: same shape again, keyed on X-Cost-Center (proxy) /
+// cost_center (ingest) - the other dimension the spec's §2.3 breakdown list
+// named that had no column at all before this.
+router.get("/by-cost-center", requireAuth("read"), async (req, res) => {
+  const rows = await req.db.all(
+    `SELECT COALESCE(cost_center, 'Untagged') AS cost_center,
+            SUM(cost_usd) AS total_cost,
+            COUNT(*) AS event_count
+     FROM usage_events
+     GROUP BY COALESCE(cost_center, 'Untagged')
+     ORDER BY total_cost DESC`
+  );
+  res.json(rows.map((r) => ({ ...r, total_cost: round4(r.total_cost) })));
+});
+
+// Cost-per-region: client_region has existed since the data-residency
+// enforcement feature (X-Client-Region - see dataResidency.js), but until
+// now it was only usable as an enforcement input (an allow-list check),
+// never something you could slice total spend by on its own. Same
+// self-reported caveat applies here as it does to enforcement: this is
+// whatever the client declared, not verified geolocation.
+router.get("/by-region", requireAuth("read"), async (req, res) => {
+  const rows = await req.db.all(
+    `SELECT COALESCE(client_region, 'Untagged') AS region,
+            SUM(cost_usd) AS total_cost,
+            COUNT(*) AS event_count
+     FROM usage_events
+     GROUP BY COALESCE(client_region, 'Untagged')
+     ORDER BY total_cost DESC`
+  );
+  res.json(rows.map((r) => ({ ...r, total_cost: round4(r.total_cost) })));
+});
+
 // Untagged spend (shadow-AI-adjacent visibility - flagged as a gap earlier)
 router.get("/untagged", requireAuth("read"), async (req, res) => {
   const row = await req.db.get(

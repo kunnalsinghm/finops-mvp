@@ -95,11 +95,11 @@ async function makeApiKey(role = "admin") {
   return key_id;
 }
 
-async function seedEvent({ team = null, environment = null, feature_id = null, customer_id = null, provider = "openai", model = "gpt-4o-mini", cost_usd, input_tokens = 0, output_tokens = 0, tagged = 1, event_time }) {
+async function seedEvent({ team = null, environment = null, feature_id = null, customer_id = null, project_id = null, cost_center = null, client_region = null, provider = "openai", model = "gpt-4o-mini", cost_usd, input_tokens = 0, output_tokens = 0, tagged = 1, event_time }) {
   await storage.run(
-    `INSERT INTO usage_events (event_time, provider, model, team, environment, feature_id, customer_id, cost_usd, input_tokens, output_tokens, tagged)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [event_time || new Date().toISOString(), provider, model, team, environment, feature_id, customer_id, cost_usd, input_tokens, output_tokens, tagged]
+    `INSERT INTO usage_events (event_time, provider, model, team, environment, feature_id, customer_id, project_id, cost_center, client_region, cost_usd, input_tokens, output_tokens, tagged)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [event_time || new Date().toISOString(), provider, model, team, environment, feature_id, customer_id, project_id, cost_center, client_region, cost_usd, input_tokens, output_tokens, tagged]
   );
 }
 
@@ -167,6 +167,59 @@ test("/by-customer groups spend by customer_id, buckets null as 'Untagged'", asy
   assert.equal(byCustomer[customerA].total_cost, 2.5);
   assert.ok(byCustomer["Untagged"], "a null customer_id must be bucketed under 'Untagged'");
   assert.ok(byCustomer["Untagged"].total_cost >= 3, "Untagged total must include this test's $3 contribution");
+});
+
+test("/by-project groups spend by project_id, buckets null as 'Untagged'", async () => {
+  const key_id = await makeApiKey();
+  const projectA = `costs-project-a-${process.pid}`;
+  await seedEvent({ project_id: projectA, cost_usd: 6 });
+  await seedEvent({ project_id: projectA, cost_usd: 1.5 });
+  await seedEvent({ project_id: null, cost_usd: 9 });
+
+  const res = await request("/api/costs/by-project", { headers: { "X-API-Key": key_id } });
+  assert.equal(res.status, 200);
+
+  const byProject = Object.fromEntries(res.json.map((r) => [r.project_id, r]));
+  assert.equal(byProject[projectA].total_cost, 7.5);
+  assert.equal(byProject[projectA].event_count, 2);
+  assert.ok(byProject["Untagged"], "a null project_id must be bucketed under 'Untagged'");
+  assert.ok(byProject["Untagged"].total_cost >= 9, "Untagged total must include this test's $9 contribution");
+
+  const costs = res.json.map((r) => r.total_cost);
+  const sorted = [...costs].sort((a, b) => b - a);
+  assert.deepEqual(costs, sorted, "rows must be ordered by total_cost descending");
+});
+
+test("/by-cost-center groups spend by cost_center, buckets null as 'Untagged'", async () => {
+  const key_id = await makeApiKey();
+  const ccA = `costs-cc-a-${process.pid}`;
+  await seedEvent({ cost_center: ccA, cost_usd: 3.25 });
+  await seedEvent({ cost_center: null, cost_usd: 4 });
+
+  const res = await request("/api/costs/by-cost-center", { headers: { "X-API-Key": key_id } });
+  assert.equal(res.status, 200);
+
+  const byCostCenter = Object.fromEntries(res.json.map((r) => [r.cost_center, r]));
+  assert.equal(byCostCenter[ccA].total_cost, 3.25);
+  assert.ok(byCostCenter["Untagged"], "a null cost_center must be bucketed under 'Untagged'");
+  assert.ok(byCostCenter["Untagged"].total_cost >= 4, "Untagged total must include this test's $4 contribution");
+});
+
+test("/by-region groups spend by client_region, buckets null as 'Untagged'", async () => {
+  const key_id = await makeApiKey();
+  const regionA = `costs-region-a-${process.pid}`;
+  await seedEvent({ client_region: regionA, cost_usd: 8 });
+  await seedEvent({ client_region: regionA, cost_usd: 2 });
+  await seedEvent({ client_region: null, cost_usd: 5 });
+
+  const res = await request("/api/costs/by-region", { headers: { "X-API-Key": key_id } });
+  assert.equal(res.status, 200);
+
+  const byRegion = Object.fromEntries(res.json.map((r) => [r.region, r]));
+  assert.equal(byRegion[regionA].total_cost, 10);
+  assert.equal(byRegion[regionA].event_count, 2);
+  assert.ok(byRegion["Untagged"], "a null client_region must be bucketed under 'Untagged'");
+  assert.ok(byRegion["Untagged"].total_cost >= 5, "Untagged total must include this test's $5 contribution");
 });
 
 test("/by-model groups by provider+model and sums both cost and token counts", async () => {

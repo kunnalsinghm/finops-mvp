@@ -206,6 +206,72 @@ test("successful non-streaming call: forwards to upstream with the caller's key,
   assert.equal(row.tagged, 1);
 });
 
+test("a declarative tagging rule fills in team/environment/project/cost-center on the proxy path when the caller sends none of them", async (t) => {
+  const key_id = await makeApiKey(); // no bound team - free for a rule to fill
+  const team = `rule-team-${process.pid}`;
+  const environment = `rule-env-${process.pid}`;
+  // Keyed on this exact key_id, not a shared prefix, so it can't leak onto
+  // any other test's key in this file.
+  await storage.run(
+    "INSERT INTO tag_rules (api_key_prefix, team, environment, project_id, cost_center) VALUES (?, ?, ?, ?, ?)",
+    [key_id, team, environment, "rule-project", "rule-cc"]
+  );
+  t.mock.method(global, "fetch", async () => jsonResponse(openaiResponse(1000, 1000)));
+
+  const res = await post("/api/proxy/openai", {
+    headers: { "X-API-Key": key_id, ...PROVIDER_KEY_HEADER },
+    body: { model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] },
+  });
+  assert.equal(res.status, 200);
+
+  const row = await getLatestEventForUser(key_id);
+  assert.equal(row.team, team);
+  assert.equal(row.environment, environment);
+  assert.equal(row.project_id, "rule-project");
+  assert.equal(row.cost_center, "rule-cc");
+  assert.equal(row.tagged, 1);
+});
+
+test("a declarative tagging rule never overrides an X-Team header the caller actually sent on the proxy path", async (t) => {
+  const key_id = await makeApiKey(); // no bound team, so X-Team below is accepted as-is
+  await storage.run(
+    "INSERT INTO tag_rules (api_key_prefix, team) VALUES (?, 'rule-team-should-not-apply')",
+    [key_id]
+  );
+  t.mock.method(global, "fetch", async () => jsonResponse(openaiResponse(1000, 1000)));
+
+  const res = await post("/api/proxy/openai", {
+    headers: { "X-API-Key": key_id, ...PROVIDER_KEY_HEADER, "X-Team": "caller-team", "X-Environment": "prod" },
+    body: { model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] },
+  });
+  assert.equal(res.status, 200);
+
+  const row = await getLatestEventForUser(key_id);
+  assert.equal(row.team, "caller-team");
+});
+
+test("persists X-Project-Id and X-Cost-Center into their own columns on the usage event", async (t) => {
+  const key_id = await makeApiKey();
+  t.mock.method(global, "fetch", async () => jsonResponse(openaiResponse(1000, 1000)));
+
+  const res = await post("/api/proxy/openai", {
+    headers: {
+      "X-API-Key": key_id,
+      ...PROVIDER_KEY_HEADER,
+      "X-Team": "eng",
+      "X-Environment": "prod",
+      "X-Project-Id": "checkout-svc",
+      "X-Cost-Center": "cc-4821",
+    },
+    body: { model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] },
+  });
+  assert.equal(res.status, 200);
+
+  const row = await getLatestEventForUser(key_id);
+  assert.equal(row.project_id, "checkout-svc");
+  assert.equal(row.cost_center, "cc-4821");
+});
+
 test("blocks a prompt-injection attempt before ever calling the upstream provider", async (t) => {
   const key_id = await makeApiKey();
   let fetchCalled = false;

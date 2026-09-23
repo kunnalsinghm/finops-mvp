@@ -17,6 +17,7 @@ const { detectPromptInjection } = require("../promptInjection");
 const { checkKeyFraudSignals } = require("../fraudDetection");
 const { TASK_STATUSES } = require("../agentAttribution");
 const { inferTag } = require("../smartTagging");
+const { applyTagRules } = require("../tagRules");
 const { realKeyId } = require("../keyIdentity");
 
 const router = express.Router();
@@ -28,9 +29,9 @@ async function insertUsageEvent(row, db = defaultDb) {
   const result = await db.run(
     `INSERT INTO usage_events
        (event_time, provider, model, team, environment, git_branch, user_id, key_id,
-        feature_id, customer_id, client_region, agent_id, session_id, task_id,
+        feature_id, customer_id, project_id, cost_center, client_region, agent_id, session_id, task_id,
         task_status, workload_type, input_tokens, output_tokens, cost_usd, tagged, raw_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      RETURNING id`,
     [
       row.event_time,
@@ -43,6 +44,8 @@ async function insertUsageEvent(row, db = defaultDb) {
       row.key_id || null,
       row.feature_id,
       row.customer_id,
+      row.project_id,
+      row.cost_center,
       row.client_region,
       row.agent_id,
       row.session_id,
@@ -80,6 +83,8 @@ router.post("/", requireAuth("write"), async (req, res) => {
     user_id,
     feature_id,
     customer_id,
+    project_id,
+    cost_center,
     agent_id,
     session_id,
     task_id,
@@ -119,7 +124,20 @@ router.post("/", requireAuth("write"), async (req, res) => {
 
   const { cost_usd, rate_found } = await computeCost({ provider, model, input_tokens, output_tokens, db: req.db });
 
-  const tagged = Boolean(team && environment) ? 1 : 0;
+  // Declarative tagging rules (finops.yaml `tagging_rules:`, synced via
+  // POST /api/gitops/sync) fill in any of these fields the caller left
+  // blank - never overriding a value the caller actually sent. Matched
+  // against the REAL authenticated key (not the client-declared user_id),
+  // same identity used for the key_id column below. See tagRules.js for
+  // the full precedence rules (this runs before smart-tag inference below,
+  // so a declared rule always wins over a statistical guess).
+  const { fields: resolvedTags } = await applyTagRules({
+    key_id: realKeyId(req.apiKey),
+    fields: { team, environment, project_id, cost_center, customer_id, feature_id },
+    db: req.db,
+  });
+
+  const tagged = Boolean(resolvedTags.team && resolvedTags.environment) ? 1 : 0;
 
   // PII redaction on the stored copy of the raw payload - same on-by-default
   // stance as the proxy (see piiRedaction.js and routes/proxy.js for the
@@ -134,7 +152,7 @@ router.post("/", requireAuth("write"), async (req, res) => {
     if (hasPII) {
       await logAlert(
         "pii-redaction",
-        `Redacted PII in ingest payload - team:${team || "untagged"} - ${Object.entries(counts)
+        `Redacted PII in ingest payload - team:${resolvedTags.team || "untagged"} - ${Object.entries(counts)
           .map(([k, v]) => `${k.toLowerCase()}:${v}`)
           .join(", ")}`,
         req.db
@@ -146,15 +164,17 @@ router.post("/", requireAuth("write"), async (req, res) => {
     event_time: event_time || new Date().toISOString(),
     provider,
     model,
-    team: team || null,
-    environment: environment || null,
+    team: resolvedTags.team || null,
+    environment: resolvedTags.environment || null,
     git_branch: git_branch || null,
     user_id: user_id || req.apiKey.key_id,
     // Unlike user_id (which a client may declare), this is always the key that
     // actually authenticated - the one that can be quarantined or revoked.
     key_id: realKeyId(req.apiKey),
-    feature_id: feature_id || null,
-    customer_id: customer_id || null,
+    feature_id: resolvedTags.feature_id || null,
+    customer_id: resolvedTags.customer_id || null,
+    project_id: resolvedTags.project_id || null,
+    cost_center: resolvedTags.cost_center || null,
     client_region: req.header("X-Client-Region") || null,
     agent_id: agent_id || null,
     session_id: session_id || null,
@@ -172,7 +192,7 @@ router.post("/", requireAuth("write"), async (req, res) => {
   // is inserted, so the event itself doesn't dilute the average/history it's
   // being compared to. Neither check blocks the request (see fraudDetection.js
   // for why this is flag-only, not auto-block).
-  const anomaly = await checkAnomaly({ provider, model, cost_usd: cost_usd ?? 0, team, db: req.db });
+  const anomaly = await checkAnomaly({ provider, model, cost_usd: cost_usd ?? 0, team: resolvedTags.team, db: req.db });
   const fraud = await checkKeyFraudSignals({
     key_id: req.apiKey.key_id,
     provider,
@@ -183,13 +203,15 @@ router.post("/", requireAuth("write"), async (req, res) => {
 
   const insertedId = await insertUsageEvent(row, req.db);
 
-  // Smart/inferred tagging: only for events that came in genuinely
-  // untagged (no team supplied at all) - never overrides or second-guesses
-  // a team the caller actually provided. Stored as a SEPARATE row in
-  // tag_inferences, never written back into usage_events.team itself - see
-  // smartTagging.js header for why conflating the two would be dangerous.
+  // Smart/inferred tagging: only for events that are STILL untagged after
+  // declarative rules ran (no team supplied by the caller AND no rule
+  // filled one in) - never overrides or second-guesses a team that's
+  // already real, whichever of those two sources it came from. Stored as a
+  // SEPARATE row in tag_inferences, never written back into
+  // usage_events.team itself - see smartTagging.js header for why
+  // conflating the two would be dangerous.
   let tagInference;
-  if (!team) {
+  if (!resolvedTags.team) {
     tagInference = await inferTag({ key_id: req.apiKey.key_id, usage_event_id: insertedId, db: req.db });
   }
 

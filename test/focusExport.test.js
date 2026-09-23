@@ -102,6 +102,44 @@ test("toFocusRow sets Tags to null when no team/environment/git_branch present",
   assert.equal(row.Tags, null);
 });
 
+test("toFocusRow encodes project_id/cost_center into the Tags key-value JSON alongside team/environment/git_branch", () => {
+  const row = toFocusRow(sampleRow({ project_id: "checkout-svc", cost_center: "cc-4821" }));
+  const tags = JSON.parse(row.Tags);
+  assert.equal(tags.team, "growth");
+  assert.equal(tags.project_id, "checkout-svc");
+  assert.equal(tags.cost_center, "cc-4821");
+});
+
+test("toFocusRow omits project_id/cost_center from Tags when not present, without erroring", () => {
+  const row = toFocusRow(sampleRow());
+  const tags = JSON.parse(row.Tags);
+  assert.equal(tags.project_id, undefined);
+  assert.equal(tags.cost_center, undefined);
+});
+
+test("toFocusRow maps client_region into RegionId/RegionName when the client declared one", () => {
+  const row = toFocusRow(sampleRow({ client_region: "eu-west-1" }));
+  assert.equal(row.RegionId, "eu-west-1");
+  assert.equal(row.RegionName, "eu-west-1");
+});
+
+test("toFocusRow leaves RegionId/RegionName null (honest null, not a fake value) when no region was declared", () => {
+  const row = toFocusRow(sampleRow());
+  assert.equal(row.RegionId, null);
+  assert.equal(row.RegionName, null);
+});
+
+test("toFocusRowFromGpu always leaves RegionId/RegionName null - self-hosted clusters have no client_region concept", () => {
+  const row = toFocusRowFromGpu({
+    event_time: "2026-03-15T10:30:00.000Z",
+    cluster_name: "gpu-cluster-a",
+    allocated_cost_usd: 12.5,
+    allocated_team: "ml-team",
+  });
+  assert.equal(row.RegionId, null);
+  assert.equal(row.RegionName, null);
+});
+
 test("billingPeriodFor returns the first and first-of-next-month for a given date", () => {
   const { start, end } = billingPeriodFor("2026-03-15T10:30:00.000Z");
   assert.equal(start, "2026-03-01T00:00:00.000Z");

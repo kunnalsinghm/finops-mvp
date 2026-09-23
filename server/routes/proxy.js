@@ -39,6 +39,7 @@ const { checkKeyFraudSignals } = require("../fraudDetection");
 const { checkRegionAllowed } = require("../dataResidency");
 const { TASK_STATUSES } = require("../agentAttribution");
 const { inferTag } = require("../smartTagging");
+const { applyTagRules } = require("../tagRules");
 
 const router = express.Router();
 
@@ -117,7 +118,7 @@ async function noteUnpricedModel(provider, model, db = defaultDb, tenantKey = nu
   }
 }
 
-function buildUsageRow({ providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion, agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed, partial }, costInfo) {
+function buildUsageRow({ providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, projectId, costCenter, clientRegion, agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed, partial }, costInfo) {
   const { cost_usd, rate_found, approximate, costComputeFailed } = costInfo;
   return {
     event_time: new Date().toISOString(),
@@ -130,6 +131,8 @@ function buildUsageRow({ providerName, effectiveModel, team, environment, gitBra
     key_id: realKeyId(rateLimitKey),
     feature_id: featureId,
     customer_id: customerId,
+    project_id: projectId,
+    cost_center: costCenter,
     client_region: clientRegion,
     agent_id: agentId,
     session_id: sessionId,
@@ -277,10 +280,12 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     return res.status(400).json({ error: "Missing X-Provider-Key header (your real OpenAI/Anthropic key - forwarded only, never stored)" });
   }
 
-  const environment = req.header("X-Environment") || null;
+  let environment = req.header("X-Environment") || null;
   const gitBranch = req.header("X-Git-Branch") || null;
-  const featureId = req.header("X-Feature-Id") || null;
-  const customerId = req.header("X-Customer-Id") || null;
+  let featureId = req.header("X-Feature-Id") || null;
+  let customerId = req.header("X-Customer-Id") || null;
+  let projectId = req.header("X-Project-Id") || null;
+  let costCenter = req.header("X-Cost-Center") || null;
   const clientRegion = req.header("X-Client-Region") || null;
   const agentId = req.header("X-Agent-Id") || null;
   const sessionId = req.header("X-Session-Id") || null;
@@ -299,7 +304,30 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     await logAlert("identity-violation", `Blocked proxy request from key '${rateLimitKey}' - ${identity.code}: ${identity.error}`, req.db);
     return res.status(identity.status).json({ error: identity.error, code: identity.code });
   }
-  const { team, workloadType, backgroundExempt } = identity;
+  const { team: identityTeam, workloadType, backgroundExempt } = identity;
+  let team = identityTeam;
+
+  // Declarative tagging rules (finops.yaml `tagging_rules:`, synced via
+  // POST /api/gitops/sync) fill in any of these fields that are STILL
+  // blank after key-binding/header resolution above - never overriding an
+  // already-resolved value (a key-bound team from resolveIdentity, or a
+  // header the caller actually sent). Reassigning these same variables (not
+  // introducing new ones) is deliberate: everything below - governance,
+  // row construction, smart-tag inference - already reads `team`/
+  // `environment`/etc., so a rule-filled value flows through unchanged
+  // rather than needing every downstream call site updated. See
+  // tagRules.js for the full precedence rules.
+  const { fields: resolvedTags } = await applyTagRules({
+    key_id: realKeyId(req.apiKey),
+    fields: { team, environment, project_id: projectId, cost_center: costCenter, customer_id: customerId, feature_id: featureId },
+    db: req.db,
+  });
+  team = resolvedTags.team;
+  environment = resolvedTags.environment;
+  projectId = resolvedTags.project_id;
+  costCenter = resolvedTags.cost_center;
+  customerId = resolvedTags.customer_id;
+  featureId = resolvedTags.feature_id;
 
   // --- Fail-closed metering (opt-in): refuse to spend money we couldn't
   // record. Pre-flight only - see the policy notes above.
@@ -581,7 +609,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       // usage arrived - possibly none - and flagged partial.)
       if (fullBuffer.length > 0 || usage.input_tokens > 0 || usage.output_tokens > 0) {
         await meterSafely({
-          providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion,
+          providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, projectId, costCenter, clientRegion,
           agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
           input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
           degraded, requestedModel, piiFindings, streamed: true, partial,
@@ -627,7 +655,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         provider: providerName,
         model: effectiveModel,
         team, environment, git_branch: gitBranch, user_id: rateLimitKey, key_id: realKeyId(rateLimitKey),
-        feature_id: featureId, customer_id: customerId, client_region: clientRegion,
+        feature_id: featureId, customer_id: customerId, project_id: projectId, cost_center: costCenter, client_region: clientRegion,
         agent_id: agentId, session_id: sessionId, task_id: taskId, task_status: taskStatus, workload_type: workloadType,
         input_tokens, output_tokens,
         cost_usd: 0,
@@ -657,7 +685,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         provider: providerName,
         model: effectiveModel,
         team, environment, git_branch: gitBranch, user_id: rateLimitKey, key_id: realKeyId(rateLimitKey),
-        feature_id: featureId, customer_id: customerId, client_region: clientRegion,
+        feature_id: featureId, customer_id: customerId, project_id: projectId, cost_center: costCenter, client_region: clientRegion,
         agent_id: agentId, session_id: sessionId, task_id: taskId, task_status: taskStatus, workload_type: workloadType,
         input_tokens, output_tokens,
         cost_usd: 0,
@@ -701,7 +729,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     // The provider call already succeeded (and was billed) - a metering failure
     // must not turn that into an error for the client. See meterSafely().
     const metering = await meterSafely({
-      providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, clientRegion,
+      providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, projectId, costCenter, clientRegion,
       agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
       input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed: false,
       db: req.db, tenantSchema: req.tenantSchema,

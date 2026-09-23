@@ -222,3 +222,80 @@ test("POST /sync treats a completely empty/missing 'budgets:' key as zero desire
   assert.equal(res.status, 200);
   assert.equal(res.json.total, 0);
 });
+
+test("POST /sync creates a tagging rule from a 'tagging_rules:' entry, keyed on match.api_key_prefix", async () => {
+  const key_id = await makeApiKey();
+  const prefix = `fk_gitops_new_${process.pid}_`;
+  writeConfig(
+    `budgets: []\ntagging_rules:\n  - match:\n      api_key_prefix: ${prefix}\n    assign:\n      team: growth\n      environment: prod\n`
+  );
+
+  const res = await request("/api/gitops/sync", { headers: { "X-API-Key": key_id } });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.tagging_rules.created, 1);
+  assert.equal(res.json.tagging_rules.updated, 0);
+  assert.equal(res.json.tagging_rules.removed, 0);
+
+  const row = await storage.get("SELECT * FROM tag_rules WHERE api_key_prefix = ?", [prefix]);
+  assert.ok(row);
+  assert.equal(row.team, "growth");
+  assert.equal(row.environment, "prod");
+});
+
+test("POST /sync updates an existing tagging rule's assigned fields when they change in the file", async () => {
+  const key_id = await makeApiKey();
+  const prefix = `fk_gitops_update_${process.pid}_`;
+  await storage.run("INSERT INTO tag_rules (api_key_prefix, team) VALUES (?, 'old-team')", [prefix]);
+
+  writeConfig(`budgets: []\ntagging_rules:\n  - match:\n      api_key_prefix: ${prefix}\n    assign:\n      team: new-team\n`);
+  const res = await request("/api/gitops/sync", { headers: { "X-API-Key": key_id } });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.json.tagging_rules.updated, 1);
+  assert.equal(res.json.tagging_rules.created, 0);
+
+  const row = await storage.get("SELECT * FROM tag_rules WHERE api_key_prefix = ?", [prefix]);
+  assert.equal(row.team, "new-team");
+});
+
+test("POST /sync leaves an existing tagging rule alone (no spurious update) when the file's assignment already matches", async () => {
+  const key_id = await makeApiKey();
+  const prefix = `fk_gitops_nochange_${process.pid}_`;
+  await storage.run("INSERT INTO tag_rules (api_key_prefix, team) VALUES (?, 'growth')", [prefix]);
+
+  writeConfig(`budgets: []\ntagging_rules:\n  - match:\n      api_key_prefix: ${prefix}\n    assign:\n      team: growth\n`);
+  const res = await request("/api/gitops/sync", { headers: { "X-API-Key": key_id } });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.json.tagging_rules.updated, 0);
+  assert.equal(res.json.tagging_rules.created, 0);
+});
+
+test("POST /sync REMOVES a tagging rule no longer present in finops.yaml (drift removal), same as budgets", async () => {
+  const key_id = await makeApiKey();
+  const keptPrefix = `fk_gitops_kept_${process.pid}_`;
+  const droppedPrefix = `fk_gitops_dropped_${process.pid}_`;
+  await storage.run("INSERT INTO tag_rules (api_key_prefix, team) VALUES (?, 'growth')", [keptPrefix]);
+  await storage.run("INSERT INTO tag_rules (api_key_prefix, team) VALUES (?, 'growth')", [droppedPrefix]);
+
+  writeConfig(`budgets: []\ntagging_rules:\n  - match:\n      api_key_prefix: ${keptPrefix}\n    assign:\n      team: growth\n`);
+  const res = await request("/api/gitops/sync", { headers: { "X-API-Key": key_id } });
+
+  assert.equal(res.status, 200);
+  assert.ok(res.json.tagging_rules.removed >= 1);
+  const kept = await storage.get("SELECT * FROM tag_rules WHERE api_key_prefix = ?", [keptPrefix]);
+  const dropped = await storage.get("SELECT * FROM tag_rules WHERE api_key_prefix = ?", [droppedPrefix]);
+  assert.ok(kept, "a rule still listed in the file must survive sync");
+  assert.equal(dropped, undefined, "a rule removed from the file must be deleted from the DB on sync");
+});
+
+test("POST /sync treats a completely missing 'tagging_rules:' key as zero desired rules, not an error - and budgets sync is unaffected", async () => {
+  const key_id = await makeApiKey();
+  const team = `gitops-budgets-only-${process.pid}`;
+  writeConfig(`budgets:\n  - scope_type: team\n    scope_value: ${team}\n    monthly_limit_usd: 25\n`);
+
+  const res = await request("/api/gitops/sync", { headers: { "X-API-Key": key_id } });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.created, 1, "budgets sync must work exactly as before when tagging_rules: is absent");
+  assert.equal(res.json.tagging_rules.total, 0);
+});

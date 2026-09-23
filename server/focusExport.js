@@ -15,7 +15,11 @@
 // value here, since no discounts are modeled), ChargePeriodStart/End,
 // BillingPeriodStart/End, ServiceCategory, ServiceName, Provider,
 // Publisher, SkuId, ConsumedQuantity/Unit, PricingQuantity/Unit,
-// ChargeCategory, Tags, BillingCurrency, SubAccountId/Name.
+// ChargeCategory, Tags, BillingCurrency, SubAccountId/Name, and (for API
+// rows only, when the client declared X-Client-Region) RegionId/RegionName -
+// self-reported, same caveat as dataResidency.js, but real data rather than
+// a placeholder now that it's tracked. GPU rows still leave region null;
+// there's no equivalent concept for a self-hosted cluster.
 
 const { getUsageEventsRaw, csvEscape } = require("./data");
 const { getGpuEventsExpanded } = require("./gpuUsage");
@@ -83,6 +87,8 @@ function buildTags(row) {
   if (row.team) tags.team = row.team;
   if (row.environment) tags.environment = row.environment;
   if (row.git_branch) tags.git_branch = row.git_branch;
+  if (row.project_id) tags.project_id = row.project_id;
+  if (row.cost_center) tags.cost_center = row.cost_center;
   return Object.keys(tags).length ? JSON.stringify(tags) : null;
 }
 
@@ -122,8 +128,11 @@ function toFocusRow(row) {
     PricingUnit: "1K tokens",
     Provider: row.provider,
     Publisher: row.provider,
-    RegionId: null,
-    RegionName: null,
+    // Self-reported (X-Client-Region), same caveat as dataResidency.js -
+    // trivially spoofable by whoever holds the key, but a real mapping now
+    // that this is actually tracked, so an honest null would be wrong here.
+    RegionId: row.client_region || null,
+    RegionName: row.client_region || null,
     ResourceId: null,
     ResourceName: null,
     ResourceType: null,

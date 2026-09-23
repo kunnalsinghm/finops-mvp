@@ -138,7 +138,7 @@ test("SQLite: a database upgraded by the OLD ad-hoc mechanism (columns present, 
   db.prepare("INSERT INTO api_keys (key_id,label,role) VALUES ('fk_real','r','developer')").run();
   db.prepare("INSERT INTO usage_events (event_time,provider,model,user_id,key_id,input_tokens,output_tokens,cost_usd,tagged) VALUES ('2026-01-01','openai','gpt-4o','fk_real','sentinel',1,1,0.1,0)").run();
   assert.doesNotThrow(() => runSqlite(db, { snapshot: false }));
-  assert.deepEqual(versions(db), [1, 2, 3]);
+  assert.deepEqual(versions(db), [1, 2, 3, 4, 5]);
   assert.equal(db.prepare("SELECT key_id FROM usage_events").get().key_id, "sentinel", "the one-time backfill must not run again");
   db.close();
 });
@@ -309,7 +309,7 @@ test("Postgres: a database already upgraded by the old ad-hoc mechanism is adopt
     await pool.query("INSERT INTO api_keys (key_id,label,role) VALUES ('fk_real','r','developer')");
     await pool.query("INSERT INTO usage_events (event_time,provider,model,user_id,key_id,input_tokens,output_tokens,cost_usd,tagged) VALUES ('2026-01-01','openai','gpt-4o','fk_real','sentinel',1,1,0.1,0)");
     await migrator.runPostgres(pool);
-    assert.deepEqual(await pgVersions(pool), [1, 2, 3]);
+    assert.deepEqual(await pgVersions(pool), [1, 2, 3, 4, 5]);
     assert.equal((await pool.query("SELECT key_id FROM usage_events")).rows[0].key_id, "sentinel");
   } finally { await pgDrop(pool, schema); }
 });

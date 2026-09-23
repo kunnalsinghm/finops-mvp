@@ -15,7 +15,7 @@ Runs on `localhost:4000` from VS Code with three commands: `npm install`, `npm r
 - **Billing:** Stripe subscriptions for the platform's own flat-fee tiers (optional — off unless `STRIPE_SECRET_KEY` is set)
 - **Testing:** Node's native test runner (`node --test`) — zero external test dependencies
 - **Deployment:** Docker + `docker-compose.yml`, GitHub Actions CI (tests against both SQLite and Postgres, plus a Docker build check)
-- **Config:** `finops.yaml` for GitOps-style budget management
+- **Config:** `finops.yaml` for GitOps-style budget management and declarative tagging rules
 
 ## Quick start
 
@@ -66,21 +66,21 @@ Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connecti
 
 ### Cost tracking & attribution
 - Per-event cost from a local pricing catalogue with manual overrides
-- Team/environment/git-branch/feature/customer tagging (`X-Feature-Id`, `X-Customer-Id` on the proxy, or the equivalent body fields on ingest) — missing tags warn, not reject
-- Dashboards: cost over time, cost by team, by model, by feature, by customer, untagged spend
+- Team/environment/git-branch/feature/customer/project/cost-center tagging (`X-Feature-Id`, `X-Customer-Id`, `X-Project-Id`, `X-Cost-Center` on the proxy, or the equivalent body fields on ingest) — missing tags warn, not reject
+- Dashboards: cost over time, cost by team, by model, by feature, by customer, by project, by cost center, by region, untagged spend
 - **Spend forecasting**: a simple moving-average projection (`GET /api/costs/forecast`) — averages recent daily spend (default: last 7 days) and extends it forward (default: 30 days). Refuses to forecast (`available: false`) with fewer than 3 days of data rather than returning a falsely-precise number
 - **Forecast variance** (`GET /api/costs/forecast-variance?team=`): actual vs. predicted spend for a team's most recent 7-day window, as a governance signal ("our own forecast was off by X%")
 - **Commitment tracking**: prepaid credit balances tracked against real burn (`/api/commitments`), with tiered remaining-balance alerts (healthy → low → critical → exhausted)
 - **Weekly briefings**: an auto-generated digest (total spend, week-over-week delta, top 3 movers by team) delivered through the same channels as budget alerts, once per ISO week
 - **Unified GPU + API cost view** (`/api/gpu-usage/blended`): self-hosted GPU inference cost (`/api/gpu-usage/ingest`) blended with API spend into one normalized per-team total. A cluster shared across teams has its cost **split proportionally by each team's relative API spend** (`shared_across_teams` field) — a documented approximation, not a precisely measured allocation, since there's no per-team GPU-utilization telemetry to split by instead
 - **Agent-level attribution** (`/api/agents`): per-agent cost-per-task, cost-per-successful-completion (excludes tasks that never reached `success`), retry rate (fraction of tasks needing more than one event), and a token-efficiency-ratio proxy — set via `X-Agent-Id`/`X-Session-Id`/`X-Task-Id`/`X-Task-Status` on the proxy or the equivalent ingest fields. Each metric's exact formula and judgment calls are documented in `server/agentAttribution.js`
-- **Smart/inferred tagging**: an untagged event gets a best-guess team inferred from that API key's own tagging history (never from the request content), stored separately from the real tag and never silently applied — review via `GET /api/tags/inferences`, apply via `POST /api/tags/:usageEventId/correct`
+- **Smart/inferred tagging**: an untagged event gets a best-guess team inferred from that API key's own tagging history (never from the request content), with a time-of-day fallback for keys shared across teams on different schedules (e.g. day-shift/night-shift) when the key's overall history has no clear majority. Stored separately from the real tag and never silently applied — review via `GET /api/tags/inferences`, apply via `POST /api/tags/:usageEventId/correct`. A correction feeds back into future inferences for that key automatically, since it's written onto the real `team` column
 - **"Ask your dashboard"** (`GET /api/query?q=`): plain-English queries like "what did we spend on the growth team last week" or "top spenders this month", answered by rule-based intent parsing — deliberately not LLM-backed (see `server/nlQuery.js` for why)
 
 ### Content safety & data protection
 - **PII redaction** (on by default, opt out per-request via `X-Disable-PII-Redaction: true`): regex-based detection of email, SSN, credit card (Luhn-validated), phone, and IP address patterns. Redact-and-continue, not block. Applied at both the proxy and ingest
 - **Prompt-injection detection** (always on, not opt-out): rule-based pattern matching against known jailbreak/injection phrasings. Blocks the request (HTTP 400). Applied at both the proxy and ingest
-- **Data-residency enforcement**: block a request whose declared region (`X-Client-Region`) isn't on the applicable allow-list (`/api/region-allowlist`, key-then-team precedence, same pattern as model allow-listing below). Region is self-reported, not real IP geolocation — a real, useful control for well-behaved clients, not a substitute for network-level geofencing
+- **Data-residency enforcement**: block a request whose declared region (`X-Client-Region`) isn't on the applicable allow-list (`/api/region-allowlist`, key-then-team precedence, same pattern as model allow-listing below). Region is self-reported, not real IP geolocation — a real, useful control for well-behaved clients, not a substitute for network-level geofencing. The same self-reported region is also available as its own cost-breakdown dimension (`GET /api/costs/by-region`), independent of whether an allow-list is even configured
 - **Agent action governance** (`/api/tool-calls`): audit trail for agent tool calls (file access, API calls, command execution) — distinct from LLM completions. Rule-based risky-command detection (destructive filesystem/database operations, privilege escalation), per-agent volume-spike detection, and the same data-residency check as above. This is a **reporting/audit mechanism, not a live blocking gate** — unlike the proxy checks, a tool call happens outside this service's control, so it can only be flagged for review, not stopped
 
 ### Governance (enforced live in the proxy)
@@ -135,9 +135,32 @@ Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connecti
 
 ### FinOps as Code
 - `finops.yaml` defines budgets declaratively; `POST /api/gitops/sync` pushes them in and removes any budget no longer in the file
+- `finops.yaml` also defines declarative tagging rules under `tagging_rules:` — `- match: { api_key_prefix }` / `assign: { team, environment, project_id, cost_center, customer_id, feature_id }` — synced by the same `POST /api/gitops/sync` call, same create/update/remove-drift semantics as budgets. A rule only fills in a field the caller left blank; it never overrides an explicit tag or a key's bound team (see `server/tagRules.js` for the full precedence order against smart/inferred tagging and key-team binding). Longest-matching-prefix wins when more than one rule matches the same key, so a team can declare a broad default and a narrower override without the two being order-dependent
+
+Example `finops.yaml` (also in `finops.yaml.example`):
+```yaml
+budgets:
+  - scope_type: team
+    scope_value: growth
+    monthly_limit_usd: 5000
+
+tagging_rules:
+  - match:
+      api_key_prefix: "fk_growth_"
+    assign:
+      team: growth
+      environment: prod
+  - match:
+      api_key_prefix: "fk_growth_eu_"
+    assign:
+      team: growth
+      environment: prod
+      project_id: eu-checkout
+      cost_center: cc-4821
+```
 
 ### Testing
-- 335 automated tests on SQLite / 347 on Postgres, all passing (`npm test`) — covering every feature above, plus multi-tenant schema/pool isolation
+- 471 automated tests on SQLite / 508 on Postgres, all passing (`npm test`) — covering every feature above, plus multi-tenant schema/pool isolation
 - `scripts/mock-provider.js` — a local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (including load testing) can be exercised end-to-end at zero real API cost
 
 ### Client SDK
@@ -152,7 +175,7 @@ Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connecti
 |---|---|---|
 | POST | `/api/ingest` | Record a usage event |
 | POST | `/api/proxy/:provider` | Proxy a request to `openai`/`anthropic` (streaming + caching + agent-attribution headers supported) |
-| GET | `/api/costs/summary` \| `/by-team` \| `/by-model` \| `/by-feature` \| `/by-customer` \| `/over-time` \| `/untagged` | Cost dashboards |
+| GET | `/api/costs/summary` \| `/by-team` \| `/by-model` \| `/by-feature` \| `/by-customer` \| `/by-project` \| `/by-cost-center` \| `/by-region` \| `/over-time` \| `/untagged` | Cost dashboards |
 | GET | `/api/costs/forecast` | Simple moving-average spend projection |
 | GET | `/api/costs/forecast-variance?team=` | Actual vs. predicted spend for a team |
 | GET/POST | `/api/budgets` | List / create budgets (scope: team/project/key/background) |
@@ -181,7 +204,7 @@ Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connecti
 | DELETE | `/api/token-quotas/:id` | Remove a quota (budget-manager or admin) |
 | GET | `/api/recommendations` | Optimization suggestions |
 | GET | `/api/shadow-test/summary` \| `/comparisons` | Shadow A/B test results |
-| POST | `/api/gitops/sync` | Sync budgets from `finops.yaml` |
+| POST | `/api/gitops/sync` | Sync budgets and declarative tagging rules from `finops.yaml` |
 | POST | `/api/auth/register` \| `/login` \| `/logout` | Human user accounts (single-tenant mode) |
 | GET | `/api/sso/login` \| `/callback` | OIDC SSO flow |
 | POST | `/api/reconcile/upload` | Import a billing CSV |
@@ -238,7 +261,7 @@ The server binds to `127.0.0.1` by default, so the bootstrap window can't be rea
 - Shadow A/B testing covers non-streaming proxy requests only
 - Shadow-test similarity is local word-overlap cosine similarity (lexical), not true semantic/human quality judgment
 - Token-efficiency-ratio is a proxy ("output tokens on tasks that reached success" ÷ "all tokens consumed"), not a measure of whether the successful output was actually good — see `server/agentAttribution.js` for the full reasoning
-- Smart tagging currently infers only from an API key's own tagging history — calling-service/time-of-day/prompt-template-fingerprint signals from the original plan aren't implemented yet
+- Smart tagging infers from an API key's own tagging history (including history created by human corrections), plus a same-key time-of-day fallback — calling-service identity and prompt-template-fingerprint signals from the original plan aren't implemented yet, since both need request metadata this service doesn't collect today
 - GPU shared-cluster cost allocation is a relative-API-spend approximation, not a measured per-team utilization split — there's no GPU-hours telemetry to split by instead
 - Tool-call governance is audit/reporting only — it can flag a risky or non-compliant action but cannot prevent it, since the action happens outside this service's control
 - Data residency (both the proxy check and tool-call flagging) relies on self-reported region headers, not real IP geolocation — a real control for well-behaved clients, not resistant to a malicious one
