@@ -58,9 +58,21 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 
 Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connection pool per tenant** (`server/tenancy.js`), not a shared pool with a per-request `search_path` reset — a tenant's connections are physically incapable of serving another tenant's query, by construction, rather than relying on every call site remembering to reset state. Identity/routing data (which tenants exist, which API keys/users belong to which tenant) lives in a separate shared `control_plane` schema; a request resolves its tenant there first, then gets routed to that tenant's own schema for everything else.
 
-**Not yet supported in multi-tenant mode:** dashboard session login (`/api/auth/login`) — the session store is a single global in-memory map with no tenant concept, so it's deliberately disabled (`501`) rather than risk a cross-tenant leak. Use an `X-API-Key` in multi-tenant mode until this is built.
+Multi-tenant mode is now feature-complete: every route group is tenant-aware, including the seven that were previously switched off (`alerts`, `commitments`, `gitops`, `reconcile`, `reports`, `query`, `tool-calls`) — `server/tenantGuard.js`'s block-list is empty, kept only as a safety net for any future route that ships before its own multi-tenant conversion is done.
 
-**What is tenant-scoped, and what is switched off.** The data-plane routes (`ingest`, `proxy`, `costs`, `budgets`, `keys`, `pricing`, `cache`, `semantic-cache`, `agents`, `tags`, `gpu-usage`, and the allow-list / quota / residency / shadow-test / recommendation routes) read and write only the calling tenant's schema via `req.db`, and the in-memory response caches are keyed per tenant. Two-tenant tests over real HTTP against the real routes cover this (`test/multiTenantIsolation.test.js`, `test/multiTenantHardening.test.js`; Postgres only). The route groups that have **not** been converted yet — `alerts`, `commitments`, `gitops`, `reconcile`, `reports`, `query`, `tool-calls` (list in `server/tenantGuard.js`) — answer `501` in multi-tenant mode instead of silently serving the default schema. In multi-tenant mode the periodic alert / commitment / weekly-briefing jobs and the SQLite backup do not cover tenants either.
+**Dashboard session login works in multi-tenant mode.** Accounts are tenant-scoped (`server/tenantUsers.js`) — usernames are unique *per tenant*, not globally, so login takes a `tenant_id` alongside `username`/`password` (`POST /api/auth/login`), and the resulting `X-Session-Token` resolves to that tenant's own schema on every subsequent request, same as an API key does.
+
+**Background jobs run once per active tenant**, not once against a single global database (`server/tenantJobs.js`) — budget alerts, burn-rate, commitment alerts, and the weekly briefing all fire per tenant, with one tenant's failure isolated from every other tenant's run.
+
+**In-memory rate-limit and quarantine state is partitioned per tenant** (`server/governance.js`), the same `tenantId -> Map` pattern the response caches already used — a noisy tenant's key churn can no longer grow a data structure every other tenant's requests also hash into.
+
+**Per-tenant resource quotas** (`max_api_keys`, `max_budgets`, `max_monthly_events`, configurable per tenant, sane defaults otherwise) are enforced on key creation, budget creation, and every ingest/proxy call, returning `429` with the current count/limit once exceeded.
+
+**Full tenant lifecycle management** lives behind `/api/platform/*`, gated by a single shared `FINOPS_PLATFORM_ADMIN_TOKEN` secret (not a general admin-identity system — see the route file's own header comment for why that's a deliberate, documented stopgap rather than an oversight): suspend/reactivate a tenant, request offboarding with a grace period (soft-delete, data stays intact and exportable) or cancel it, export every row of a tenant's data as JSON, and irreversibly purge a tenant's schema (requires an explicit `{"confirm": "PURGE"}` body). A trial tenant (`trial_days` at signup) is blocked automatically the moment its trial expires, whether or not the periodic sweep has run yet.
+
+Tenant signup (`POST /api/tenants`) can optionally provision a first dashboard login (`admin_username`/`admin_password`) and/or a trial period (`trial_days`) at the same time it creates the tenant's first API key.
+
+Two-tenant isolation is proven end-to-end over real HTTP against real Postgres schemas — `test/multiTenantIsolation.test.js`, `test/multiTenantHardening.test.js`, `test/tenancy.test.js`, `test/tenantGuard.test.js`, `test/tenantJobs.test.js`, `test/tenantQuota.test.js`, `test/tenantLifecycle.test.js`, `test/tenants.test.js` — one isolation test per feature, each writing real data as tenant A and proving tenant B's identical read comes back empty.
 
 ## Features
 
@@ -122,7 +134,7 @@ Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connecti
 
 ### Access control
 - API keys (roles: admin, budget-manager, developer, viewer) for services/the proxy
-- Session-based human login for the dashboard, `scrypt`-hashed passwords (single-tenant mode only — see "Deployment modes")
+- Session-based human login for the dashboard, `scrypt`-hashed passwords, in **both** single-tenant and multi-tenant mode (multi-tenant login additionally takes a `tenant_id`, since usernames are only unique within a tenant — see "Deployment modes")
 - Spec-compliant OIDC (SSO) client — needs your own identity provider app registration to fully activate
 
 ### Audit & data governance
@@ -164,7 +176,7 @@ tagging_rules:
 ```
 
 ### Testing
-- 493 automated tests on SQLite / 530 on Postgres, all passing (`npm test`) — covering every feature above, plus multi-tenant schema/pool isolation
+- 504 automated tests (`npm test`), 494 passing / 10 skipped by default on SQLite — the 10 skips are the multi-tenant-only suites, which have no SQLite equivalent and self-skip unless `FINOPS_DB_DRIVER=postgres` is set. Run the same command against a real Postgres database to execute all 504, including full multi-tenant isolation, session login, per-tenant background jobs, resource quotas, and tenant lifecycle coverage
 - `scripts/mock-provider.js` — a local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (including load testing) can be exercised end-to-end at zero real API cost
 
 ### Client SDK
@@ -209,7 +221,9 @@ tagging_rules:
 | GET | `/api/recommendations` | Optimization suggestions |
 | GET | `/api/shadow-test/summary` \| `/comparisons` | Shadow A/B test results |
 | POST | `/api/gitops/sync` | Sync budgets and declarative tagging rules from `finops.yaml` |
-| POST | `/api/auth/register` \| `/login` \| `/logout` | Human user accounts (single-tenant mode) |
+| POST | `/api/auth/register` \| `/login` \| `/logout` | Human user accounts (single-tenant and multi-tenant mode; multi-tenant login also requires `tenant_id`) |
+| POST | `/api/tenants` | Multi-tenant signup: creates a tenant + first API key, optionally a first dashboard login and/or a trial period |
+| GET/POST/PATCH | `/api/platform/tenants/*` | Tenant lifecycle: list, suspend/reactivate, offboard/cancel, export, purge, adjust quotas (gated by `FINOPS_PLATFORM_ADMIN_TOKEN`) |
 | GET | `/api/sso/login` \| `/callback` | OIDC SSO flow |
 | POST | `/api/reconcile/upload` | Import a billing CSV |
 | GET | `/api/reconcile/report` | Shadow-spend comparison report |
@@ -226,7 +240,7 @@ tagging_rules:
 
 ## Configuration
 
-Copy `.env.example` to `.env`. Vars worth understanding before you touch them: `FINOPS_HOST` (see "Bootstrap mode"), `FINOPS_DB_DRIVER` and `FINOPS_MULTI_TENANT` (see "Deployment modes"), `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` (see "Billing" above and `docs/stripe-live-checkout-runbook.md`).
+Copy `.env.example` to `.env`. Vars worth understanding before you touch them: `FINOPS_HOST` (see "Bootstrap mode"), `FINOPS_DB_DRIVER` and `FINOPS_MULTI_TENANT` (see "Deployment modes"), `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` (see "Billing" above and `docs/stripe-live-checkout-runbook.md`), and `FINOPS_PLATFORM_ADMIN_TOKEN` (enables the `/api/platform/*` tenant-lifecycle routes — see "Deployment modes"; unset means those routes 404 rather than silently accepting no credential).
 
 ## Identity, pricing and metering guarantees
 
@@ -254,7 +268,7 @@ The server binds to `127.0.0.1` by default, so the bootstrap window can't be rea
 
 ## What's tested vs. what needs your own verification
 
-**Tested live during development:** proxy metering (streaming + non-streaming, both providers), the two-tier budget enforcement (soft degrade + hard block), background-workload exemption, data-residency blocking, agent-attribution field threading, fraud/anomaly detection, commitment/weekly-briefing alerting, GPU blended cost + FOCUS split allocation, rate limiting, quarantine, RBAC, GitOps sync, reconciliation with dedupe, session login + SSO mechanics against a mock IdP, exact-match caching, security headers, login rate limiting, automatic backups, crash-restart via the supervisor, Stripe's "not configured" paths and webhook event application, and multi-tenant schema creation / connection pool isolation — against **both** SQLite and Postgres.
+**Tested live during development:** proxy metering (streaming + non-streaming, both providers), the two-tier budget enforcement (soft degrade + hard block), background-workload exemption, data-residency blocking, agent-attribution field threading, fraud/anomaly detection, commitment/weekly-briefing alerting, GPU blended cost + FOCUS split allocation, rate limiting, quarantine, RBAC, GitOps sync, reconciliation with dedupe, session login + SSO mechanics against a mock IdP, exact-match caching, security headers, login rate limiting, automatic backups, crash-restart via the supervisor, Stripe's "not configured" paths and webhook event application, and multi-tenant schema creation / connection pool isolation, dashboard session login, per-tenant background jobs, per-tenant resource quotas, and the full tenant lifecycle (suspend/reactivate/offboard/export/purge/trial-expiry) — against **both** SQLite and Postgres.
 
 **Needs your own verification:** a live request against your real OpenAI/Anthropic account, a live SSO handshake against your real identity provider, an actual Stripe test-mode checkout end-to-end (see `docs/stripe-live-checkout-runbook.md` — this genuinely can't be automated), and the proxy under real production-like concurrent load (`npm run loadtest` gets you the tooling; reading and acting on the results is still on you).
 
@@ -271,9 +285,8 @@ The server binds to `127.0.0.1` by default, so the bootstrap window can't be rea
 - Data residency (both the proxy check and tool-call flagging) relies on self-reported region headers, not real IP geolocation — a real control for well-behaved clients, not resistant to a malicious one
 - "Ask your dashboard" is rule-based pattern matching over a handful of known query shapes, not a general natural-language-to-SQL engine — an unrecognized phrasing says so plainly rather than guessing
 - SQLite backups are file copies, not point-in-time/incremental; Postgres deployments are responsible for their own backup strategy
-- Dashboard session login is not yet supported in multi-tenant mode (see "Deployment modes") — API-key auth only
 - No agent-level GPU utilization ingestion beyond cluster-level totals (no per-agent GPU-hours breakdown)
-- Multi-tenant mode is not complete: seven route groups are switched off (`501`), periodic alert / commitment / briefing jobs do not run per tenant, and the process-global in-memory rate-limit and quarantine state is keyed by API key id rather than by tenant (key ids are unique, so this cannot cross tenants, but it is not partitioned either). One deployment per customer avoids all of this
+- `/api/platform/*` tenant-lifecycle admin routes are gated by one shared `FINOPS_PLATFORM_ADMIN_TOKEN` secret, not a real per-operator admin-identity/RBAC system — a deliberate, documented stopgap (see `server/routes/platformAdmin.js`) until a proper platform-admin console exists
 - `X-Disable-PII-Redaction: true` can be sent by any caller with proxy access; it is not yet an admin-controlled privilege like `allow_background`
 - Historical usage recorded at $0 before a model had a price is not retroactively re-priced (`GET /api/pricing/unpriced` finds unpriced models, not stale $0 rows)
 - Schema migrations cover the single-tenant SQLite and Postgres schemas; the multi-tenant control-plane and per-tenant schemas are not migrated yet
