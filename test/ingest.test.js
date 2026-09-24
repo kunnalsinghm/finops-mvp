@@ -266,6 +266,46 @@ test("leaves project_id/cost_center null, not an error, when the caller doesn't 
   assert.equal(row.cost_center, null);
 });
 
+test("surfaces a new-model anomaly in the response when a provider/model combo has never been used anywhere before, once there's enough org-wide history", async () => {
+  const key_id = await makeApiKey();
+  // Establish org-wide history via direct DB seeding (fast; the anomaly
+  // detector's history bar counts ALL events, not just this key's).
+  for (let i = 0; i < 25; i++) {
+    await storage.run(
+      "INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, 'openai', 'gpt-4o', 0.1, 1)",
+      [new Date().toISOString()]
+    );
+  }
+
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id },
+    body: {
+      provider: "anthropic",
+      model: `never-before-seen-${process.pid}`,
+      team: "eng",
+      environment: "prod",
+      input_tokens: 10,
+      output_tokens: 10,
+    },
+  });
+  assert.equal(res.status, 201);
+  assert.ok(Array.isArray(res.json.anomalies), "expected an anomalies array in the response");
+  assert.ok(
+    res.json.anomalies.some((a) => a.type === "new-model"),
+    "expected a new-model anomaly among the flagged anomalies"
+  );
+});
+
+test("omits 'anomalies' from the response entirely when nothing is flagged", async () => {
+  const key_id = await makeApiKey();
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id },
+    body: { provider: "openai", model: "gpt-4o-mini", team: "eng", environment: "prod", input_tokens: 10, output_tokens: 10 },
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.json.anomalies, undefined);
+});
+
 test("records an untagged event with a warning when team or environment is missing, cost still computed", async () => {
   const key_id = await makeApiKey();
   const res = await post("/api/ingest", {
@@ -279,6 +319,38 @@ test("records an untagged event with a warning when team or environment is missi
 
   const row = await getLatestEventForUser(key_id);
   assert.equal(row.tagged, 0);
+});
+
+test("surfaces a new-model anomaly in the response once there's enough org-wide history and a genuinely unseen provider/model is used", async () => {
+  const key_id = await makeApiKey();
+  // Establish enough org-wide history for checkNewModelOrgWide's minimum
+  // bar, via a model that is NOT the one this test will send.
+  for (let i = 0; i < 25; i++) {
+    await storage.run(
+      "INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, 'openai', 'gpt-4o', 0.1, 1)",
+      [new Date().toISOString()]
+    );
+  }
+
+  const model = `never-before-seen-model-${process.pid}`;
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id },
+    body: { provider: "anthropic", model, team: "eng", environment: "prod", input_tokens: 10, output_tokens: 10 },
+  });
+  assert.equal(res.status, 201);
+  assert.ok(res.json.anomalies, "expected an anomalies array in the response");
+  const types = res.json.anomalies.map((a) => a.type);
+  assert.ok(types.includes("new-model"), `expected 'new-model' among ${JSON.stringify(types)}`);
+});
+
+test("omits the anomalies field entirely (not an empty array) when nothing fires", async () => {
+  const key_id = await makeApiKey();
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id },
+    body: { provider: "openai", model: "gpt-4o-mini", team: "eng", environment: "prod", input_tokens: 10, output_tokens: 10 },
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.json.anomalies, undefined);
 });
 
 test("records cost_usd 0 with a warning for an unrecognized provider/model, rather than failing or guessing", async () => {

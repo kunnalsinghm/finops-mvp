@@ -5,4 +5,5 @@ module.exports = [
   require("./0003_usage_events_key_id"),
   require("./0004_usage_events_project_cost_center"),
   require("./0005_tag_rules"),
+  require("./0006_anomaly_alert_state"),
 ];

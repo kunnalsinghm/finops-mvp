@@ -206,6 +206,29 @@ test("successful non-streaming call: forwards to upstream with the caller's key,
   assert.equal(row.tagged, 1);
 });
 
+test("a proxy request tripping a new-model anomaly logs it to alerts_log, once there's enough org-wide history", async (t) => {
+  const key_id = await makeApiKey();
+  for (let i = 0; i < 25; i++) {
+    await storage.run(
+      "INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, 'openai', 'gpt-4o', 0.1, 1)",
+      [new Date().toISOString()]
+    );
+  }
+  t.mock.method(global, "fetch", async () => jsonResponse(openaiResponse(1000, 1000)));
+
+  const res = await post("/api/proxy/openai", {
+    headers: { "X-API-Key": key_id, ...PROVIDER_KEY_HEADER, "X-Team": "eng", "X-Environment": "prod" },
+    body: { model: `never-before-seen-${process.pid}`, messages: [{ role: "user", content: "hi" }] },
+  });
+  assert.equal(res.status, 200);
+
+  const alerts = await storage.all("SELECT * FROM alerts_log WHERE type = 'anomaly'");
+  assert.ok(
+    alerts.some((a) => /New model anomaly/.test(a.message) && a.message.includes(`never-before-seen-${process.pid}`)),
+    "expected a new-model anomaly alert to be logged for this request"
+  );
+});
+
 test("a declarative tagging rule fills in team/environment/project/cost-center on the proxy path when the caller sends none of them", async (t) => {
   const key_id = await makeApiKey(); // no bound team - free for a rule to fill
   const team = `rule-team-${process.pid}`;

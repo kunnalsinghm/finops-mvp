@@ -122,6 +122,15 @@ CREATE TABLE IF NOT EXISTS tag_rules (
 );
 CREATE INDEX IF NOT EXISTS idx_tag_rules_prefix ON tag_rules(api_key_prefix);
 
+CREATE TABLE IF NOT EXISTS anomaly_alert_state (
+  scope_type TEXT NOT NULL,
+  scope_value TEXT NOT NULL,
+  period TEXT NOT NULL,
+  anomaly_type TEXT NOT NULL,
+  fired_at TEXT NOT NULL DEFAULT NOW()::text,
+  PRIMARY KEY (scope_type, scope_value, period, anomaly_type)
+);
+
 CREATE TABLE IF NOT EXISTS pricing_overrides (
   id SERIAL PRIMARY KEY,
   provider TEXT NOT NULL,

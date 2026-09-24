@@ -29,7 +29,7 @@ const {
 } = require("../governance");
 const { makeCacheKey, getCached, setCached } = require("../cache");
 const { findSemanticMatch, setSemanticCache, extractPromptText } = require("../semanticCache");
-const { checkAnomaly } = require("../anomaly");
+const { checkAllAnomalies } = require("../anomaly");
 const { runShadowTest, DEFAULT_SAMPLE_RATE } = require("../shadowTest");
 const { redactValue } = require("../piiRedaction");
 const { detectPromptInjection } = require("../promptInjection");
@@ -164,7 +164,7 @@ function buildUsageRow({ providerName, effectiveModel, team, environment, gitBra
 async function logUsageEvent(params) {
   // `db` is the CALLER'S database (req.db): the tenant's own schema in multi-tenant
   // mode, the one shared database otherwise. Nothing below may reach for a global.
-  const { providerName, effectiveModel, team, rateLimitKey, clientRegion, input_tokens, output_tokens, db = defaultDb } = params;
+  const { providerName, effectiveModel, team, rateLimitKey, clientRegion, agentId, input_tokens, output_tokens, db = defaultDb } = params;
 
   let costInfo;
   try {
@@ -180,9 +180,18 @@ async function logUsageEvent(params) {
   // comparing against the prior baseline, not one diluted by the event
   // being checked. Neither check blocks the request - see fraudDetection.js.
   // They are advisory, so a failure in a detector must never cost us the
-  // usage record itself.
+  // usage record itself. checkAllAnomalies covers all five anomaly trigger
+  // types as one system - see anomaly.js.
   try {
-    await checkAnomaly({ provider: providerName, model: effectiveModel, cost_usd: costInfo.cost_usd ?? 0, team, db });
+    await checkAllAnomalies({
+      provider: providerName,
+      model: effectiveModel,
+      cost_usd: costInfo.cost_usd ?? 0,
+      team,
+      agent_id: agentId,
+      client_region: clientRegion,
+      db,
+    });
     await checkKeyFraudSignals({ key_id: rateLimitKey, provider: providerName, model: effectiveModel, client_region: clientRegion, db });
   } catch (err) {
     logger.warn(`[proxy] advisory check failed (event still recorded): ${err.message}`);

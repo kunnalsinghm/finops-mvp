@@ -88,8 +88,12 @@ Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connecti
 - **Budget enforcement, two tiers**: over budget with a cheaper same-provider fallback configured → degrades to it (circuit breaker). Over budget with **no fallback available** → hard-blocks with `402`, rather than silently letting the request through unthrottled at full price
 - **Background/continuous-inference budget class**: traffic tagged `X-Workload-Type: background` (24/7 monitoring/compliance-scanning agents) is exempt from the circuit-breaker/hard-block above — throttling it could break the function it exists to perform — but is still tracked and alertable via its own `scope_type: 'background'` budget, separate from that team's regular spend
 - Quarantine mode: flagged keys capped to 1 req/min pending admin approval
-- Single-request anomaly detection: flags any one event costing more than 5x the 30-day rolling average for that provider/model
-- **Fraud/compromised-key detection**: flags a sudden request-volume spike, a brand-new provider/model combo on an otherwise-established key, or a first-time client region — all flag-only (logged to `/api/alerts`), never auto-blocking, since these are noisier signals than a single-request cost anomaly
+- **Anomaly detection**: one system (`server/anomaly.js`), five trigger types, all logged to `/api/alerts` under `type: "anomaly"`, all advisory/flag-only, never auto-blocking:
+  - single-event cost spike (any one event costing more than 5x the 30-day rolling average for that provider/model)
+  - daily-spend-exceeds-normal (a team's total spend today vs. its own 14-day rolling daily average, >200% of normal)
+  - retry-rate-exceeds-threshold (an agent whose fraction of multi-attempt tasks crosses 50%, min 5 tasks)
+  - new-model-appears / new-geography-begins - both **org-wide**: a provider/model or client-declared region never seen anywhere in this deployment before (deliberately not per-key - see below)
+- **Fraud/compromised-key detection**: a SEPARATE, deliberately-not-merged system, scoped to one key rather than the whole org - flags a sudden request-volume spike, a brand-new provider/model combo, or a first-time client region, all relative to THAT KEY's own history (not everyone's). Same flag-only posture as anomaly detection, logged to the same `/api/alerts`, but answering a different question ("does this one credential's behavior look compromised" vs. "is anything about this event/team/deployment unusual") - the two can legitimately both fire on the same event for different reasons
 - **Model allow-listing**: restrict specific keys/teams to a pre-approved list of models. Manage via `/api/model-allowlist`
 - **Token quotas**: cap raw input+output token consumption per key/team over a daily and/or weekly window. Manage via `/api/token-quotas`
 
@@ -160,7 +164,7 @@ tagging_rules:
 ```
 
 ### Testing
-- 471 automated tests on SQLite / 508 on Postgres, all passing (`npm test`) — covering every feature above, plus multi-tenant schema/pool isolation
+- 493 automated tests on SQLite / 530 on Postgres, all passing (`npm test`) — covering every feature above, plus multi-tenant schema/pool isolation
 - `scripts/mock-provider.js` — a local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (including load testing) can be exercised end-to-end at zero real API cost
 
 ### Client SDK

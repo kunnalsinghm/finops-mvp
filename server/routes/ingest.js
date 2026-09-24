@@ -10,7 +10,7 @@ const defaultDb = require("../storage");
 const { computeCost } = require("../pricing");
 const { requireAuth } = require("../auth");
 const { checkRateLimit } = require("../governance");
-const { checkAnomaly } = require("../anomaly");
+const { checkAllAnomalies } = require("../anomaly");
 const { redactValue } = require("../piiRedaction");
 const { logAlert } = require("../governance");
 const { detectPromptInjection } = require("../promptInjection");
@@ -196,8 +196,17 @@ router.post("/", requireAuth("write"), async (req, res) => {
   // Anomaly and fraud checks both run against the baseline BEFORE this event
   // is inserted, so the event itself doesn't dilute the average/history it's
   // being compared to. Neither check blocks the request (see fraudDetection.js
-  // for why this is flag-only, not auto-block).
-  const anomaly = await checkAnomaly({ provider, model, cost_usd: cost_usd ?? 0, team: resolvedTags.team, db: req.db });
+  // for why this is flag-only, not auto-block). checkAllAnomalies covers all
+  // five anomaly trigger types as one system - see anomaly.js.
+  const anomalies = await checkAllAnomalies({
+    provider,
+    model,
+    cost_usd: cost_usd ?? 0,
+    team: resolvedTags.team,
+    agent_id: agent_id || null,
+    client_region: req.header("X-Client-Region") || null,
+    db: req.db,
+  });
   const fraud = await checkKeyFraudSignals({
     key_id: req.apiKey.key_id,
     provider,
@@ -225,7 +234,7 @@ router.post("/", requireAuth("write"), async (req, res) => {
     tagged: Boolean(tagged),
     cost_usd: row.cost_usd,
     rate_found,
-    anomaly: anomaly || undefined,
+    anomalies: anomalies.length ? anomalies : undefined,
     fraud_signal: fraud || undefined,
     tag_inference: tagInference || undefined,
     warning: rate_found
