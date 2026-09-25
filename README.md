@@ -93,7 +93,7 @@ Two-tenant isolation is proven end-to-end over real HTTP against real Postgres s
 - **PII redaction** (on by default, opt out per-request via `X-Disable-PII-Redaction: true`): regex-based detection of email, SSN, credit card (Luhn-validated), phone, and IP address patterns. Redact-and-continue, not block. Applied at both the proxy and ingest
 - **Prompt-injection detection** (always on, not opt-out): rule-based pattern matching against known jailbreak/injection phrasings. Blocks the request (HTTP 400). Applied at both the proxy and ingest
 - **Data-residency enforcement**: block a request whose declared region (`X-Client-Region`) isn't on the applicable allow-list (`/api/region-allowlist`, key-then-team precedence, same pattern as model allow-listing below). Region is self-reported, not real IP geolocation — a real, useful control for well-behaved clients, not a substitute for network-level geofencing. The same self-reported region is also available as its own cost-breakdown dimension (`GET /api/costs/by-region`), independent of whether an allow-list is even configured
-- **Agent action governance** (`/api/tool-calls`): audit trail for agent tool calls (file access, API calls, command execution) — distinct from LLM completions. Rule-based risky-command detection (destructive filesystem/database operations, privilege escalation), per-agent volume-spike detection, and the same data-residency check as above. This is a **reporting/audit mechanism, not a live blocking gate** — unlike the proxy checks, a tool call happens outside this service's control, so it can only be flagged for review, not stopped
+- **Agent action governance** (`/api/tool-calls`): audit trail for agent tool calls (file access, API calls, command execution) — distinct from LLM completions. Rule-based risky-command detection (destructive filesystem/database operations, privilege escalation), per-agent volume-spike detection, and the same data-residency check as above. The logged-call path (`POST /api/tool-calls`) is a **reporting/audit mechanism, not a live blocking gate** — a tool call happens outside this service's control, so it can only be flagged for review after the fact, not stopped. For actual prevention, an orchestrator can opt in to a **pre-flight check** (`POST /api/tool-calls/check`) *before* letting an agent act: a `tool_name`/`target` deny-list (`/api/tool-call-denylist`, key-then-team precedence, same scoping pattern as model allow-listing) denies outright, and a match against the same risky-command criteria queues the action for **human approval** (`GET /api/tool-calls/approvals`, `POST .../approve` | `/deny`) instead of denying it outright. This is opt-in by construction — nothing forces an orchestrator to call it — but it's the only way to add real prevention given the architectural constraint above
 
 ### Governance (enforced live in the proxy)
 - Token-bucket rate limiting per API key
@@ -105,7 +105,7 @@ Two-tenant isolation is proven end-to-end over real HTTP against real Postgres s
   - daily-spend-exceeds-normal (a team's total spend today vs. its own 14-day rolling daily average, >200% of normal)
   - retry-rate-exceeds-threshold (an agent whose fraction of multi-attempt tasks crosses 50%, min 5 tasks)
   - new-model-appears / new-geography-begins - both **org-wide**: a provider/model or client-declared region never seen anywhere in this deployment before (deliberately not per-key - see below)
-- **Fraud/compromised-key detection**: a SEPARATE, deliberately-not-merged system, scoped to one key rather than the whole org - flags a sudden request-volume spike, a brand-new provider/model combo, or a first-time client region, all relative to THAT KEY's own history (not everyone's). Same flag-only posture as anomaly detection, logged to the same `/api/alerts`, but answering a different question ("does this one credential's behavior look compromised" vs. "is anything about this event/team/deployment unusual") - the two can legitimately both fire on the same event for different reasons
+- **Fraud/compromised-key detection**: a SEPARATE, deliberately-not-merged system, scoped to one key rather than the whole org - flags a sudden request-volume spike, a brand-new provider/model combo, or a first-time client region, all relative to THAT KEY's own history (not everyone's). Logged to the same `/api/alerts` as anomaly detection, but answering a different question ("does this one credential's behavior look compromised" vs. "is anything about this event/team/deployment unusual") - the two can legitimately both fire on the same event for different reasons. **No longer flag-only**: a single signal alone sets a softer `rotation_recommended` advisory on the key (visible on `GET /api/keys`, cleared via `POST /api/keys/:keyId/dismiss-rotation`); two or more concurrent signals on the same request **auto-quarantine** the key, logged to the audit trail under actor `system:fraud-detection` so it's distinguishable from a manual admin quarantine, and never double-quarantines an already-quarantined key. The signal count required is configurable (`FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS`, default `2`)
 - **Model allow-listing**: restrict specific keys/teams to a pre-approved list of models. Manage via `/api/model-allowlist`
 - **Token quotas**: cap raw input+output token consumption per key/team over a daily and/or weekly window. Manage via `/api/token-quotas`
 
@@ -120,7 +120,7 @@ Two-tenant isolation is proven end-to-end over real HTTP against real Postgres s
 
 ### Optimization engine
 - Rule-based model-switch recommendations, each starting with an explicit caveat: cost-only estimate, quality unverified
-- **Shadow A/B testing** (opt-in via `X-Enable-Shadow-Test: true`): a sample of real traffic is also sent to the recommended cheaper model, purely to compare — non-streaming requests only. Once a model pair has enough samples, `/api/recommendations` reports a real measured confidence: `shadow-tested-similar` or `shadow-tested-diverges`
+- **Shadow A/B testing** (opt-in via `X-Enable-Shadow-Test: true`): a sample of real traffic is also sent to the recommended cheaper model, purely to compare — supports both streaming and non-streaming requests (a streamed primary gets a streamed shadow call too, for a fair comparison). Similarity is scored two ways: an always-on local word-overlap lexical score, plus an optional **LLM-as-judge** semantic score (gated behind `FINOPS_SHADOW_JUDGE_MODEL`, unset by default) stored additively alongside it, never as a replacement. Once a model pair has enough samples, `/api/recommendations` reports a real measured confidence: `shadow-tested-similar` or `shadow-tested-diverges`. A comparison scoring below `FINOPS_SHADOW_FLAG_SIMILARITY_THRESHOLD` (default `0.5`) is also captured to `GET /api/shadow-test/flagged-test-cases` — cheap groundwork for a future eval-suite pipeline, not the pipeline itself
 - Caching-opportunity heuristic for repeated/templated prompt patterns
 
 ### Shadow-spend reconciliation
@@ -133,7 +133,7 @@ Two-tenant isolation is proven end-to-end over real HTTP against real Postgres s
 - Cleanly returns `501`, not a crash, when `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` aren't set — see `docs/stripe-live-checkout-runbook.md` for the manual end-to-end verification steps a real Stripe test-mode account requires (this can't be fully automated in CI)
 
 ### Access control
-- API keys (roles: admin, budget-manager, developer, viewer) for services/the proxy
+- API keys (roles: admin, budget-manager, developer, viewer, auditor, agent) for services/the proxy. **Auditor** is read-only but scoped narrowly to audit/compliance evidence (audit log, alerts log, reconciliation report, billing status, tool-call approval history) rather than general dashboard access — a distinct `audit_read` permission, not an alias for `viewer`'s `read`. **Agent** is machine-scoped: holds only `write` (the ingest/proxy/tool-call-logging path), nothing else — no dashboard reads, no key/budget management — and is API-key-only, deliberately excluded from dashboard-account creation (`POST /api/auth/register` rejects it)
 - Session-based human login for the dashboard, `scrypt`-hashed passwords, in **both** single-tenant and multi-tenant mode (multi-tenant login additionally takes a `tenant_id`, since usernames are only unique within a tenant — see "Deployment modes")
 - Spec-compliant OIDC (SSO) client — needs your own identity provider app registration to fully activate
 
@@ -176,7 +176,7 @@ tagging_rules:
 ```
 
 ### Testing
-- 504 automated tests (`npm test`), 494 passing / 10 skipped by default on SQLite — the 10 skips are the multi-tenant-only suites, which have no SQLite equivalent and self-skip unless `FINOPS_DB_DRIVER=postgres` is set. Run the same command against a real Postgres database to execute all 504, including full multi-tenant isolation, session login, per-tenant background jobs, resource quotas, and tenant lifecycle coverage
+- 563 automated tests (`npm test`), 553 passing / 10 skipped by default on SQLite — the 10 skips are the multi-tenant-only suites, which have no SQLite equivalent and self-skip unless `FINOPS_DB_DRIVER=postgres` is set. Run the same command against a real Postgres database to execute all 631, including full multi-tenant isolation, session login, per-tenant background jobs, resource quotas, tenant lifecycle, RBAC role enforcement, fraud auto-quarantine, tool-call deny-list/approval-queue, and shadow-test coverage
 - `scripts/mock-provider.js` — a local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (including load testing) can be exercised end-to-end at zero real API cost
 
 ### Client SDK
@@ -203,7 +203,11 @@ tagging_rules:
 | GET | `/api/tags/inferences` | Smart-tagging inferences awaiting review |
 | POST | `/api/tags/:usageEventId/correct` | Confirm/correct an inference, applying it as a real tag |
 | GET/POST/DELETE | `/api/region-allowlist` | Data-residency allow-list management |
-| GET/POST | `/api/tool-calls` | Agent tool-call audit log / ingestion |
+| GET/POST | `/api/tool-calls` | Agent tool-call audit log / ingestion (post-hoc, reporting only) |
+| POST | `/api/tool-calls/check` | Pre-flight check before an agent acts: denylist / human-approval / allowed |
+| GET | `/api/tool-calls/approvals` | Pending human-approval queue |
+| POST | `/api/tool-calls/approvals/:id/approve` \| `/deny` | Decide a pending approval (admin only) |
+| GET/POST/DELETE | `/api/tool-call-denylist` \| `/:id` | Tool-call deny-list management (`tool_name`/`target_pattern`, key-then-team scoping) |
 | POST | `/api/gpu-usage/ingest` | Record GPU/self-hosted inference cost |
 | GET | `/api/gpu-usage/blended` | Combined API + GPU cost per team |
 | GET | `/api/query?q=` | Plain-English dashboard query |
@@ -211,6 +215,7 @@ tagging_rules:
 | POST | `/api/pricing/override` | Correct/add a pricing rate |
 | GET/POST | `/api/keys` | List / create API keys |
 | POST | `/api/keys/:id/quarantine` \| `/approve` \| `/revoke` | Key governance actions |
+| POST | `/api/keys/:keyId/dismiss-rotation` | Clear a fraud-detection rotation-recommended advisory |
 | GET | `/api/alerts` | Alert log |
 | GET | `/api/alerts/status` | Consolidated alert status for monitoring |
 | POST | `/api/alerts/check-now` | Manually trigger budget/burn-rate checks |
@@ -219,7 +224,7 @@ tagging_rules:
 | GET/POST | `/api/token-quotas` | List / add quotas |
 | DELETE | `/api/token-quotas/:id` | Remove a quota (budget-manager or admin) |
 | GET | `/api/recommendations` | Optimization suggestions |
-| GET | `/api/shadow-test/summary` \| `/comparisons` | Shadow A/B test results |
+| GET | `/api/shadow-test/summary` \| `/comparisons` \| `/flagged-test-cases` | Shadow A/B test results / low-similarity flagged cases |
 | POST | `/api/gitops/sync` | Sync budgets and declarative tagging rules from `finops.yaml` |
 | POST | `/api/auth/register` \| `/login` \| `/logout` | Human user accounts (single-tenant and multi-tenant mode; multi-tenant login also requires `tenant_id`) |
 | POST | `/api/tenants` | Multi-tenant signup: creates a tenant + first API key, optionally a first dashboard login and/or a trial period |
@@ -240,7 +245,7 @@ tagging_rules:
 
 ## Configuration
 
-Copy `.env.example` to `.env`. Vars worth understanding before you touch them: `FINOPS_HOST` (see "Bootstrap mode"), `FINOPS_DB_DRIVER` and `FINOPS_MULTI_TENANT` (see "Deployment modes"), `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` (see "Billing" above and `docs/stripe-live-checkout-runbook.md`), and `FINOPS_PLATFORM_ADMIN_TOKEN` (enables the `/api/platform/*` tenant-lifecycle routes — see "Deployment modes"; unset means those routes 404 rather than silently accepting no credential).
+Copy `.env.example` to `.env`. Vars worth understanding before you touch them: `FINOPS_HOST` (see "Bootstrap mode"), `FINOPS_DB_DRIVER` and `FINOPS_MULTI_TENANT` (see "Deployment modes"), `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` (see "Billing" above and `docs/stripe-live-checkout-runbook.md`), `FINOPS_PLATFORM_ADMIN_TOKEN` (enables the `/api/platform/*` tenant-lifecycle routes — see "Deployment modes"; unset means those routes 404 rather than silently accepting no credential), `FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS` (default `2` — how many concurrent fraud signals trigger automatic key quarantine rather than just a rotation-recommended advisory; see "Governance" above), and `FINOPS_SHADOW_JUDGE_MODEL` / `FINOPS_SHADOW_FLAG_SIMILARITY_THRESHOLD` (both optional — see "Optimization engine" above).
 
 ## Identity, pricing and metering guarantees
 
@@ -276,12 +281,12 @@ The server binds to `127.0.0.1` by default, so the bootstrap window can't be rea
 
 - Token quotas are checked using consumption *so far*, not including the current request — the request that crosses the threshold is still allowed through; only the next request after that is blocked. Deliberate: no provider exposes token cost before generating the response
 - PII redaction, prompt-injection detection, and risky-command detection are all pattern-based, not ML classifiers — none is a compliance guarantee on its own, and all can be evaded by a sufficiently motivated obfuscation
-- Shadow A/B testing covers non-streaming proxy requests only
-- Shadow-test similarity is local word-overlap cosine similarity (lexical), not true semantic/human quality judgment
+- Shadow-test lexical similarity (local word-overlap cosine) is always on; the optional LLM-as-judge score (`FINOPS_SHADOW_JUDGE_MODEL`) is additive, not a replacement — neither is true human quality judgment
 - Token-efficiency-ratio is a proxy ("output tokens on tasks that reached success" ÷ "all tokens consumed"), not a measure of whether the successful output was actually good — see `server/agentAttribution.js` for the full reasoning
 - Smart tagging infers from an API key's own tagging history (including history created by human corrections), plus a same-key time-of-day fallback — calling-service identity and prompt-template-fingerprint signals from the original plan aren't implemented yet, since both need request metadata this service doesn't collect today
 - GPU shared-cluster cost allocation is a relative-API-spend approximation, not a measured per-team utilization split — there's no GPU-hours telemetry to split by instead
-- Tool-call governance is audit/reporting only — it can flag a risky or non-compliant action but cannot prevent it, since the action happens outside this service's control
+- Tool-call pre-flight prevention (`POST /api/tool-calls/check`) is opt-in by construction — an orchestrator that never calls it gets no denylist/approval-gate protection, only the pre-existing post-hoc audit trail. There is no way to force a call to happen before the action, since the action happens outside this service's control
+- The `flagged_test_cases` "cheap groundwork for Compass" table has a `thumbs-down` source defined but unwired — there's no response-rating feature anywhere in this codebase yet to hook it up to
 - Data residency (both the proxy check and tool-call flagging) relies on self-reported region headers, not real IP geolocation — a real control for well-behaved clients, not resistant to a malicious one
 - "Ask your dashboard" is rule-based pattern matching over a handful of known query shapes, not a general natural-language-to-SQL engine — an unrecognized phrasing says so plainly rather than guessing
 - SQLite backups are file copies, not point-in-time/incremental; Postgres deployments are responsible for their own backup strategy
