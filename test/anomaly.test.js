@@ -241,6 +241,15 @@ test("checkRetryRateAnomaly flags a high retry rate, and fires only once per day
 
   const alertCount = await countAnomalyAlerts(new RegExp(`Retry-rate anomaly: agent '${agent_id}'`));
   assert.equal(alertCount, 1);
+
+  // A8: a high-retry-rate anomaly is also cheap groundwork for Compass -
+  // see flaggedTestCases.js. Verify the capture happened alongside the
+  // alert, not instead of it.
+  const { listFlaggedTestCases } = require("../server/flaggedTestCases");
+  const flagged = await listFlaggedTestCases({ source: "high-retry-rate" });
+  const entry = flagged.find((f) => f.reason.includes(agent_id));
+  assert.ok(entry, "expected a flagged_test_cases row capturing this retry-rate anomaly");
+  assert.equal(entry.source, "high-retry-rate");
 });
 
 // ---- #4: new-model-appears (org-wide) -------------------------------------

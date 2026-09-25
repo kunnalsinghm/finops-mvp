@@ -133,3 +133,93 @@ test("checkKeyFraudSignals ignores client_region when none is provided", async (
   const result = await checkKeyFraudSignals({ key_id: key, provider: "openai", model: "gpt-4o" });
   assert.equal(result, null);
 });
+
+// ---- A6: automated response (auto-quarantine / rotation-recommended) ----
+
+const { quarantineKey, isQuarantined } = require("../server/governance");
+const { getAuditLog } = require("../server/audit");
+
+async function makeApiKey(key_id, role = "developer") {
+  await storage.run("INSERT INTO api_keys (key_id, label, role, status) VALUES (?, ?, ?, 'active')", [
+    key_id,
+    `fraud test key ${key_id}`,
+    role,
+  ]);
+}
+
+test("a SINGLE signal (below the default 2-signal threshold) sets rotation_recommended, does not quarantine", async () => {
+  const key = "key_single_signal_rotation";
+  await makeApiKey(key);
+  for (let i = 0; i < 25; i++) {
+    await insertHistoryEvent({ key_id: key, provider: "openai", model: "gpt-4o", daysAgo: 1 });
+  }
+  // Exactly one signal: a brand-new model/provider combo, nothing else.
+  const result = await checkKeyFraudSignals({ key_id: key, provider: "anthropic", model: "claude-opus" });
+  assert.equal(result.action, "rotation-recommended");
+  assert.equal(await isQuarantined(key), false, "a single signal must not auto-quarantine");
+
+  const row = await storage.get("SELECT rotation_recommended, rotation_reason FROM api_keys WHERE key_id = ?", [key]);
+  assert.equal(row.rotation_recommended, 1);
+  assert.match(row.rotation_reason, /new-model-mix|rotation recommended/i);
+
+  const audit = await getAuditLog({ actor: "system:fraud-detection" });
+  const entry = audit.find((a) => a.target === key && a.action === "key.rotation_recommended");
+  assert.ok(entry, "expected a system:fraud-detection audit entry for the rotation recommendation");
+});
+
+test("TWO OR MORE concurrent signals (default threshold) auto-quarantine the key", async () => {
+  const key = "key_multi_signal_auto_quarantine";
+  await makeApiKey(key);
+  // Establish baseline: low, steady volume; one known region; one known model.
+  for (let d = 1; d <= 5; d++) {
+    await insertHistoryEvent({ key_id: key, provider: "openai", model: "gpt-4o", client_region: "us-east", daysAgo: d });
+  }
+  // Today: volume spike (10x) AND a brand-new region at once = 2 signals.
+  for (let i = 0; i < 10; i++) {
+    await insertTodayEvent({ key_id: key, provider: "openai", model: "gpt-4o" });
+  }
+  const result = await checkKeyFraudSignals({ key_id: key, provider: "openai", model: "gpt-4o", client_region: "ap-south" });
+  assert.equal(result.action, "auto-quarantined");
+  assert.ok(result.reasons.length >= 2, `expected >=2 concurrent reasons, got ${result.reasons}`);
+  assert.equal(await isQuarantined(key), true);
+
+  const audit = await getAuditLog({ actor: "system:fraud-detection" });
+  const entry = audit.find((a) => a.target === key && a.action === "key.auto_quarantine");
+  assert.ok(entry, "expected a system:fraud-detection audit entry, distinguishable from a manual admin quarantine");
+});
+
+test("an already-quarantined key is never double-quarantined by a later fraud signal", async () => {
+  const key = "key_no_double_quarantine";
+  await makeApiKey(key);
+  await quarantineKey(key, "pre-existing manual quarantine", storage);
+  for (let d = 1; d <= 5; d++) {
+    await insertHistoryEvent({ key_id: key, provider: "openai", model: "gpt-4o", client_region: "us-east", daysAgo: d });
+  }
+  for (let i = 0; i < 10; i++) {
+    await insertTodayEvent({ key_id: key, provider: "openai", model: "gpt-4o" });
+  }
+  const result = await checkKeyFraudSignals({ key_id: key, provider: "openai", model: "gpt-4o", client_region: "ap-south" });
+  assert.equal(result.action, "already-quarantined");
+
+  const row = await storage.get("SELECT status, quarantine_reason FROM api_keys WHERE key_id = ?", [key]);
+  assert.equal(row.status, "quarantined");
+  assert.equal(row.quarantine_reason, "pre-existing manual quarantine", "the original quarantine reason must not be overwritten");
+});
+
+test("FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS is configurable - set to 1, a single signal auto-quarantines", async () => {
+  const key = "key_threshold_one";
+  await makeApiKey(key);
+  for (let i = 0; i < 25; i++) {
+    await insertHistoryEvent({ key_id: key, provider: "openai", model: "gpt-4o", daysAgo: 1 });
+  }
+  const prev = process.env.FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS;
+  process.env.FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS = "1";
+  try {
+    const result = await checkKeyFraudSignals({ key_id: key, provider: "anthropic", model: "claude-opus" });
+    assert.equal(result.action, "auto-quarantined");
+    assert.equal(await isQuarantined(key), true);
+  } finally {
+    if (prev === undefined) delete process.env.FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS;
+    else process.env.FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS = prev;
+  }
+});

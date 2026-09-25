@@ -20,7 +20,9 @@ router.get("/plans", requireAuth("read"), (req, res) => {
   res.json({ configured: isConfigured(), plans: PLANS });
 });
 
-router.get("/status", requireAuth("read"), async (req, res) => {
+// "read" or "audit_read" (A9 auditor role) - subscription/billing status is
+// named explicitly as audit-relevant evidence in the RBAC gap analysis (A9).
+router.get("/status", requireAuth(["read", "audit_read"]), async (req, res) => {
   const subscription = await getCurrentSubscription();
   res.json(subscription || { status: "none" });
 });

@@ -5,6 +5,7 @@
 const express = require("express");
 const { requireAuth } = require("../auth");
 const { getShadowTestSummary, getShadowComparisons } = require("../shadowTest");
+const { listFlaggedTestCases } = require("../flaggedTestCases");
 
 const router = express.Router();
 
@@ -16,6 +17,15 @@ router.get("/summary", requireAuth("read"), async (req, res) => {
 router.get("/comparisons", requireAuth("read"), async (req, res) => {
   const limit = Number(req.query.limit) || 50;
   res.json(await getShadowComparisons({ limit, db: req.db }));
+});
+
+// A8: cheap groundwork for Compass - see flaggedTestCases.js. Read-only
+// reporting here too, same as the two routes above; nothing writes to
+// flagged_test_cases through this route file, only via the signals that
+// capture it directly (shadowTest.js, anomaly.js).
+router.get("/flagged-test-cases", requireAuth("read"), async (req, res) => {
+  const limit = Number(req.query.limit) || 100;
+  res.json(await listFlaggedTestCases({ limit, source: req.query.source, db: req.db }));
 });
 
 module.exports = router;

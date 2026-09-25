@@ -213,6 +213,7 @@ router.post("/", requireAuth("write"), async (req, res) => {
     model,
     client_region: req.header("X-Client-Region") || null,
     db: req.db,
+    controlPlaneDb: req.controlPlaneDb,
   });
 
   const insertedId = await insertUsageEvent(row, req.db);

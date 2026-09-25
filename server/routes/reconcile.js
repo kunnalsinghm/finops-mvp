@@ -17,7 +17,10 @@ router.post("/upload", requireAuth("manage_budgets"), express.text({ type: "*/*"
   }
 });
 
-router.get("/report", requireAuth("read"), async (req, res) => {
+// "read" or "audit_read" (A9 auditor role) - the reconciliation report is
+// audit/compliance-relevant evidence (billing discrepancies), see auth.js's
+// ROLE_PERMISSIONS.auditor comment.
+router.get("/report", requireAuth(["read", "audit_read"]), async (req, res) => {
   const thresholdPct = Number(req.query.threshold) || 10;
   res.json(await getReconciliationReport({ thresholdPct, db: req.db }));
 });

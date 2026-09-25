@@ -164,7 +164,7 @@ function buildUsageRow({ providerName, effectiveModel, team, environment, gitBra
 async function logUsageEvent(params) {
   // `db` is the CALLER'S database (req.db): the tenant's own schema in multi-tenant
   // mode, the one shared database otherwise. Nothing below may reach for a global.
-  const { providerName, effectiveModel, team, rateLimitKey, clientRegion, agentId, input_tokens, output_tokens, db = defaultDb } = params;
+  const { providerName, effectiveModel, team, rateLimitKey, clientRegion, agentId, input_tokens, output_tokens, db = defaultDb, controlPlaneDb = db } = params;
 
   let costInfo;
   try {
@@ -192,7 +192,7 @@ async function logUsageEvent(params) {
       client_region: clientRegion,
       db,
     });
-    await checkKeyFraudSignals({ key_id: rateLimitKey, provider: providerName, model: effectiveModel, client_region: clientRegion, db });
+    await checkKeyFraudSignals({ key_id: rateLimitKey, provider: providerName, model: effectiveModel, client_region: clientRegion, db, controlPlaneDb: req.controlPlaneDb });
   } catch (err) {
     logger.warn(`[proxy] advisory check failed (event still recorded): ${err.message}`);
   }
@@ -239,44 +239,9 @@ async function meterSafely(params) {
   }
 }
 
-// Parse OpenAI SSE stream text for the final usage object
-// (present because we force stream_options.include_usage = true)
-function parseOpenAIStreamUsage(buffer) {
-  const lines = buffer.split("\n").filter((l) => l.startsWith("data: ") && l !== "data: [DONE]");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    try {
-      const json = JSON.parse(lines[i].slice(6));
-      if (json.usage) {
-        return { input_tokens: json.usage.prompt_tokens || 0, output_tokens: json.usage.completion_tokens || 0 };
-      }
-    } catch {
-      // skip malformed line
-    }
-  }
-  return { input_tokens: 0, output_tokens: 0 };
-}
-
-// Parse Anthropic SSE stream text: input_tokens from message_start,
-// output_tokens from the last message_delta usage block.
-function parseAnthropicStreamUsage(buffer) {
-  let input_tokens = 0;
-  let output_tokens = 0;
-  const lines = buffer.split("\n").filter((l) => l.startsWith("data: "));
-  for (const line of lines) {
-    try {
-      const json = JSON.parse(line.slice(6));
-      if (json.type === "message_start" && json.message?.usage?.input_tokens) {
-        input_tokens = json.message.usage.input_tokens;
-      }
-      if (json.type === "message_delta" && json.usage?.output_tokens) {
-        output_tokens = json.usage.output_tokens;
-      }
-    } catch {
-      // skip malformed line
-    }
-  }
-  return { input_tokens, output_tokens };
-}
+// Parse OpenAI/Anthropic SSE stream usage - see sseParsing.js, shared with
+// shadowTest.js's A8 streaming shadow-test support.
+const { parseOpenAIStreamUsage, parseAnthropicStreamUsage, parseStreamText } = require("../sseParsing");
 
 router.post("/:provider", requireAuth("write"), async (req, res) => {
   const providerName = req.params.provider.toLowerCase();
@@ -627,13 +592,14 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       // the client never saw them. (OpenAI only reports usage at the very end
       // of a stream, so a cut-short OpenAI stream is recorded with whatever
       // usage arrived - possibly none - and flagged partial.)
+      let streamMetering = null;
       if (fullBuffer.length > 0 || usage.input_tokens > 0 || usage.output_tokens > 0) {
-        await meterSafely({
+        streamMetering = await meterSafely({
           providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, projectId, costCenter, clientRegion,
           agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
           input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
           degraded, requestedModel, piiFindings, streamed: true, partial,
-          db: req.db, tenantSchema: req.tenantSchema,
+          db: req.db, controlPlaneDb: req.controlPlaneDb, tenantSchema: req.tenantSchema,
         });
       }
       if (partial) {
@@ -646,6 +612,32 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         } catch {
           // alerting is best-effort here
         }
+      }
+
+      // ---- Shadow A/B testing (A8: streaming support) - same opt-in
+      // header, fires AFTER the client's stream has already ended, same
+      // fire-and-forget contract as the non-streaming path below. Skipped
+      // on a partial/interrupted stream: the primary text itself is
+      // incomplete, so a similarity comparison against it would be
+      // comparing against a broken baseline, not a real answer.
+      if (!partial && req.header("X-Enable-Shadow-Test") === "true") {
+        const sampleRateHeader = Number(req.header("X-Shadow-Test-Sample-Rate"));
+        const sampleRate = Number.isFinite(sampleRateHeader) ? sampleRateHeader : DEFAULT_SAMPLE_RATE;
+        runShadowTest({
+          providerName,
+          primaryModel: effectiveModel,
+          primaryRequestBody: outboundBody,
+          primaryResponseText: parseStreamText(providerName, fullBuffer),
+          primaryCostUsd: streamMetering?.cost_usd ?? 0,
+          providerKey,
+          team,
+          endpoint,
+          sampleRate,
+          streamed: true,
+          db: req.db,
+        }).catch((err) => {
+          console.warn(`[shadowTest] Unexpected failure (streaming): ${err.message}`);
+        });
       }
     } catch (err) {
       if (!res.headersSent) {
@@ -752,7 +744,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, projectId, costCenter, clientRegion,
       agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey,
       input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed: false,
-      db: req.db, tenantSchema: req.tenantSchema,
+      db: req.db, controlPlaneDb: req.controlPlaneDb, tenantSchema: req.tenantSchema,
     });
     const cost_usd = metering.cost_usd;
 

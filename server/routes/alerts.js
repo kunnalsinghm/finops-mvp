@@ -6,7 +6,11 @@ const { checkBudgetAlerts, checkBurnRate } = require("../alerts");
 
 const router = express.Router();
 
-router.get("/", requireAuth("read"), async (req, res) => {
+// "read" (viewer/developer/budget-manager/admin) or "audit_read"
+// (auditor - A9): the alerts_log is one of the specific audit/compliance
+// evidence surfaces an auditor account is meant to reach, per auth.js's
+// ROLE_PERMISSIONS.auditor comment.
+router.get("/", requireAuth(["read", "audit_read"]), async (req, res) => {
   const rows = await req.db.all("SELECT * FROM alerts_log ORDER BY id DESC LIMIT 100");
   res.json(rows);
 });
@@ -22,7 +26,7 @@ router.post("/:id/ack", requireAuth("read"), async (req, res) => {
 // interpret the raw log itself). Unacknowledged count is the headline
 // number; by_type breaks it down so a dashboard/pager integration can
 // distinguish "one old unacked anomaly" from "budgets are on fire".
-router.get("/status", requireAuth("read"), async (req, res) => {
+router.get("/status", requireAuth(["read", "audit_read"]), async (req, res) => {
   const unacked = await req.db.get("SELECT COUNT(*) AS n FROM alerts_log WHERE acknowledged = 0");
   const byType = await req.db.all(
     `SELECT type, COUNT(*) AS count, MAX(created_at) AS latest_at

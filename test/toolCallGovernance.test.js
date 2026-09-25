@@ -31,8 +31,9 @@ test.after(async () => {
   }
 });
 
-const { logToolCall, listToolCalls, detectRiskyCommand } = require("../server/toolCallGovernance");
+const { logToolCall, listToolCalls, detectRiskyCommand, checkToolCallPreflight, listPendingApprovals, decideApproval } = require("../server/toolCallGovernance");
 const { addRegionAllowlistEntry } = require("../server/dataResidency");
+const { addDenylistEntry } = require("../server/toolCallDenylist");
 
 function daysAgo(n) {
   return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
@@ -132,4 +133,119 @@ test("listToolCalls with onlyFlagged=true returns only flagged rows", async () =
   const flagged = await listToolCalls({ onlyFlagged: true, agent_id: agent });
   assert.ok(flagged.length >= 1);
   assert.ok(flagged.every((r) => Number(r.flagged) === 1));
+});
+
+// ---- A7: pre-flight check + approval queue ----
+
+test("checkToolCallPreflight allows a call with no denylist match and no risk signal", async () => {
+  const result = await checkToolCallPreflight({ tool_name: "read_file", target: "/tmp/harmless.txt", keyId: `key-preflight-ok-${process.pid}` });
+  assert.deepEqual(result, { allowed: true });
+});
+
+test("checkToolCallPreflight denies a call matching a key-level denylist entry", async () => {
+  const keyId = `key-denied-${process.pid}`;
+  await addDenylistEntry({ scope_type: "key", scope_value: keyId, tool_name: "delete_file", reason: "no deletes from this key, ever" });
+
+  const result = await checkToolCallPreflight({ tool_name: "delete_file", target: "/tmp/anything.txt", keyId });
+  assert.equal(result.allowed, false);
+  assert.equal(result.requires_approval, undefined);
+  assert.match(result.reason, /no deletes from this key, ever/);
+});
+
+test("checkToolCallPreflight denies on a target_pattern substring match, case-insensitively", async () => {
+  const keyId = `key-denied-target-${process.pid}`;
+  await addDenylistEntry({ scope_type: "key", scope_value: keyId, tool_name: "http_request", target_pattern: "internal-admin.corp" });
+
+  const denied = await checkToolCallPreflight({ tool_name: "http_request", target: "https://INTERNAL-ADMIN.corp/reset", keyId });
+  assert.equal(denied.allowed, false);
+
+  const allowed = await checkToolCallPreflight({ tool_name: "http_request", target: "https://public-api.example.com/ping", keyId });
+  assert.equal(allowed.allowed, true);
+});
+
+test("checkToolCallPreflight most-specific-wins: a key with its own entries ignores team-level entries", async () => {
+  const team = `team-preflight-${process.pid}`;
+  const keyId = `key-preflight-specific-${process.pid}`;
+  // Team-level: this tool is denied for the whole team...
+  await addDenylistEntry({ scope_type: "team", scope_value: team, tool_name: "risky_tool" });
+  // ...but this specific key has its OWN (empty-of-that-tool) list, which
+  // takes over entirely - team-level is not consulted once the key has any
+  // entries of its own, mirroring modelAllowlist.js's scope resolution.
+  await addDenylistEntry({ scope_type: "key", scope_value: keyId, tool_name: "some_other_tool" });
+
+  const result = await checkToolCallPreflight({ tool_name: "risky_tool", target: null, keyId, team });
+  assert.equal(result.allowed, true, "key-level list (which has no entry for risky_tool) should be the only one consulted");
+});
+
+test("checkToolCallPreflight queues a pending approval for a risky command not covered by the denylist", async () => {
+  const result = await checkToolCallPreflight({
+    agent_id: `agent-approval-${process.pid}`,
+    tool_name: "bash",
+    target: "sudo rm -rf /data",
+    keyId: `key-approval-${process.pid}`,
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.requires_approval, true);
+  assert.ok(result.approval_id);
+
+  const pending = await listPendingApprovals();
+  const row = pending.find((p) => p.id === result.approval_id);
+  assert.ok(row, "expected the queued approval to appear in listPendingApprovals");
+  assert.equal(row.status, "pending_approval");
+  assert.equal(row.tool_name, "bash");
+});
+
+test("a denylist match takes priority over a risk-approval match (denied outright, never queued)", async () => {
+  const keyId = `key-deny-over-approve-${process.pid}`;
+  await addDenylistEntry({ scope_type: "key", scope_value: keyId, tool_name: "bash" });
+
+  const before = (await listPendingApprovals()).length;
+  const result = await checkToolCallPreflight({ tool_name: "bash", target: "sudo rm -rf /data", keyId });
+  assert.equal(result.allowed, false);
+  assert.equal(result.requires_approval, undefined);
+
+  const after = (await listPendingApprovals()).length;
+  assert.equal(after, before, "a flat denial must not also create an approval-queue row");
+});
+
+test("decideApproval: approving a pending row updates its status and is idempotent against a second decision", async () => {
+  const result = await checkToolCallPreflight({
+    agent_id: `agent-decide-${process.pid}`,
+    tool_name: "shutdown",
+    target: "prod-db-1",
+    keyId: `key-decide-${process.pid}`,
+  });
+  assert.equal(result.requires_approval, true);
+
+  const decided = await decideApproval({ id: result.approval_id, decision: "approved", decided_by: "admin-key-123", decision_reason: "verified with on-call" });
+  assert.equal(decided.status, "approved");
+  assert.equal(decided.decided_by, "admin-key-123");
+  assert.ok(decided.decided_at);
+
+  // A second decision on the same row is a no-op, not an overwrite -
+  // deciding is a one-way action.
+  const secondAttempt = await decideApproval({ id: result.approval_id, decision: "denied", decided_by: "someone-else" });
+  assert.equal(secondAttempt.status, "approved", "the original decision must not be overwritten by a later call");
+  assert.equal(secondAttempt.decided_by, "admin-key-123");
+});
+
+test("decideApproval returns null for an id that doesn't exist", async () => {
+  const result = await decideApproval({ id: 999999999, decision: "approved", decided_by: "admin" });
+  assert.equal(result, null);
+});
+
+test("decideApproval rejects an invalid decision value", async () => {
+  await assert.rejects(() => decideApproval({ id: 1, decision: "maybe", decided_by: "admin" }), /decision must be/);
+});
+
+test("the post-hoc logToolCall/tool_calls audit path is unchanged by A7 - still logs and flags exactly as before", async () => {
+  const agent = `agent-posthoc-unchanged-${process.pid}`;
+  const result = await logToolCall({ agent_id: agent, tool_name: "bash", target: "sudo shutdown -h now" });
+  assert.equal(result.flagged, true);
+  assert.ok(result.reasons.some((r) => r.startsWith("risky-command:")));
+  // logToolCall never consults the denylist or approval queue - it's a
+  // pure post-hoc record of what already happened, exactly as it was
+  // before A7 (see toolCallGovernance.js's header comment).
+  const rows = await listToolCalls({ agent_id: agent });
+  assert.equal(rows.length, 1);
 });

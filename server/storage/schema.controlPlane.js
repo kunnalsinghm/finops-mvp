@@ -64,6 +64,15 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at TEXT NOT NULL DEFAULT NOW()::text
 );
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allow_background INTEGER NOT NULL DEFAULT 0;
+-- A6: automated compromised-key response - see migrations/0007_api_keys_
+-- rotation_recommended.js (single-tenant equivalent) for the full reasoning.
+-- Multi-tenant's api_keys row lives here in the control plane, not in any
+-- tenant's own schema, and this file re-applies its whole idempotent SQL
+-- blob on every pool init rather than going through the versioned
+-- migrator - so unlike single-tenant, this is just a column addition,
+-- no separate migration file needed.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotation_recommended INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotation_reason TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_control_plane_keys_tenant ON api_keys(tenant_id);
 

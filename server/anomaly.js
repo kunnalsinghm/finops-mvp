@@ -52,6 +52,7 @@
 const defaultDb = require("./storage");
 const { sinceDaysAgo, dayFloorExpr, todayClause } = require("./storage/dialectSql");
 const { logAlert } = require("./governance");
+const { captureFlaggedTestCase } = require("./flaggedTestCases");
 
 // ---- #1: single-event cost spike --------------------------------------
 
@@ -191,6 +192,20 @@ async function checkRetryRateAnomaly({ agent_id, db = defaultDb }) {
     const message = `Retry-rate anomaly: agent '${agent_id}' needed more than one attempt on ${retriedTasks}/${totalTasks} tasks (${Math.round(retryRate * 100)}%).`;
     await logAlert("anomaly", message, db);
     await markFiredAnomaly("agent", agent_id, period, "retry-rate", db);
+    // A8: cheap groundwork for Compass's production-trace-to-test-case
+    // pipeline - a high retry rate is itself a signal worth a human
+    // glance later, even without a specific prompt/response pair (this is
+    // an aggregate, agent-level signal, not a single-request one).
+    try {
+      await captureFlaggedTestCase({
+        source: "high-retry-rate",
+        reason: message,
+        raw: { agent_id, retried_tasks: retriedTasks, total_tasks: totalTasks, retry_rate: retryRate },
+        db,
+      });
+    } catch (err) {
+      console.warn(`[anomaly] Failed to capture flagged test case for retry-rate anomaly: ${err.message}`);
+    }
     return { flagged: true, type: "retry-rate", message, retry_rate: Math.round(retryRate * 1000) / 1000 };
   }
   return null;

@@ -13,10 +13,15 @@
 //   - Fire-and-forget, AFTER the primary response is already sent to the
 //     client - shadow testing must never add latency or a failure mode to
 //     real traffic. See routes/proxy.js for the call site.
-//   - Non-streaming only (v1 scope). Shadow-testing a stream would require
-//     buffering both streams to compare them, which reintroduces the
-//     latency this is trying to avoid. A streaming request is simply never
-//     eligible for shadow testing.
+//   - A8 UPDATE: streaming is now supported. When the primary request was
+//     streaming, the shadow call is ALSO made as a streaming request (same
+//     accumulate-then-compare shape as routes/proxy.js's own primary-path
+//     loop, via the shared parsers in sseParsing.js), so the two are
+//     apples-to-apples - streaming and non-streaming responses from the
+//     same model can render slightly differently (e.g. markdown chunking),
+//     so comparing a streamed primary against a non-streamed shadow call
+//     would bias the similarity score for reasons that have nothing to do
+//     with model quality.
 //   - Costs here are REAL (both models actually got called) but are
 //     deliberately NOT written to usage_events/budgets - see the db.js
 //     schema comment on shadow_comparisons for why.
@@ -25,21 +30,39 @@
 //     second implementation. Same honest caveat applies: this is lexical
 //     overlap, not true semantic understanding - a useful signal, not a
 //     replacement for a human reading sample outputs.
+//   - A8 UPDATE: an OPTIONAL LLM-as-judge layer is now available, gated
+//     behind FINOPS_SHADOW_JUDGE_MODEL. When set, a third call asks that
+//     model to score how semantically equivalent the primary and shadow
+//     responses are (0-1). This is ADDITIVE to the always-on lexical
+//     score, stored alongside it in a separate column - never a
+//     replacement, since the judge call is itself an LLM call with its own
+//     failure modes (cost, latency, the judge's own unreliability) that a
+//     deployment might reasonably not want to pay for by default. Uses the
+//     SAME endpoint/providerKey already available for the shadow call
+//     itself, so there's no separate judge-provider configuration surface.
 //   - Sampling is opt-in and rate-controlled (X-Shadow-Test-Sample-Rate)
-//     because every sampled request calls TWO models instead of one - the
-//     whole point is spending a little to find out whether you can spend
-//     a lot less, but that "little" is real money if left on unbounded.
+//     because every sampled request calls TWO (or three, with a judge)
+//     models instead of one - the whole point is spending a little to find
+//     out whether you can spend a lot less, but that "little" is real
+//     money if left on unbounded.
 
 const defaultDb = require("./storage");
 const { sinceDaysAgo } = require("./storage/dialectSql");
 const { computeCost } = require("./pricing");
 const { CHEAPER_ALTERNATIVES } = require("./modelAlternatives");
 const { tokenize, termFrequency, cosineSimilarityLocal } = require("./semanticCache");
+const { parseStreamUsage, parseStreamText } = require("./sseParsing");
+const { captureFlaggedTestCase } = require("./flaggedTestCases");
 
 const DEFAULT_SAMPLE_RATE = clamp01(Number(process.env.FINOPS_SHADOW_TEST_SAMPLE_RATE), 1.0);
 const MIN_SAMPLES_FOR_CONFIDENCE = Number(process.env.FINOPS_SHADOW_TEST_MIN_SAMPLES) || 5;
 const SIMILARITY_CONFIDENCE_THRESHOLD =
   Number(process.env.FINOPS_SHADOW_TEST_SIMILARITY_THRESHOLD) || 0.8;
+// A8: separate, lower threshold - "confident this switch is safe" (above)
+// and "worth capturing as a review case" (below) are different questions.
+// A similarity this low on ANY pair is worth a human glance regardless of
+// whether that pair is even a serious cost-switch candidate.
+const FLAG_SIMILARITY_BELOW = clamp01(Number(process.env.FINOPS_SHADOW_FLAG_SIMILARITY_THRESHOLD), 0.5);
 
 function clamp01(n, fallback) {
   if (!Number.isFinite(n)) return fallback;
@@ -53,8 +76,8 @@ async function insertShadowRow(row, db = defaultDb) {
   await db.run(
     `INSERT INTO shadow_comparisons
        (provider, primary_model, shadow_model, team, primary_cost_usd, shadow_cost_usd,
-        similarity, primary_length, shadow_length, length_delta_pct, shadow_error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        similarity, primary_length, shadow_length, length_delta_pct, shadow_error, judge_score, streamed)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       row.provider,
       row.primary_model,
@@ -67,6 +90,8 @@ async function insertShadowRow(row, db = defaultDb) {
       row.shadow_length,
       row.length_delta_pct,
       row.shadow_error,
+      row.judge_score,
+      row.streamed ? 1 : 0,
     ]
   );
 }
@@ -96,20 +121,75 @@ function extractResponseText(providerName, responseJson) {
   return "";
 }
 
+// A8: builds the judge request body in the same provider-specific shape
+// the primary/shadow calls already use - no third "judge provider" concept,
+// the judge IS a normal chat/messages call to FINOPS_SHADOW_JUDGE_MODEL on
+// the same provider. Asks for a single number back rather than free-form
+// commentary specifically so parsing it doesn't need another LLM call.
+function buildJudgeRequestBody(providerName, judgeModel, primaryText, shadowText) {
+  const prompt =
+    "You are grading whether two AI assistant responses to the SAME user request are semantically " +
+    "equivalent - would a user be equally satisfied with either one? Ignore differences in phrasing, " +
+    "formatting, or length; judge only whether the substance and correctness match.\n\n" +
+    `RESPONSE A:\n${primaryText}\n\nRESPONSE B:\n${shadowText}\n\n` +
+    "Reply with ONLY a single number from 0 to 1 (e.g. \"0.9\"), where 1.0 means fully equivalent " +
+    "and 0.0 means completely different in substance. No other text.";
+
+  if (providerName === "openai") {
+    return { model: judgeModel, messages: [{ role: "user", content: prompt }] };
+  }
+  return { model: judgeModel, max_tokens: 20, messages: [{ role: "user", content: prompt }] };
+}
+
+// Never throws - a judge failure (bad response, network error, unparseable
+// score) degrades to `null`, exactly like a shadow-model failure degrades
+// to shadow_error, rather than ever blocking or corrupting the row that
+// DOES have a valid lexical similarity score.
+async function callLlmJudge({ providerName, endpoint, providerKey, judgeModel, primaryText, shadowText }) {
+  try {
+    const res = await fetch(endpoint.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...endpoint.authHeader(providerKey) },
+      body: JSON.stringify(buildJudgeRequestBody(providerName, judgeModel, primaryText, shadowText)),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json) return null;
+
+    const text = extractResponseText(providerName, json).trim();
+    const match = text.match(/-?\d+(\.\d+)?/);
+    if (!match) return null;
+    const score = Number(match[0]);
+    if (!Number.isFinite(score)) return null;
+    return Math.round(clamp01(score, null) * 1000) / 1000;
+  } catch {
+    return null;
+  }
+}
+
 // Fire-and-forget: call this AFTER the primary response has already been
 // sent to the client. Never throws - any failure is recorded in the row's
 // shadow_error column rather than propagated, since a shadow test failing
 // must never surface as an error to real traffic.
+//
+// Non-streaming callers pass primaryResponseJson (unchanged from before
+// A8). Streaming callers (A8) pass primaryResponseText directly - the
+// primary response was already streamed and torn down to plain text by
+// routes/proxy.js via sseParsing.js before this is even called, so there's
+// no JSON body to re-parse here - and set streamed: true so the shadow
+// call is ALSO made as a stream, for a fair comparison (see header).
 async function runShadowTest({
   providerName,
   primaryModel,
   primaryRequestBody,
   primaryResponseJson,
+  primaryResponseText,
   primaryCostUsd,
   providerKey,
   team,
   endpoint,
   sampleRate = DEFAULT_SAMPLE_RATE,
+  streamed = false,
+  judgeModel = process.env.FINOPS_SHADOW_JUDGE_MODEL || null,
   db = defaultDb,
 } = {}) {
   const alt = CHEAPER_ALTERNATIVES[`${providerName}/${primaryModel}`];
@@ -117,9 +197,18 @@ async function runShadowTest({
 
   if (Math.random() >= clamp01(sampleRate, DEFAULT_SAMPLE_RATE)) return; // sampled out
 
+  const primaryText = streamed ? primaryResponseText || "" : extractResponseText(providerName, primaryResponseJson);
+
   const shadowBody = { ...primaryRequestBody, model: alt.model };
-  delete shadowBody.stream;
-  delete shadowBody.stream_options;
+  if (streamed) {
+    shadowBody.stream = true;
+    if (providerName === "openai") {
+      shadowBody.stream_options = { ...(shadowBody.stream_options || {}), include_usage: true };
+    }
+  } else {
+    delete shadowBody.stream;
+    delete shadowBody.stream_options;
+  }
 
   const row = {
     provider: providerName,
@@ -133,25 +222,56 @@ async function runShadowTest({
     shadow_length: null,
     length_delta_pct: null,
     shadow_error: null,
+    judge_score: null,
+    streamed,
   };
 
+  let shadowText = "";
+
   try {
-    const res = await fetch(endpoint.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...endpoint.authHeader(providerKey) },
-      body: JSON.stringify(shadowBody),
-    });
-    const json = await res.json().catch(() => null);
-
-    if (!res.ok || !json) {
-      row.shadow_error = `HTTP ${res.status}${json?.error?.message ? `: ${json.error.message}` : ""}`;
+    if (streamed) {
+      const res = await fetch(endpoint.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...endpoint.authHeader(providerKey) },
+        body: JSON.stringify(shadowBody),
+      });
+      if (!res.ok || !res.body) {
+        const errJson = await res.json().catch(() => null);
+        row.shadow_error = `HTTP ${res.status}${errJson?.error?.message ? `: ${errJson.error.message}` : ""}`;
+      } else {
+        // Same accumulate-the-whole-buffer-then-parse shape as
+        // routes/proxy.js's own primary-stream loop - there's no client to
+        // pipe chunks to here, this is purely for comparison, so there's
+        // no reason to process the stream incrementally.
+        let fullBuffer = "";
+        const decoder = new TextDecoder();
+        for await (const chunk of res.body) {
+          fullBuffer += decoder.decode(chunk, { stream: true });
+        }
+        const { input_tokens, output_tokens } = parseStreamUsage(providerName, fullBuffer);
+        shadowText = parseStreamText(providerName, fullBuffer);
+        const { cost_usd } = await computeCost({ provider: providerName, model: alt.model, input_tokens, output_tokens, db });
+        row.shadow_cost_usd = cost_usd ?? 0;
+      }
     } else {
-      const { input_tokens, output_tokens } = endpoint.extractUsage(json);
-      const { cost_usd } = await computeCost({ provider: providerName, model: alt.model, input_tokens, output_tokens, db });
-      row.shadow_cost_usd = cost_usd ?? 0;
+      const res = await fetch(endpoint.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...endpoint.authHeader(providerKey) },
+        body: JSON.stringify(shadowBody),
+      });
+      const json = await res.json().catch(() => null);
 
-      const primaryText = extractResponseText(providerName, primaryResponseJson);
-      const shadowText = extractResponseText(providerName, json);
+      if (!res.ok || !json) {
+        row.shadow_error = `HTTP ${res.status}${json?.error?.message ? `: ${json.error.message}` : ""}`;
+      } else {
+        const { input_tokens, output_tokens } = endpoint.extractUsage(json);
+        const { cost_usd } = await computeCost({ provider: providerName, model: alt.model, input_tokens, output_tokens, db });
+        row.shadow_cost_usd = cost_usd ?? 0;
+        shadowText = extractResponseText(providerName, json);
+      }
+    }
+
+    if (!row.shadow_error) {
       row.primary_length = primaryText.length;
       row.shadow_length = shadowText.length;
       row.length_delta_pct =
@@ -162,6 +282,27 @@ async function runShadowTest({
         Math.round(
           cosineSimilarityLocal(termFrequency(tokenize(primaryText)), termFrequency(tokenize(shadowText))) * 1000
         ) / 1000;
+
+      if (judgeModel) {
+        row.judge_score = await callLlmJudge({ providerName, endpoint, providerKey, judgeModel, primaryText, shadowText });
+      }
+
+      if (row.similarity !== null && row.similarity < FLAG_SIMILARITY_BELOW) {
+        try {
+          await captureFlaggedTestCase({
+            source: "shadow-low-similarity",
+            provider: providerName,
+            model: primaryModel,
+            prompt: JSON.stringify(primaryRequestBody?.messages || primaryRequestBody || {}),
+            response: primaryText,
+            reason: `shadow comparison against ${alt.model} scored similarity ${row.similarity} (below ${FLAG_SIMILARITY_BELOW})`,
+            raw: { shadow_model: alt.model, similarity: row.similarity, judge_score: row.judge_score, streamed },
+            db,
+          });
+        } catch (err) {
+          console.warn(`[shadowTest] Failed to capture flagged test case: ${err.message}`);
+        }
+      }
     }
   } catch (err) {
     row.shadow_error = err.message;
@@ -243,7 +384,9 @@ module.exports = {
   getShadowTestSummary,
   getShadowComparisons,
   extractResponseText,
+  callLlmJudge,
   DEFAULT_SAMPLE_RATE,
   MIN_SAMPLES_FOR_CONFIDENCE,
   SIMILARITY_CONFIDENCE_THRESHOLD,
+  FLAG_SIMILARITY_BELOW,
 };

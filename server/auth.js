@@ -16,15 +16,62 @@ const logger = require("./logger");
 // section for the full context.
 let warnedBootstrapAccess = false;
 
+// admin also holds "audit_read" explicitly (rather than relying on route
+// handlers OR-ing it in with manage_keys) so a route can require
+// [READ_AUDIT_LOG] alone and still work correctly for admins - see
+// ROLE_PERMISSIONS.auditor below for why that permission exists as its own
+// thing instead of being aliased to "read".
 const ROLE_PERMISSIONS = {
-  admin: ["read", "write", "manage_keys", "manage_budgets", "approve_quarantine"],
+  admin: ["read", "write", "manage_keys", "manage_budgets", "approve_quarantine", "audit_read"],
   "budget-manager": ["read", "manage_budgets"],
   developer: ["read", "write"], // write = can send usage events for their own key
   viewer: ["read"],
+  // Auditor (spec role #5): read-only, but scoped to audit/compliance
+  // EVIDENCE specifically (audit_log, alerts_log, reconciliation reports,
+  // tool-call approval history, billing status) - not the broad
+  // cost/budget/dashboard "read" access a viewer has. Deliberately its own
+  // permission, "audit_read", rather than an alias for "read": aliasing
+  // would mean an auditor account could browse the same cost-by-team
+  // dashboards a viewer can, which defeats the point of a narrower,
+  // compliance-scoped role. A handful of routes below accept EITHER "read"
+  // OR "audit_read" (see routes/audit.js, alerts.js, reconcile.js,
+  // billing.js, toolCalls.js) precisely so an auditor can reach that
+  // specific narrow slice without gaining the rest of "read".
+  auditor: ["audit_read"],
+  // Agent (spec role #6): machine-scoped, for an autonomous process's own
+  // credential - not a human logging into a dashboard. Restricted to
+  // exactly the "write" permission, which is what every ingest/proxy/
+  // tool-call-logging POST route already requires (see routes/ingest.js,
+  // routes/proxy.js, routes/toolCalls.js, routes/gpuUsage.js). Explicitly
+  // does NOT get "read" (no dashboard browsing), "manage_keys" (can't
+  // create/revoke other keys), or "manage_budgets" - an agent key that's
+  // leaked or goes rogue can only ever emit usage/tool-call events, never
+  // reconfigure anything. See routes/keys.js and routes/auth.js for where
+  // this role is deliberately excluded from dashboard-account creation.
+  agent: ["write"],
 };
 
+// Every role an API key row may hold - the broadest set, since a
+// credential (not a human) is what api_keys.role describes.
+const API_KEY_ROLES = Object.keys(ROLE_PERMISSIONS);
+
+// Roles a human dashboard account (users / tenant dashboard users) may
+// hold. Deliberately excludes "agent" - an autonomous process doesn't log
+// into a dashboard with a username/password, it authenticates with an
+// api_keys row directly. See routes/auth.js's registration handlers.
+const DASHBOARD_ROLES = API_KEY_ROLES.filter((r) => r !== "agent");
+
+// `permission` may be a single permission string, or an array of
+// permissions where holding ANY ONE of them is sufficient - used by routes
+// that a broader role (e.g. "read") and a narrower, differently-scoped
+// role (e.g. "audit_read") should both be able to reach, without granting
+// the narrower role the rest of what the broader one can do.
 function hasPermission(role, permission) {
-  return (ROLE_PERMISSIONS[role] || []).includes(permission);
+  const granted = ROLE_PERMISSIONS[role] || [];
+  if (Array.isArray(permission)) {
+    return permission.some((p) => granted.includes(p));
+  }
+  return granted.includes(permission);
 }
 
 // Multi-tenant branch: completely separate code path, only ever reached
@@ -189,4 +236,4 @@ function requireAuth(permission) {
   };
 }
 
-module.exports = { requireAuth, hasPermission, ROLE_PERMISSIONS };
+module.exports = { requireAuth, hasPermission, ROLE_PERMISSIONS, API_KEY_ROLES, DASHBOARD_ROLES };

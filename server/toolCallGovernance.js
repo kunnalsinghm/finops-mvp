@@ -27,6 +27,7 @@
 const defaultDb = require("./storage");
 const { sinceDaysAgo, dayFloorExpr, todayClause } = require("./storage/dialectSql");
 const { checkRegionAllowed } = require("./dataResidency");
+const { checkToolCallDenied } = require("./toolCallDenylist");
 
 const RISKY_COMMAND_PATTERNS = [
   { name: "recursive-force-delete", regex: /rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i },
@@ -127,4 +128,86 @@ async function listToolCalls({ onlyFlagged = false, agent_id, db = defaultDb } =
   return db.all(`SELECT * FROM tool_calls ${where} ORDER BY id DESC LIMIT 200`, params);
 }
 
-module.exports = { logToolCall, listToolCalls, detectRiskyCommand, RISKY_COMMAND_PATTERNS };
+// ---- A7: pre-flight check + human-approval queue ----
+//
+// logToolCall above is inherently post-hoc: by the time it's called, the
+// agent already did whatever it's reporting. There is no way to
+// retroactively block that. What CAN be blocked is a call an orchestrator
+// makes VOLUNTARILY, before it lets its agent act - that's what this
+// endpoint is for. It's opt-in by construction (nothing forces a caller to
+// check first), but it's the only architecturally honest way to add real
+// "deny-lists" and "human approval gates" given that tool calls happen
+// outside this service's own request path (see this file's header comment).
+
+// checkToolCallPreflight({ agent_id, session_id, task_id, tool_name, target,
+//   keyId, team, db }) -> one of:
+//   { allowed: true }
+//   { allowed: false, reason }                          - denylist match
+//   { allowed: false, requires_approval: true,
+//     approval_id, reason }                              - risky, queued
+async function checkToolCallPreflight({ agent_id, session_id, task_id, tool_name, target, keyId, team, db = defaultDb }) {
+  const denylistResult = await checkToolCallDenied({ keyId, team, tool_name, target, db });
+  if (denylistResult.denied) {
+    const reason = denylistResult.matchedEntry?.reason
+      ? `denied by ${denylistResult.scope}-level deny-list: ${denylistResult.matchedEntry.reason}`
+      : `denied by ${denylistResult.scope}-level deny-list entry for tool '${tool_name}'`;
+    return { allowed: false, reason };
+  }
+
+  const riskyMatches = detectRiskyCommand(`${tool_name} ${target || ""}`);
+  if (riskyMatches.length > 0) {
+    const reason = `matches risk criteria: ${riskyMatches.join(", ")} - requires human approval before proceeding`;
+    const result = await db.run(
+      `INSERT INTO tool_call_approvals
+         (agent_id, session_id, task_id, tool_name, target, key_id, team, status, risk_reasons, raw_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?, ?) RETURNING id`,
+      [
+        agent_id || null,
+        session_id || null,
+        task_id || null,
+        tool_name,
+        target || null,
+        keyId || null,
+        team || null,
+        JSON.stringify(riskyMatches),
+        JSON.stringify({ agent_id, session_id, task_id, tool_name, target }),
+      ]
+    );
+    return { allowed: false, requires_approval: true, approval_id: result.lastInsertRowid, reason };
+  }
+
+  return { allowed: true };
+}
+
+async function listPendingApprovals(db = defaultDb) {
+  return db.all("SELECT * FROM tool_call_approvals WHERE status = 'pending_approval' ORDER BY id ASC");
+}
+
+// decision must be 'approved' or 'denied'. Idempotent-safe in the sense
+// that deciding an already-decided row is refused (returns null) rather
+// than silently overwriting a prior decision - an approval decision is
+// itself a durable record, not a mutable flag.
+async function decideApproval({ id, decision, decided_by, decision_reason = null, db = defaultDb }) {
+  if (!["approved", "denied"].includes(decision)) {
+    throw new Error("decision must be 'approved' or 'denied'");
+  }
+  const existing = await db.get("SELECT * FROM tool_call_approvals WHERE id = ?", [id]);
+  if (!existing) return null;
+  if (existing.status !== "pending_approval") return existing; // already decided - no-op, return as-is
+
+  await db.run(
+    "UPDATE tool_call_approvals SET status = ?, decided_at = ?, decided_by = ?, decision_reason = ? WHERE id = ?",
+    [decision, new Date().toISOString(), decided_by, decision_reason, id]
+  );
+  return db.get("SELECT * FROM tool_call_approvals WHERE id = ?", [id]);
+}
+
+module.exports = {
+  logToolCall,
+  listToolCalls,
+  detectRiskyCommand,
+  RISKY_COMMAND_PATTERNS,
+  checkToolCallPreflight,
+  listPendingApprovals,
+  decideApproval,
+};

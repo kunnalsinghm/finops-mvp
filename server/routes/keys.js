@@ -2,14 +2,17 @@
 
 const express = require("express");
 const crypto = require("crypto");
-const { requireAuth } = require("../auth");
+const { requireAuth, API_KEY_ROLES } = require("../auth");
 const { quarantineKey, approveKey } = require("../governance");
 const { logAudit } = require("../audit");
 const { checkApiKeyQuota } = require("../tenantQuota");
 const tenancy = require("../tenancy");
 const router = express.Router();
 
-const KEY_COLUMNS = "id, key_id, label, role, team, allow_background, status, quarantine_reason, created_at";
+// A6: rotation_recommended/rotation_reason included so the advisory set by
+// fraudDetection.js's checkKeyFraudSignals is visible directly on the key
+// (GET /api/keys, GET /api/keys/:keyId), not just buried in alerts_log.
+const KEY_COLUMNS = "id, key_id, label, role, team, allow_background, status, quarantine_reason, rotation_recommended, rotation_reason, created_at";
 
 function generateKey() {
   return "fk_" + crypto.randomBytes(20).toString("hex");
@@ -39,7 +42,7 @@ router.post("/", requireAuth("manage_keys"), async (req, res) => {
   if (typeof allow_background !== "boolean") {
     return res.status(400).json({ error: "allow_background must be true or false" });
   }
-  if (!["admin", "budget-manager", "developer", "viewer"].includes(role)) {
+  if (!API_KEY_ROLES.includes(role)) {
     return res.status(400).json({ error: "invalid role" });
   }
 
@@ -166,6 +169,30 @@ router.post("/:keyId/approve", requireAuth("approve_quarantine"), async (req, re
   } catch (err) {
     res.status(404).json({ error: err.message });
   }
+});
+
+// A6: clears the "rotation recommended" advisory (fraudDetection.js) once
+// an admin has reviewed it - either they rotated the key out of band and
+// this is now stale, or they judged the signal a false positive. Distinct
+// from /approve above, which reverses an actual quarantine (status change);
+// this only clears an advisory flag, the key's status/ability to make
+// requests is untouched either way.
+router.post("/:keyId/dismiss-rotation", requireAuth("approve_quarantine"), async (req, res) => {
+  try {
+    await assertOwnsKey(req, req.params.keyId);
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({ error: err.message });
+  }
+  const existing = await req.controlPlaneDb.get("SELECT key_id FROM api_keys WHERE key_id = ?", [req.params.keyId]);
+  if (!existing) {
+    return res.status(404).json({ error: `No key found with id '${req.params.keyId}'` });
+  }
+  await req.controlPlaneDb.run(
+    "UPDATE api_keys SET rotation_recommended = 0, rotation_reason = NULL WHERE key_id = ?",
+    [req.params.keyId]
+  );
+  await logAudit(req.apiKey.key_id, "key.dismiss_rotation", req.params.keyId, {}, req.db);
+  res.json({ ok: true });
 });
 
 router.post("/:keyId/revoke", requireAuth("manage_keys"), async (req, res) => {

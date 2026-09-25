@@ -14,7 +14,7 @@
 const express = require("express");
 const db = require("../storage");
 const tenancy = require("../tenancy");
-const { requireAuth } = require("../auth");
+const { requireAuth, DASHBOARD_ROLES } = require("../auth");
 const { createUser, verifyLogin, createSession, destroySession, resetPassword } = require("../users");
 const {
   createTenantUser,
@@ -42,6 +42,12 @@ if (tenancy.MULTI_TENANT) {
     }
     if (password.length < 8) {
       return res.status(400).json({ error: "password must be at least 8 characters" });
+    }
+    // "agent" is deliberately excluded from DASHBOARD_ROLES - it's a
+    // machine-scoped api_keys.role value, not something a human dashboard
+    // account should ever hold (see auth.js's DASHBOARD_ROLES comment).
+    if (!DASHBOARD_ROLES.includes(role)) {
+      return res.status(400).json({ error: `invalid role - must be one of: ${DASHBOARD_ROLES.join(", ")}` });
     }
     try {
       await createTenantUser({ tenant_id: req.tenantId, username, password, role, db: req.controlPlaneDb });
@@ -106,6 +112,12 @@ if (tenancy.MULTI_TENANT) {
     }
     if (password.length < 8) {
       return res.status(400).json({ error: "password must be at least 8 characters" });
+    }
+    // "agent" is deliberately excluded from DASHBOARD_ROLES - it's a
+    // machine-scoped api_keys.role value, not something a human dashboard
+    // account should ever hold (see auth.js's DASHBOARD_ROLES comment).
+    if (!DASHBOARD_ROLES.includes(role)) {
+      return res.status(400).json({ error: `invalid role - must be one of: ${DASHBOARD_ROLES.join(", ")}` });
     }
 
     const anyUsers = await db.get("SELECT COUNT(*) AS n FROM users");

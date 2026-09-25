@@ -296,3 +296,285 @@ test("getShadowTestSummary groups by provider/primary/shadow model", async () =>
   assert.ok(pair, "expected a summary row for openai gpt-4o -> gpt-4o-mini");
   assert.ok(pair.sample_count > 0);
 });
+
+// ---- A8: streaming shadow tests, LLM-as-judge, flagged_test_cases ----
+
+const { callLlmJudge } = require("../server/shadowTest");
+const { listFlaggedTestCases } = require("../server/flaggedTestCases");
+
+function sseBody(lines) {
+  const text = lines.map((l) => `data: ${typeof l === "string" ? l : JSON.stringify(l)}\n\n`).join("") + "data: [DONE]\n\n";
+  const encoder = new TextEncoder();
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield encoder.encode(text);
+    },
+  };
+}
+
+function openaiStreamChunks(text, { prompt_tokens = 10, completion_tokens = 5 } = {}) {
+  const chunks = text.split(" ").map((word, i) => ({ choices: [{ delta: { content: (i > 0 ? " " : "") + word } }] }));
+  chunks.push({ choices: [{ delta: {} }], usage: { prompt_tokens, completion_tokens } });
+  return chunks;
+}
+
+function anthropicStreamChunks(text, { input_tokens = 10, output_tokens = 5 } = {}) {
+  return [
+    { type: "message_start", message: { usage: { input_tokens } } },
+    ...text.split(" ").map((word, i) => ({ type: "content_block_delta", delta: { text: (i > 0 ? " " : "") + word } })),
+    { type: "message_delta", usage: { output_tokens } },
+  ];
+}
+
+test("runShadowTest (streamed): makes a streaming shadow call and compares reassembled text against primaryResponseText", async (t) => {
+  t.mock.method(global, "fetch", async (url, opts) => {
+    assert.equal(url, fakeOpenAIEndpoint.url);
+    const body = JSON.parse(opts.body);
+    assert.equal(body.model, "gpt-4o-mini");
+    assert.equal(body.stream, true, "the shadow call must ALSO be a streaming request when the primary was");
+    assert.deepEqual(body.stream_options, { include_usage: true });
+    return { ok: true, body: sseBody(openaiStreamChunks("primary answer text here")) };
+  });
+
+  await runShadowTest({
+    providerName: "openai",
+    primaryModel: "gpt-4o",
+    primaryRequestBody: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }], stream: true },
+    primaryResponseText: "primary answer text here",
+    primaryCostUsd: 0.05,
+    providerKey: "sk-test",
+    team: "streaming-test",
+    endpoint: fakeOpenAIEndpoint,
+    sampleRate: 1.0,
+    streamed: true,
+  });
+
+  const rows = await getShadowComparisons({ limit: 10 });
+  const row = rows.find((r) => r.team === "streaming-test");
+  assert.ok(row, "expected a shadow_comparisons row from the streaming path");
+  assert.equal(Number(row.streamed), 1);
+  assert.equal(row.shadow_error, null);
+  assert.equal(row.similarity, 1, "identical reassembled text on both sides should score similarity 1");
+  assert.ok(row.shadow_cost_usd >= 0);
+});
+
+test("runShadowTest (streamed): Anthropic content_block_delta reassembly also works, and a differing shadow scores lower similarity", async (t) => {
+  t.mock.method(global, "fetch", async () => ({
+    ok: true,
+    body: sseBody(anthropicStreamChunks("something totally unrelated about giraffes")),
+  }));
+
+  await runShadowTest({
+    providerName: "anthropic",
+    primaryModel: "claude-opus",
+    primaryRequestBody: { model: "claude-opus", messages: [], stream: true },
+    primaryResponseText: "the quarterly revenue figures are attached",
+    primaryCostUsd: 0.1,
+    providerKey: "sk-ant-test",
+    team: "streaming-anthropic-test",
+    endpoint: fakeAnthropicEndpoint,
+    sampleRate: 1.0,
+    streamed: true,
+  });
+
+  const rows = await getShadowComparisons({ limit: 10 });
+  const row = rows.find((r) => r.team === "streaming-anthropic-test");
+  assert.ok(row);
+  assert.equal(Number(row.streamed), 1);
+  assert.ok(row.similarity < 0.5);
+});
+
+test("runShadowTest (streamed): an HTTP error on the streaming shadow call is recorded as shadow_error, not thrown", async (t) => {
+  t.mock.method(global, "fetch", async () => ({
+    ok: false,
+    status: 503,
+    body: null,
+    json: async () => ({ error: { message: "overloaded" } }),
+  }));
+
+  await assert.doesNotReject(
+    runShadowTest({
+      providerName: "openai",
+      primaryModel: "gpt-4o",
+      primaryRequestBody: { model: "gpt-4o", messages: [], stream: true },
+      primaryResponseText: "ok",
+      primaryCostUsd: 0.02,
+      providerKey: "sk-test",
+      team: "streaming-error-test",
+      endpoint: fakeOpenAIEndpoint,
+      sampleRate: 1.0,
+      streamed: true,
+    })
+  );
+
+  const rows = await getShadowComparisons({ limit: 10 });
+  const row = rows.find((r) => r.team === "streaming-error-test");
+  assert.ok(row);
+  assert.match(row.shadow_error, /503/);
+});
+
+test("the non-streaming path is unaffected by A8 - streamed defaults to false and the column records 0", async (t) => {
+  t.mock.method(global, "fetch", async () => ({ ok: true, json: async () => primaryOpenAIResponse("same text") }));
+
+  await runShadowTest({
+    providerName: "openai",
+    primaryModel: "gpt-4o",
+    primaryRequestBody: { model: "gpt-4o", messages: [] },
+    primaryResponseJson: primaryOpenAIResponse("same text"),
+    primaryCostUsd: 0.01,
+    providerKey: "sk-test",
+    team: "non-streaming-unaffected-test",
+    endpoint: fakeOpenAIEndpoint,
+    sampleRate: 1.0,
+  });
+
+  const rows = await getShadowComparisons({ limit: 10 });
+  const row = rows.find((r) => r.team === "non-streaming-unaffected-test");
+  assert.ok(row);
+  assert.equal(Number(row.streamed), 0);
+  assert.equal(row.judge_score, null, "no FINOPS_SHADOW_JUDGE_MODEL configured for this call - judge_score must stay null");
+});
+
+// ---- LLM-as-judge ----
+
+test("callLlmJudge parses a plain numeric score out of the judge model's reply", async (t) => {
+  t.mock.method(global, "fetch", async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    assert.equal(body.model, "gpt-4o");
+    assert.match(body.messages[0].content, /RESPONSE A:/);
+    return { ok: true, json: async () => primaryOpenAIResponse("0.85") };
+  });
+
+  const score = await callLlmJudge({
+    providerName: "openai",
+    endpoint: fakeOpenAIEndpoint,
+    providerKey: "sk-test",
+    judgeModel: "gpt-4o",
+    primaryText: "the answer is 42",
+    shadowText: "42 is the answer",
+  });
+  assert.equal(score, 0.85);
+});
+
+test("callLlmJudge returns null (never throws) on an unparseable reply, an HTTP error, or a network exception", async (t) => {
+  t.mock.method(global, "fetch", async () => ({ ok: true, json: async () => primaryOpenAIResponse("I cannot determine this.") }));
+  assert.equal(
+    await callLlmJudge({ providerName: "openai", endpoint: fakeOpenAIEndpoint, providerKey: "k", judgeModel: "gpt-4o", primaryText: "a", shadowText: "b" }),
+    null
+  );
+
+  t.mock.method(global, "fetch", async () => ({ ok: false, status: 500, json: async () => null }));
+  assert.equal(
+    await callLlmJudge({ providerName: "openai", endpoint: fakeOpenAIEndpoint, providerKey: "k", judgeModel: "gpt-4o", primaryText: "a", shadowText: "b" }),
+    null
+  );
+
+  t.mock.method(global, "fetch", async () => { throw new Error("boom"); });
+  assert.equal(
+    await callLlmJudge({ providerName: "openai", endpoint: fakeOpenAIEndpoint, providerKey: "k", judgeModel: "gpt-4o", primaryText: "a", shadowText: "b" }),
+    null
+  );
+});
+
+test("runShadowTest calls the judge and stores judge_score ADDITIVELY alongside the always-on lexical similarity, only when a judge model is configured", async (t) => {
+  let call = 0;
+  t.mock.method(global, "fetch", async (url, opts) => {
+    call++;
+    const body = JSON.parse(opts.body);
+    if (body.model === "gpt-4o-mini") {
+      // the shadow model call itself
+      return { ok: true, json: async () => primaryOpenAIResponse("a reasonably similar answer") };
+    }
+    // the judge call
+    assert.equal(body.model, "gpt-4o-judge");
+    return { ok: true, json: async () => primaryOpenAIResponse("0.72") };
+  });
+
+  await runShadowTest({
+    providerName: "openai",
+    primaryModel: "gpt-4o",
+    primaryRequestBody: { model: "gpt-4o", messages: [] },
+    primaryResponseJson: primaryOpenAIResponse("a similar answer indeed"),
+    primaryCostUsd: 0.01,
+    providerKey: "sk-test",
+    team: "judge-test",
+    endpoint: fakeOpenAIEndpoint,
+    sampleRate: 1.0,
+    judgeModel: "gpt-4o-judge",
+  });
+
+  assert.equal(call, 2, "expected exactly two fetch calls: the shadow model, then the judge");
+  const rows = await getShadowComparisons({ limit: 10 });
+  const row = rows.find((r) => r.team === "judge-test");
+  assert.ok(row);
+  assert.ok(row.similarity !== null, "the lexical similarity score must still be computed");
+  assert.equal(row.judge_score, 0.72);
+});
+
+test("runShadowTest does NOT call the judge when FINOPS_SHADOW_JUDGE_MODEL / judgeModel is not set (default off)", async (t) => {
+  let calls = 0;
+  t.mock.method(global, "fetch", async () => {
+    calls++;
+    return { ok: true, json: async () => primaryOpenAIResponse("same") };
+  });
+
+  await runShadowTest({
+    providerName: "openai",
+    primaryModel: "gpt-4o",
+    primaryRequestBody: { model: "gpt-4o", messages: [] },
+    primaryResponseJson: primaryOpenAIResponse("same"),
+    primaryCostUsd: 0.01,
+    providerKey: "sk-test",
+    team: "no-judge-test",
+    endpoint: fakeOpenAIEndpoint,
+    sampleRate: 1.0,
+  });
+
+  assert.equal(calls, 1, "only the shadow model call should happen - no judge call by default");
+});
+
+// ---- flagged_test_cases capture ----
+
+test("runShadowTest captures a flagged test case when similarity falls below FLAG_SIMILARITY_BELOW", async (t) => {
+  t.mock.method(global, "fetch", async () => ({
+    ok: true,
+    json: async () => primaryOpenAIResponse("completely unrelated giraffe zoo elephant content"),
+  }));
+
+  await runShadowTest({
+    providerName: "openai",
+    primaryModel: "gpt-4o",
+    primaryRequestBody: { model: "gpt-4o", messages: [{ role: "user", content: "what were Q3 revenues" }] },
+    primaryResponseJson: primaryOpenAIResponse("quarterly revenue figures attached for review"),
+    primaryCostUsd: 0.01,
+    providerKey: "sk-test",
+    team: "flag-capture-test",
+    endpoint: fakeOpenAIEndpoint,
+    sampleRate: 1.0,
+  });
+
+  const flagged = await listFlaggedTestCases({ source: "shadow-low-similarity" });
+  const entry = flagged.find((f) => f.model === "gpt-4o" && f.reason.includes("gpt-4o-mini"));
+  assert.ok(entry, "expected a flagged_test_cases row for the low-similarity shadow comparison");
+  assert.equal(entry.source, "shadow-low-similarity");
+  assert.equal(entry.provider, "openai");
+});
+
+test("runShadowTest does NOT capture a flagged test case when similarity is high", async (t) => {
+  t.mock.method(global, "fetch", async () => ({ ok: true, json: async () => primaryOpenAIResponse("identical text") }));
+
+  const before = (await listFlaggedTestCases({ source: "shadow-low-similarity" })).length;
+  await runShadowTest({
+    providerName: "openai",
+    primaryModel: "gpt-4o",
+    primaryRequestBody: { model: "gpt-4o", messages: [] },
+    primaryResponseJson: primaryOpenAIResponse("identical text"),
+    primaryCostUsd: 0.01,
+    providerKey: "sk-test",
+    team: "no-flag-test",
+    endpoint: fakeOpenAIEndpoint,
+    sampleRate: 1.0,
+  });
+  const after = (await listFlaggedTestCases({ source: "shadow-low-similarity" })).length;
+  assert.equal(after, before, "a high-similarity comparison must not add a flagged test case");
+});
