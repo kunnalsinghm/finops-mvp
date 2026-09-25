@@ -21,3 +21,5 @@ test/*.db-shm
 test/*.db-wal
 *.patch
 _stray_autopilot_files/
+
+test/backups/
