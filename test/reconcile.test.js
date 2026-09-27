@@ -111,3 +111,76 @@ test("getReconciliationReport does not flag when tracked spend covers reported s
   const row = report.find((r) => r.day === "2026-04-01");
   assert.equal(row.flagged, false);
 });
+
+test("getReconciliationReport does not attach a category to an unflagged row", async () => {
+  await storage.run(
+    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`,
+    ["2026-04-02T10:00:00Z", "openai", "gpt-4o", 10.0]
+  );
+  await importCsv("date,provider,cost\n2026-04-02,openai,10.00");
+  const report = await getReconciliationReport({ thresholdPct: 10 });
+  const row = report.find((r) => r.day === "2026-04-02");
+  assert.equal(row.flagged, false);
+  assert.equal(row.category, null);
+});
+
+// --- A12: gap categorization ---
+
+test("flagged gap categorizes as pricing-mismatch when tracked usage in that window was unpriced/approximate", async () => {
+  // Tracked usage exists for the day, but it was recorded with the
+  // unpriced marker (proxy.js stamps this into raw_json when no pricing
+  // catalogue rate matched) - the true cost is likely understated, not
+  // genuinely missing.
+  await storage.run(
+    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged, raw_json) VALUES (?, ?, ?, ?, 1, ?)`,
+    ["2026-05-01T10:00:00Z", "openai", "some-brand-new-model", 0, JSON.stringify({ unpriced: true })]
+  );
+  await importCsv("date,provider,cost\n2026-05-01,openai,50.00");
+  const report = await getReconciliationReport({ thresholdPct: 10 });
+  const row = report.find((r) => r.day === "2026-05-01" && r.provider === "openai");
+  assert.equal(row.flagged, true);
+  assert.equal(row.category, "pricing-mismatch");
+});
+
+test("flagged gap categorizes as timing-difference when the adjacent day shows an offsetting gap", async () => {
+  // Day 1: reported $100, nothing tracked -> gap looks like $100 missing.
+  await importCsv("date,provider,cost\n2026-06-01,anthropic,100.00");
+  // Day 2 (adjacent): no CSV import at all, but $100 of tracked usage landed
+  // here instead - the classic symptom of a billing-period boundary not
+  // lining up with our UTC day boundary.
+  await storage.run(
+    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`,
+    ["2026-06-02T00:05:00Z", "anthropic", "claude-3-haiku", 100.0]
+  );
+  const report = await getReconciliationReport({ thresholdPct: 10 });
+  const row = report.find((r) => r.day === "2026-06-01" && r.provider === "anthropic");
+  assert.equal(row.flagged, true);
+  assert.equal(row.category, "timing-difference");
+});
+
+test("flagged gap categorizes as tracking-gap when nothing at all was tracked and no other signal applies", async () => {
+  // A clean outage-window shape: reported spend, zero tracked usage,
+  // no pricing markers anywhere nearby, no offsetting neighbor day.
+  await importCsv("date,provider,cost\n2026-07-01,openai,75.00");
+  const report = await getReconciliationReport({ thresholdPct: 10 });
+  const row = report.find((r) => r.day === "2026-07-01" && r.provider === "openai");
+  assert.equal(row.flagged, true);
+  assert.equal(row.tracked_cost, 0);
+  assert.equal(row.category, "tracking-gap");
+});
+
+test("flagged gap lands in unexplained when it's a genuinely ambiguous partial gap", async () => {
+  // Partial tracked coverage (not zero, so not tracking-gap), no unpriced/
+  // approximate markers (so not pricing-mismatch), and no adjacent-day
+  // offset (so not timing-difference) - the honest bucket, not a forced
+  // guess into one of the other three.
+  await storage.run(
+    `INSERT INTO usage_events (event_time, provider, model, cost_usd, tagged) VALUES (?, ?, ?, ?, 1)`,
+    ["2026-08-01T10:00:00Z", "openai", "gpt-4o", 40.0]
+  );
+  await importCsv("date,provider,cost\n2026-08-01,openai,100.00");
+  const report = await getReconciliationReport({ thresholdPct: 10 });
+  const row = report.find((r) => r.day === "2026-08-01" && r.provider === "openai");
+  assert.equal(row.flagged, true);
+  assert.equal(row.category, "unexplained");
+});

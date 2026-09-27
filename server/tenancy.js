@@ -176,6 +176,13 @@ function initControlPlane() {
     connectionString: process.env.FINOPS_POSTGRES_URL,
     options: `-c search_path=${controlPlaneSchema},public`,
   });
+  // Same reasoning as storage/postgres.js's identical handler (A11) - an
+  // idle client losing its connection must not crash the whole process.
+  controlPlanePool.on("error", (err) => {
+    require("./logger").error("Control-plane Postgres pool: an idle client emitted an error - logged, not crashing the process", {
+      error: err.message,
+    });
+  });
   controlPlaneDb = wrapPool(controlPlanePool);
   const { CONTROL_PLANE_SCHEMA_SQL } = require("./storage/schema.controlPlane");
   controlPlaneReady = (async () => {

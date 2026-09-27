@@ -41,6 +41,7 @@ const { checkMonthlyEventQuota } = require("../tenantQuota");
 const { TASK_STATUSES } = require("../agentAttribution");
 const { inferTag } = require("../smartTagging");
 const { applyTagRules } = require("../tagRules");
+const tracing = require("../tracing");
 
 const router = express.Router();
 
@@ -250,6 +251,15 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     return res.status(400).json({ error: `Unknown provider '${providerName}'. Supported: openai, anthropic` });
   }
 
+  // A13: opt-in OTel-compatible tracing (FINOPS_OTEL_ENABLED=true) around
+  // this route's ingest/attribution/policy/pricing/provider-call path. See
+  // tracing.js's header for why this is checkpoint-based rather than
+  // nested spans, and why res.on("finish") (not a try/finally around the
+  // whole handler) is what guarantees the span always gets closed despite
+  // this handler's many early-return exit points.
+  const span = tracing.startRequestSpan("proxy.request", { provider: providerName });
+  res.on("finish", () => tracing.endRequestSpan(span, { attributes: { status_code: res.statusCode } }));
+
   const providerKey = req.header("X-Provider-Key");
   if (!providerKey) {
     return res.status(400).json({ error: "Missing X-Provider-Key header (your real OpenAI/Anthropic key - forwarded only, never stored)" });
@@ -281,6 +291,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   }
   const { team: identityTeam, workloadType, backgroundExempt } = identity;
   let team = identityTeam;
+  tracing.mark(span, "ingest.identity_resolved", { team: identityTeam || null, workloadType });
 
   // Declarative tagging rules (finops.yaml `tagging_rules:`, synced via
   // POST /api/gitops/sync) fill in any of these fields that are STILL
@@ -303,6 +314,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   costCenter = resolvedTags.cost_center;
   customerId = resolvedTags.customer_id;
   featureId = resolvedTags.feature_id;
+  tracing.mark(span, "attribution.tag_rules_applied", { team, environment, projectId, costCenter });
 
   // --- Fail-closed metering (opt-in): refuse to spend money we couldn't
   // record. Pre-flight only - see the policy notes above.
@@ -458,6 +470,8 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     }
   }
 
+  tracing.mark(span, "policy.checks_passed");
+
   // --- Pricing check: know, BEFORE spending, whether this request can be costed.
   const rateInfo = await getRate(providerName, effectiveModel, req.db);
   const unpriced = !rateInfo;
@@ -474,6 +488,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     if (unpriced) setter("X-FinOps-Unpriced", "true");
     if (priceApproximate) setter("X-FinOps-Price-Approximate", "true");
   };
+  tracing.mark(span, "pricing.checked", { unpriced, priceApproximate });
 
   let outboundBody = { ...req.body, model: effectiveModel };
   if (isStreaming && providerName === "openai") {
@@ -531,6 +546,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     const ttfbTimer = setTimeout(() => controller.abort(), upstreamTimeoutMs());
     try {
       let providerRes;
+      tracing.mark(span, "provider.call_start", { streaming: true });
       try {
         providerRes = await fetch(endpoint.url, {
           method: "POST",
@@ -541,6 +557,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       } finally {
         clearTimeout(ttfbTimer);
       }
+      tracing.mark(span, "provider.call_end", { streaming: true, upstream_status: providerRes.status });
 
       if (!providerRes.ok || !providerRes.body) {
         const errJson = await providerRes.json().catch(() => ({ error: "Upstream error" }));
@@ -713,12 +730,14 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   }
 
   try {
+    tracing.mark(span, "provider.call_start", { streaming: false });
     const providerRes = await fetch(endpoint.url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...endpoint.authHeader(providerKey) },
       body: JSON.stringify(outboundBody),
       signal: AbortSignal.timeout(upstreamTimeoutMs()),
     });
+    tracing.mark(span, "provider.call_end", { streaming: false, upstream_status: providerRes.status });
 
     const responseJson = await providerRes.json();
     if (!providerRes.ok) {

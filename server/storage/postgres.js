@@ -61,6 +61,21 @@ if (schemaName) {
   poolConfig.options = `-c search_path=${schemaName},public`;
 }
 const pool = new Pool(poolConfig);
+// A11: without this, an idle client losing its connection (a Postgres
+// restart, a network blip, a managed-provider failover) emits an
+// unhandled 'error' event on the Pool - which Node's default EventEmitter
+// behavior turns into an UNCAUGHT EXCEPTION, killing the entire process
+// via server/index.js's process.on("uncaughtException") handler. That is
+// strictly worse than the readiness check this same effort adds: a
+// briefly-unreachable database should make GET /health/ready report 503,
+// not take the whole server down with it. This handler's only job is to
+// stop that crash and log it - node-postgres will transparently open a
+// fresh connection for the next query on its own; nothing else changes.
+pool.on("error", (err) => {
+  require("../logger").error("Postgres pool: an idle client emitted an error (connection lost) - logged, not crashing the process", {
+    error: err.message,
+  });
+});
 
 // Converts a `?`-placeholder query into Postgres's `$1, $2, ...` form.
 // Deliberately naive (doesn't try to parse string literals containing a

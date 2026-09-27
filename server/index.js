@@ -9,6 +9,7 @@ const helmet = require("helmet");
 const storage = require("./storage");
 const logger = require("./logger");
 const { runBackup } = require("./backup");
+const pgBackup = require("./backupPostgres");
 
 const ingestRoute = require("./routes/ingest");
 const costsRoute = require("./routes/costs");
@@ -43,6 +44,7 @@ const gpuUsageRoute = require("./routes/gpuUsage");
 const queryRoute = require("./routes/query");
 const tenantsRoute = require("./routes/tenants");
 const platformAdminRoute = require("./routes/platformAdmin");
+const healthRoute = require("./routes/health");
 const { NOT_TENANT_AWARE, blockInMultiTenant } = require("./tenantGuard");
 const tenancy = require("./tenancy");
 const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
@@ -96,6 +98,12 @@ app.use("/vendor/chart.js", express.static(path.join(__dirname, "..", "node_modu
 app.get("/health", (req, res) => {
   res.json({ ok: true, uptime_seconds: Math.round(process.uptime()) });
 });
+
+// A11: real readiness (GET /health/ready) - queries the database and
+// returns 503 with a specific reason if it can't, unlike the liveness
+// check above. See routes/health.js's header for the endpoint-shape
+// reasoning and why this is deliberately separate from /health.
+app.use("/health", healthRoute);
 
 // Route groups not yet converted to per-tenant databases are switched off in multi-tenant
 // mode (501) instead of silently serving the default schema. See tenantGuard.js.
@@ -203,7 +211,28 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-runBackup();
-setInterval(() => {
-  runBackup();
-}, 6 * 60 * 60 * 1000);
+// A10: dispatches to whichever backup implementation matches
+// FINOPS_DB_DRIVER, so an operator doesn't need to know which backend is
+// active to get automatic periodic backups. Postgres auto-scheduling is
+// deliberately restricted to single-tenant mode for now - see
+// backupPostgres.js's header for why a whole-database restore isn't safe
+// to run unattended against a database serving multiple live tenants yet.
+// A multi-tenant deployment can still run `npm run backup` manually (it
+// works mechanically, since every tenant lives in the same database), it
+// just isn't done automatically on a timer until per-tenant-schema restore
+// exists.
+function scheduleBackup() {
+  if (process.env.FINOPS_DB_DRIVER === "postgres") {
+    if (tenancy.MULTI_TENANT) {
+      logger.warn(
+        "Automatic Postgres backup scheduling is scoped to single-tenant mode for now (a whole-database restore would roll back every tenant at once) - run `npm run backup` manually, or your own pg_dump/provider-snapshot schedule, for multi-tenant deployments. See docs/backup-restore-runbook.md."
+      );
+      return;
+    }
+    pgBackup.runBackup().catch((e) => logger.error("Postgres backup failed", { error: e.message }));
+  } else {
+    runBackup();
+  }
+}
+scheduleBackup();
+setInterval(scheduleBackup, 6 * 60 * 60 * 1000);
