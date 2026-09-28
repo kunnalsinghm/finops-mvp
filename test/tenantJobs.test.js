@@ -60,7 +60,15 @@ if (!isPostgres) {
     const alertsA = await dbA.all("SELECT * FROM alerts_log");
     const alertsB = await dbB.all("SELECT * FROM alerts_log");
     assert.ok(alertsA.some((a) => a.message.includes("jobs-team")), "tenant A should have a fired budget alert");
-    assert.equal(alertsB.length, 0, "tenant B never breached its budget - it must have zero alerts, not tenant A's");
+    // The weekly briefing (weeklyBriefing.js) fires for EVERY tenant on
+    // Mondays (UTC) and logs a "weekly-briefing" alert to each one's own
+    // alerts_log. This assertion used to demand zero alerts of any kind, so
+    // it passed six days a week and failed every Monday - on the untouched
+    // baseline commit too. What it actually means to prove is that tenant A's
+    // BUDGET alert did not leak into tenant B, so ignore the briefing.
+    const alertsBNonBriefing = alertsB.filter((a) => a.type !== "weekly-briefing");
+    assert.equal(alertsBNonBriefing.length, 0, "tenant B never breached its budget - it must have no budget alerts, and certainly not tenant A's");
+    assert.ok(!alertsB.some((a) => a.message.includes("jobs-team")), "tenant A's alert text must not appear in tenant B's log");
   });
 
   test("a suspended tenant is skipped entirely - listActiveTenants excludes it", async () => {

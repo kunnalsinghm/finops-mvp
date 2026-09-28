@@ -79,17 +79,6 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotation_reason TEXT;
 -- "control plane isn't migrated by the versioned system yet" reason.
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allow_pii_bypass INTEGER NOT NULL DEFAULT 0;
 
--- P0: self-service "forgot password" + email verification - see
--- server/tenantUsers.js and the same-shaped migration 0010 for
--- single-tenant mode (server/users.js). Nullable/graceful-degradation
--- reasoning is identical to that migration's own comment.
-ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires_at TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token_hash TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token_expires_at TEXT;
-
 CREATE INDEX IF NOT EXISTS idx_control_plane_keys_tenant ON api_keys(tenant_id);
 
 CREATE TABLE IF NOT EXISTS users (
@@ -102,6 +91,19 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL DEFAULT NOW()::text,
   UNIQUE(tenant_id, username)
 );
+
+-- P0: self-service "forgot password" + email verification - see
+-- server/tenantUsers.js and the same-shaped migration 0010 for
+-- single-tenant mode (server/users.js). Nullable/graceful-degradation
+-- reasoning is identical to that migration's own comment.
+-- MUST stay AFTER "CREATE TABLE IF NOT EXISTS users" above: on a fresh
+-- database the table does not exist until then, and an ALTER before it fails.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires_at TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token_expires_at TEXT;
 `;
 // NOTE: users.username is UNIQUE PER TENANT here (UNIQUE(tenant_id,
 // username)), not globally unique like single-tenant mode's users table.
