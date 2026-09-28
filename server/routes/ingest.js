@@ -18,7 +18,7 @@ const { checkKeyFraudSignals } = require("../fraudDetection");
 const { TASK_STATUSES } = require("../agentAttribution");
 const { inferTag } = require("../smartTagging");
 const { applyTagRules } = require("../tagRules");
-const { realKeyId } = require("../keyIdentity");
+const { realKeyId, resolvePiiBypass } = require("../keyIdentity");
 const { checkMonthlyEventQuota } = require("../tenantQuota");
 
 const router = express.Router();
@@ -108,6 +108,16 @@ router.post("/", requireAuth("write"), async (req, res) => {
     return res.status(400).json({ error: `task_status must be one of: ${TASK_STATUSES.join(", ")}` });
   }
 
+  // X-Disable-PII-Redaction is an admin-granted privilege on the key
+  // (api_keys.allow_pii_bypass), not something any caller can claim by
+  // sending the header - see keyIdentity.js's resolvePiiBypass (shared with
+  // routes/proxy.js, which has the same header on the same footing).
+  const piiBypass = resolvePiiBypass(req.apiKey, req.header("X-Disable-PII-Redaction"));
+  if (!piiBypass.ok) {
+    await logAlert("identity-violation", `Blocked ingest event from key '${req.apiKey.key_id}' - ${piiBypass.code}: ${piiBypass.error}`, req.db);
+    return res.status(piiBypass.status).json({ error: piiBypass.error, code: piiBypass.code });
+  }
+
   // Prompt-injection scan across the ENTIRE raw body, not just recognized
   // fields - runs BEFORE PII redaction below (a request that's about to be
   // blocked shouldn't first pay the cost of being redacted). ingest.js never
@@ -151,7 +161,7 @@ router.post("/", requireAuth("write"), async (req, res) => {
   // this is exactly the "stored logs" surface a client could accidentally
   // leak PII into (e.g. a free-text field, a custom metadata field).
   let storedBody = body;
-  if (req.header("X-Disable-PII-Redaction") !== "true") {
+  if (!piiBypass.piiBypassAllowed) {
     const { value, counts, hasPII } = redactValue(body);
     storedBody = value;
     if (hasPII) {

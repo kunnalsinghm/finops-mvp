@@ -8,4 +8,7 @@ module.exports = [
   require("./0006_anomaly_alert_state"),
   require("./0007_api_keys_rotation_recommended"),
   require("./0008_tool_governance_and_shadow_extensions"),
+  require("./0009_api_keys_allow_pii_bypass"),
+  require("./0010_users_email_and_reset_tokens"),
+  require("./0011_usage_events_user_time_index"),
 ];

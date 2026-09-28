@@ -193,7 +193,12 @@ async function logUsageEvent(params) {
       client_region: clientRegion,
       db,
     });
-    await checkKeyFraudSignals({ key_id: rateLimitKey, provider: providerName, model: effectiveModel, client_region: clientRegion, db, controlPlaneDb: req.controlPlaneDb });
+    // controlPlaneDb comes from params (destructured above), NOT req - `req`
+    // isn't in scope in this function. This used to read req.controlPlaneDb,
+    // which threw a ReferenceError on every single proxied request; the
+    // surrounding try/catch swallowed it as a mere warning, so the A6
+    // fraud-signal check silently never ran on the proxy path at all.
+    await checkKeyFraudSignals({ key_id: rateLimitKey, provider: providerName, model: effectiveModel, client_region: clientRegion, db, controlPlaneDb });
   } catch (err) {
     logger.warn(`[proxy] advisory check failed (event still recorded): ${err.message}`);
   }
@@ -284,12 +289,13 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   const identity = resolveIdentity(req.apiKey, {
     teamHeader: req.header("X-Team"),
     workloadHeader: req.header("X-Workload-Type"),
+    piiBypassHeader: req.header("X-Disable-PII-Redaction"),
   });
   if (!identity.ok) {
     await logAlert("identity-violation", `Blocked proxy request from key '${rateLimitKey}' - ${identity.code}: ${identity.error}`, req.db);
     return res.status(identity.status).json({ error: identity.error, code: identity.code });
   }
-  const { team: identityTeam, workloadType, backgroundExempt } = identity;
+  const { team: identityTeam, workloadType, backgroundExempt, piiBypassAllowed } = identity;
   let team = identityTeam;
   tracing.mark(span, "ingest.identity_resolved", { team: identityTeam || null, workloadType });
 
@@ -522,9 +528,14 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   // downstream (fetch call, cache, semantic cache, shadow test, raw_json)
   // sees the redacted version. Opt out per-request with
   // X-Disable-PII-Redaction: true (e.g. a support-bot use case that
-  // legitimately needs to send a customer's real email to the model).
+  // legitimately needs to send a customer's real email to the model) - but
+  // only a key an admin has actually granted allow_pii_bypass may use it;
+  // resolveIdentity() above already rejected the request with a 403 if an
+  // unpermitted key tried to claim the header, so by the time we get here
+  // piiBypassAllowed reflects a real, admin-granted privilege, exactly like
+  // backgroundExempt above. See keyIdentity.js.
   let piiFindings = {};
-  if (req.header("X-Disable-PII-Redaction") !== "true") {
+  if (!piiBypassAllowed) {
     const { value, counts, hasPII } = redactValue(outboundBody);
     outboundBody = value;
     piiFindings = counts;

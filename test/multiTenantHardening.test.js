@@ -120,6 +120,22 @@ if (!isPostgres) {
     assert.equal(Boolean(listed.allow_background), true);
   });
 
+  test("KEYS: creating a key through the API PERSISTS allow_pii_bypass, same as allow_background", async () => {
+    const created = await post("/api/keys", { headers: H(adminA), body: { label: "pii-bound", role: "developer", allow_pii_bypass: true } });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.allow_pii_bypass, true);
+    const listed = (await get("/api/keys", { headers: H(adminA) })).body.find((k) => k.key_id === created.body.key_id);
+    assert.equal(Boolean(listed.allow_pii_bypass), true, "stored, not merely echoed back");
+  });
+
+  test("KEYS: a tenant cannot grant allow_pii_bypass on another tenant's key", async () => {
+    const victim = (await post("/api/keys", { headers: H(adminB), body: { label: "pii-victim", role: "developer" } })).body;
+    const attack = await patch(`/api/keys/${victim.key_id}`, { headers: H(adminA), body: { allow_pii_bypass: true } });
+    assert.equal(attack.status, 404);
+    const after = (await get("/api/keys", { headers: H(adminB) })).body.find((k) => k.key_id === victim.key_id);
+    assert.equal(Boolean(after.allow_pii_bypass), false);
+  });
+
   // ------------------------------------------------------------- identity binding
   test("IDENTITY: a team-bound tenant key is enforced from the KEY - omitting X-Team cannot dodge the team budget", async (t) => {
     const team = `t-${uniq()}`;
@@ -154,6 +170,16 @@ if (!isPostgres) {
     const r = await post("/api/proxy/openai", { headers: H(key, { ...PK, "X-Workload-Type": "background" }), body: chat("gpt-4.1") });
     assert.equal(r.status, 403);
     assert.equal(r.body.code, "background-not-permitted");
+  });
+
+  test("IDENTITY: PII-bypass rights are per-key and per-tenant - a key that was never granted them is refused", async (t) => {
+    const key = (await post("/api/keys", { headers: H(adminB), body: { label: "nopii", role: "developer", team: `pii-${uniq()}` } })).body.key_id;
+    let called = false;
+    t.mock.method(global, "fetch", async () => { called = true; return ok(oai(5, 5)); });
+    const r = await post("/api/proxy/openai", { headers: H(key, { ...PK, "X-Disable-PII-Redaction": "true" }), body: chat("gpt-4.1") });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.code, "pii-bypass-not-permitted");
+    assert.equal(called, false);
   });
 
   test("KEY_ID: a proxied event is recorded in the CALLER's tenant with that tenant's key id, and nowhere else", async (t) => {

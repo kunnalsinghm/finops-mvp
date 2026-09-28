@@ -116,13 +116,14 @@ function post(pathName, { headers = {}, body } = {}) {
 }
 
 let keyCounter = 0;
-async function makeApiKey(role = "developer") {
+async function makeApiKey(role = "developer", { allowPiiBypass = false } = {}) {
   keyCounter++;
   const key_id = `fk_test_ingest_${role}_${keyCounter}`;
-  await storage.run("INSERT INTO api_keys (key_id, label, role, status) VALUES (?, ?, ?, 'active')", [
+  await storage.run("INSERT INTO api_keys (key_id, label, role, allow_pii_bypass, status) VALUES (?, ?, ?, ?, 'active')", [
     key_id,
     `test key ${keyCounter}`,
     role,
+    allowPiiBypass ? 1 : 0,
   ]);
   return key_id;
 }
@@ -433,8 +434,8 @@ test("redacts PII from the persisted raw_json by default, and logs a pii-redacti
   assert.equal(alertsAfter, alertsBefore + 1);
 });
 
-test("does NOT redact PII when X-Disable-PII-Redaction: true is sent", async () => {
-  const key_id = await makeApiKey();
+test("does NOT redact PII when X-Disable-PII-Redaction: true is sent by a key GRANTED allow_pii_bypass", async () => {
+  const key_id = await makeApiKey("developer", { allowPiiBypass: true });
   const res = await post("/api/ingest", {
     headers: { "X-API-Key": key_id, "X-Disable-PII-Redaction": "true" },
     body: {
@@ -448,6 +449,25 @@ test("does NOT redact PII when X-Disable-PII-Redaction: true is sent", async () 
   assert.equal(res.status, 201);
   const row = await getLatestEventForUser(key_id);
   assert.match(row.raw_json, /not-redacted@example\.com/);
+});
+
+test("PII-BYPASS: X-Disable-PII-Redaction from a key that was NOT granted allow_pii_bypass is refused, not silently ignored", async () => {
+  const key_id = await makeApiKey(); // allowPiiBypass defaults to false
+  const before = await storage.get("SELECT COUNT(*) AS n FROM usage_events");
+  const res = await post("/api/ingest", {
+    headers: { "X-API-Key": key_id, "X-Disable-PII-Redaction": "true" },
+    body: {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      team: "eng",
+      environment: "prod",
+      custom_note: "contact me at should-not-leak@example.com",
+    },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(res.json.code, "pii-bypass-not-permitted");
+  const after = await storage.get("SELECT COUNT(*) AS n FROM usage_events");
+  assert.equal(after.n, before.n, "an unauthorized bypass attempt must never be persisted, redacted or not");
 });
 
 test("prompt-injection scan runs BEFORE PII redaction, so a blocked request is never redacted or persisted", async () => {

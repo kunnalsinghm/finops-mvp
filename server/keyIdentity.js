@@ -32,6 +32,21 @@
 //
 // Other X-Workload-Type values ("interactive", "batch", ...) remain free-form
 // labels; only "background" carries enforcement consequences.
+//
+// PII REDACTION BYPASS (X-Disable-PII-Redaction: true)
+// - Same shape as background workloads, for the same reason: skipping PII
+//   redaction is a real privilege (a support-bot use case that legitimately
+//   needs to send a customer's real email to the model), so it must be
+//   admin-granted per key (api_keys.allow_pii_bypass), not something any
+//   caller with proxy access can flip by sending a header. A key without it
+//   that sends the header gets a 403 - see proxy.js and ingest.js for where
+//   the redaction itself happens.
+// - Bootstrap mode is exempt, same as background.
+// - Exposed as its own resolvePiiBypass() below (not folded only into
+//   resolveIdentity()) because ingest.js accepts this same header on the
+//   stored raw payload but never goes through team/workload identity
+//   resolution at all - it needs the permission check without the rest of
+//   resolveIdentity's machinery.
 
 const BOOTSTRAP_KEY_ID = "bootstrap";
 
@@ -43,7 +58,28 @@ function truthy(v) {
   return v === true || v === 1 || v === "1" || v === "true";
 }
 
-function resolveIdentity(apiKey, { teamHeader, workloadHeader } = {}, env = process.env) {
+// Pure, standalone permission check for X-Disable-PII-Redaction. Returns
+// { ok: true, piiBypassAllowed } whether or not the header was even sent
+// (piiBypassAllowed is simply false when it wasn't, or wasn't "true") - a
+// 403 is only ever returned when the header WAS sent and the key lacks the
+// privilege.
+function resolvePiiBypass(apiKey, piiBypassHeader) {
+  if (piiBypassHeader !== "true") {
+    return { ok: true, piiBypassAllowed: false };
+  }
+  const isBootstrap = apiKey?.key_id === BOOTSTRAP_KEY_ID;
+  if (truthy(apiKey?.allow_pii_bypass) || isBootstrap) {
+    return { ok: true, piiBypassAllowed: true };
+  }
+  return {
+    ok: false,
+    status: 403,
+    code: "pii-bypass-not-permitted",
+    error: "This API key is not permitted to send X-Disable-PII-Redaction. An admin can grant it: PATCH /api/keys/:keyId { \"allow_pii_bypass\": true }.",
+  };
+}
+
+function resolveIdentity(apiKey, { teamHeader, workloadHeader, piiBypassHeader } = {}, env = process.env) {
   const keyTeam = apiKey?.team || null;
   const declaredTeam = teamHeader || null;
   const isBootstrap = apiKey?.key_id === BOOTSTRAP_KEY_ID;
@@ -90,7 +126,10 @@ function resolveIdentity(apiKey, { teamHeader, workloadHeader } = {}, env = proc
     }
   }
 
-  return { ok: true, team, teamSource, workloadType, backgroundExempt };
+  const piiBypass = resolvePiiBypass(apiKey, piiBypassHeader);
+  if (!piiBypass.ok) return piiBypass;
+
+  return { ok: true, team, teamSource, workloadType, backgroundExempt, piiBypassAllowed: piiBypass.piiBypassAllowed };
 }
 
 // The id to store in usage_events.key_id: the authenticated API key that sent
@@ -104,4 +143,4 @@ function realKeyId(keyOrId) {
   return id;
 }
 
-module.exports = { resolveIdentity, isStrictIdentity, realKeyId };
+module.exports = { resolveIdentity, resolvePiiBypass, isStrictIdentity, realKeyId };

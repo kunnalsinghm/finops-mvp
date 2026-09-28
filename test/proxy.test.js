@@ -100,12 +100,12 @@ function post(pathName, { headers = {}, body } = {}) {
 }
 
 let keyCounter = 0;
-async function makeApiKey(role = "developer", { team = null, allowBackground = false } = {}) {
+async function makeApiKey(role = "developer", { team = null, allowBackground = false, allowPiiBypass = false } = {}) {
   keyCounter++;
   const key_id = `fk_test_proxy_${role}_${keyCounter}`;
   await storage.run(
-    "INSERT INTO api_keys (key_id, label, role, team, allow_background, status) VALUES (?, ?, ?, ?, ?, 'active')",
-    [key_id, `test key ${keyCounter}`, role, team, allowBackground ? 1 : 0]
+    "INSERT INTO api_keys (key_id, label, role, team, allow_background, allow_pii_bypass, status) VALUES (?, ?, ?, ?, ?, ?, 'active')",
+    [key_id, `test key ${keyCounter}`, role, team, allowBackground ? 1 : 0, allowPiiBypass ? 1 : 0]
   );
   return key_id;
 }
@@ -336,8 +336,8 @@ test("redacts PII from the request body actually sent upstream, by default", asy
   assert.equal(res.headers["x-finops-pii-redacted"], "true");
 });
 
-test("does NOT redact PII when X-Disable-PII-Redaction: true is sent", async (t) => {
-  const key_id = await makeApiKey();
+test("does NOT redact PII when X-Disable-PII-Redaction: true is sent by a key GRANTED allow_pii_bypass", async (t) => {
+  const key_id = await makeApiKey("developer", { allowPiiBypass: true });
   let capturedBody;
   t.mock.method(global, "fetch", async (url, opts) => {
     capturedBody = JSON.parse(opts.body);
@@ -351,6 +351,27 @@ test("does NOT redact PII when X-Disable-PII-Redaction: true is sent", async (t)
 
   assert.equal(res.status, 200);
   assert.match(JSON.stringify(capturedBody), /not-redacted@example\.com/);
+});
+
+test("PII-BYPASS: X-Disable-PII-Redaction from a key that was NOT granted allow_pii_bypass is refused, not silently ignored", async (t) => {
+  // Before the fix, ANY caller with proxy access could flip this header -
+  // see keyIdentity.js's resolvePiiBypass and test/proxyHardening.test.js
+  // for the equivalent allow_background rejection case.
+  const key_id = await makeApiKey(); // allowPiiBypass defaults to false
+  let fetchCalled = false;
+  t.mock.method(global, "fetch", async (url, opts) => {
+    fetchCalled = true;
+    return jsonResponse(openaiResponse(5, 5));
+  });
+
+  const res = await post("/api/proxy/openai", {
+    headers: { "X-API-Key": key_id, ...PROVIDER_KEY_HEADER, "X-Disable-PII-Redaction": "true" },
+    body: { model: "gpt-4o-mini", messages: [{ role: "user", content: "my email is should-not-leak@example.com" }] },
+  });
+
+  assert.equal(res.status, 403);
+  assert.equal(res.json.code, "pii-bypass-not-permitted");
+  assert.equal(fetchCalled, false, "an unauthorized bypass attempt must never reach the provider unredacted");
 });
 
 test("model allow-list: rejects a model not on the key's allow-list, before calling upstream", async (t) => {

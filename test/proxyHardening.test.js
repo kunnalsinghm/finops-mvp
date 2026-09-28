@@ -92,12 +92,12 @@ function request(method, pathName, { headers = {}, body } = {}) {
 const post = (p, o) => request("POST", p, o);
 
 let keyCounter = 0;
-async function makeApiKey(role = "developer", { team = null, allowBackground = false } = {}) {
+async function makeApiKey(role = "developer", { team = null, allowBackground = false, allowPiiBypass = false } = {}) {
   keyCounter++;
   const key_id = `fk_test_hard_${role}_${keyCounter}`;
   await storage.run(
-    "INSERT INTO api_keys (key_id, label, role, team, allow_background, status) VALUES (?, ?, ?, ?, ?, 'active')",
-    [key_id, `hardening key ${keyCounter}`, role, team, allowBackground ? 1 : 0]
+    "INSERT INTO api_keys (key_id, label, role, team, allow_background, allow_pii_bypass, status) VALUES (?, ?, ?, ?, ?, ?, 'active')",
+    [key_id, `hardening key ${keyCounter}`, role, team, allowBackground ? 1 : 0, allowPiiBypass ? 1 : 0]
   );
   return key_id;
 }
@@ -214,6 +214,62 @@ test("a key that WAS granted background rights is still exempt from the hard blo
   assert.equal((await latestEvent(key)).workload_type, "background");
 });
 
+test("PII-BYPASS: X-Disable-PII-Redaction from a key that was NOT granted allow_pii_bypass is refused, before any provider call", async (t) => {
+  const key = await makeApiKey("developer"); // not allow_pii_bypass
+  let called = false;
+  let capturedBody;
+  t.mock.method(global, "fetch", async (url, opts) => { called = true; capturedBody = opts.body; return jsonResponse(openaiResponse(10, 10)); });
+
+  const res = await post("/api/proxy/openai", {
+    headers: { "X-API-Key": key, ...PK, "X-Disable-PII-Redaction": "true" },
+    body: { model: "gpt-4o-mini", messages: [{ role: "user", content: "email me at leak-attempt@example.com" }] },
+  });
+
+  assert.equal(res.status, 403, "before the fix any caller could send this header and skip PII redaction");
+  assert.equal(res.json.code, "pii-bypass-not-permitted");
+  assert.equal(called, false, "the upstream provider must never be called on an unauthorized bypass attempt");
+});
+
+test("a key that WAS granted allow_pii_bypass is still able to disable redaction (the feature itself still works)", async (t) => {
+  const key = await makeApiKey("developer", { allowPiiBypass: true });
+  let capturedBody;
+  t.mock.method(global, "fetch", async (url, opts) => { capturedBody = JSON.parse(opts.body); return jsonResponse(openaiResponse(10, 10)); });
+
+  const res = await post("/api/proxy/openai", {
+    headers: { "X-API-Key": key, ...PK, "X-Disable-PII-Redaction": "true" },
+    body: { model: "gpt-4o-mini", messages: [{ role: "user", content: "email me at intentionally-unredacted@example.com" }] },
+  });
+
+  assert.equal(res.status, 200);
+  assert.match(JSON.stringify(capturedBody), /intentionally-unredacted@example\.com/);
+});
+
+test("FRAUD CHECK RUNS ON THE PROXY PATH: a brand-new model on an established key flags rotation_recommended (regression: req was out of scope in logUsageEvent)", async (t) => {
+  // Found by the P0 load test: logUsageEvent referenced req.controlPlaneDb,
+  // but `req` isn't in scope there, so checkKeyFraudSignals threw a
+  // ReferenceError on EVERY proxied request - swallowed by the advisory
+  // try/catch as a mere warning. fraudDetection.test.js only exercises the
+  // detector in isolation, which is why nothing caught that the proxy path
+  // never actually reached it.
+  const key = await makeApiKey("developer");
+  for (let i = 0; i < 25; i++) {
+    await storage.run(
+      "INSERT INTO usage_events (event_time, provider, model, user_id, cost_usd, tagged) VALUES (?, ?, ?, ?, 0.01, 1)",
+      [new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), "openai", "gpt-4.1", key]
+    );
+  }
+  t.mock.method(global, "fetch", async () => jsonResponse(openaiResponse(10, 10)));
+
+  const res = await post("/api/proxy/openai", {
+    headers: { "X-API-Key": key, ...PK },
+    body: chat("gpt-4o-mini"), // never seen on this key before
+  });
+  assert.equal(res.status, 200);
+
+  const row = await storage.get("SELECT rotation_recommended FROM api_keys WHERE key_id = ?", [key]);
+  assert.equal(Number(row.rotation_recommended), 1, "the fraud-signal check must actually run when a request goes through the proxy");
+});
+
 test("a bound key's usage is attributed to the KEY's team even if the client sent no header (spend is not hidden)", async (t) => {
   const team = `attrib-${process.pid}`;
   const key = await makeApiKey("developer", { team });
@@ -267,33 +323,40 @@ test("keys API: create with allow_background, list shows it, PATCH binds team an
   const admin = await makeApiKey("admin");
   const H = { "X-API-Key": admin };
 
-  const created = await post("/api/keys", { headers: H, body: { label: "svc", role: "developer", team: "ops", allow_background: true } });
+  const created = await post("/api/keys", { headers: H, body: { label: "svc", role: "developer", team: "ops", allow_background: true, allow_pii_bypass: true } });
   assert.equal(created.status, 201);
   assert.equal(created.json.allow_background, true);
+  assert.equal(created.json.allow_pii_bypass, true);
   const target = created.json.key_id;
 
   let list = (await request("GET", "/api/keys", { headers: H })).json;
   assert.equal(Boolean(list.find((k) => k.key_id === target).allow_background), true);
+  assert.equal(Boolean(list.find((k) => k.key_id === target).allow_pii_bypass), true);
 
-  const patched = await request("PATCH", `/api/keys/${target}`, { headers: H, body: { team: "finance", allow_background: false } });
+  const patched = await request("PATCH", `/api/keys/${target}`, { headers: H, body: { team: "finance", allow_background: false, allow_pii_bypass: false } });
   assert.equal(patched.status, 200);
   assert.equal(patched.json.team, "finance");
   assert.equal(patched.json.allow_background, false);
+  assert.equal(patched.json.allow_pii_bypass, false);
 
   const unbound = await request("PATCH", `/api/keys/${target}`, { headers: H, body: { team: null } });
   assert.equal(unbound.json.team, null);
 
   assert.equal((await request("PATCH", `/api/keys/${target}`, { headers: H, body: { team: "" } })).status, 400);
   assert.equal((await request("PATCH", `/api/keys/${target}`, { headers: H, body: { allow_background: "yes" } })).status, 400);
+  assert.equal((await request("PATCH", `/api/keys/${target}`, { headers: H, body: { allow_pii_bypass: "yes" } })).status, 400);
   assert.equal((await request("PATCH", `/api/keys/${target}`, { headers: H, body: {} })).status, 400);
   assert.equal((await request("PATCH", `/api/keys/nope`, { headers: H, body: { team: "x" } })).status, 404);
   assert.equal((await post("/api/keys", { headers: H, body: { label: "bad", allow_background: "true" } })).status, 400);
+  assert.equal((await post("/api/keys", { headers: H, body: { label: "bad2", allow_pii_bypass: "true" } })).status, 400);
 });
 
-test("keys API: only manage_keys (admin) may bind a key - a developer cannot grant themselves background rights", async () => {
+test("keys API: only manage_keys (admin) may bind a key - a developer cannot grant themselves background or PII-bypass rights", async () => {
   const dev = await makeApiKey("developer");
   const res = await request("PATCH", `/api/keys/${dev}`, { headers: { "X-API-Key": dev }, body: { allow_background: true } });
   assert.equal(res.status, 403);
+  const res2 = await request("PATCH", `/api/keys/${dev}`, { headers: { "X-API-Key": dev }, body: { allow_pii_bypass: true } });
+  assert.equal(res2.status, 403);
 });
 
 // =====================================================================

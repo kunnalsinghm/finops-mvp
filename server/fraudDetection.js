@@ -86,7 +86,12 @@ async function checkVolumeSpike(key_id, db = defaultDb) {
 }
 
 async function checkNewModelMix(key_id, provider, model, db = defaultDb) {
-  const historyRow = await db.get("SELECT COUNT(*) AS n FROM usage_events WHERE user_id = ?", [key_id]);
+  // Bounded: only "at least MIN events?" matters, so stop counting at MIN
+  // instead of counting the key's whole history on every request.
+  const historyRow = await db.get(
+    `SELECT COUNT(*) AS n FROM (SELECT 1 FROM usage_events WHERE user_id = ? LIMIT ${MIN_HISTORY_FOR_MODEL_CHECK}) AS h`,
+    [key_id]
+  );
   if (Number(historyRow?.n || 0) < MIN_HISTORY_FOR_MODEL_CHECK) return null;
 
   const seenBefore = await db.get(
@@ -101,7 +106,10 @@ async function checkNewModelMix(key_id, provider, model, db = defaultDb) {
 async function checkNewRegion(key_id, client_region, db = defaultDb) {
   if (!client_region) return null;
 
-  const historyRow = await db.get("SELECT COUNT(*) AS n FROM usage_events WHERE user_id = ?", [key_id]);
+  const historyRow = await db.get(
+    `SELECT COUNT(*) AS n FROM (SELECT 1 FROM usage_events WHERE user_id = ? LIMIT ${MIN_HISTORY_FOR_REGION_CHECK}) AS h`,
+    [key_id]
+  );
   if (Number(historyRow?.n || 0) < MIN_HISTORY_FOR_REGION_CHECK) return null;
 
   const seenBefore = await db.get(

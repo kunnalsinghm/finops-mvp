@@ -283,22 +283,24 @@ async function createTenant({ name, trial_days = null, max_api_keys = null, max_
   return { id: inserted.lastInsertRowid, name, schema_name: schemaName, status, trial_ends_at: trialEndsAt };
 }
 
-async function createTenantApiKey({ tenant_id, label, role = "developer", team = null, allow_background = false }) {
+async function createTenantApiKey({ tenant_id, label, role = "developer", team = null, allow_background = false, allow_pii_bypass = false }) {
   const { controlPlaneReady, controlPlaneDb } = initControlPlane();
   await controlPlaneReady;
   const key_id = `fk_${require("crypto").randomBytes(20).toString("hex")}`;
-  // team + allow_background are what make identity enforceable for this key
-  // (see keyIdentity.js): they used to be silently dropped here, so a key created
-  // through the API could never actually be bound to a team in multi-tenant mode.
-  await controlPlaneDb.run("INSERT INTO api_keys (tenant_id, key_id, label, role, team, allow_background) VALUES (?, ?, ?, ?, ?, ?)", [
+  // team + allow_background/allow_pii_bypass are what make identity
+  // enforceable for this key (see keyIdentity.js): they used to be silently
+  // dropped here, so a key created through the API could never actually be
+  // bound to a team in multi-tenant mode.
+  await controlPlaneDb.run("INSERT INTO api_keys (tenant_id, key_id, label, role, team, allow_background, allow_pii_bypass) VALUES (?, ?, ?, ?, ?, ?, ?)", [
     tenant_id,
     key_id,
     label,
     role,
     team || null,
     allow_background ? 1 : 0,
+    allow_pii_bypass ? 1 : 0,
   ]);
-  return { key_id, tenant_id, label, role, team: team || null, allow_background: Boolean(allow_background) };
+  return { key_id, tenant_id, label, role, team: team || null, allow_background: Boolean(allow_background), allow_pii_bypass: Boolean(allow_pii_bypass) };
 }
 
 // The function auth.js's requireAuth calls on every request in multi-tenant

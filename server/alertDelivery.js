@@ -29,9 +29,12 @@ function _setTransporterForTesting(fn) {
 }
 
 let cachedTransporter = null;
-function getEmailTransporter() {
-  if (testTransporterOverride) return testTransporterOverride;
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !ALERT_EMAIL_TO) return null;
+// Transport-level readiness only (SMTP host/user/pass) - shared by every
+// email sender in the app, alerts and account emails (password reset, email
+// verification - see accountEmail.js) alike, so there's exactly one
+// nodemailer transport instance and one place that builds it.
+function buildTransporter() {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null;
   if (cachedTransporter) return cachedTransporter;
   const nodemailer = require("nodemailer");
   cachedTransporter = nodemailer.createTransport({
@@ -41,6 +44,26 @@ function getEmailTransporter() {
     auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
   return cachedTransporter;
+}
+
+// Used by the alerts channel below: additionally requires a configured
+// alert recipient, since alerts always go to one fixed ops address, not to
+// an arbitrary "to". Unchanged behavior/contract from before this file
+// split transport-readiness out of it.
+function getEmailTransporter() {
+  if (testTransporterOverride) return testTransporterOverride;
+  if (!ALERT_EMAIL_TO) return null;
+  return buildTransporter();
+}
+
+// Used by account emails (accountEmail.js), which send to the user's OWN
+// address rather than the fixed alerts recipient - so this only needs the
+// transport itself configured, not ALERT_EMAIL_TO. Shares the same cached
+// transporter/test override as getEmailTransporter() above; it's the same
+// mailbox sending both kinds of mail.
+function getAccountEmailTransporter() {
+  if (testTransporterOverride) return testTransporterOverride;
+  return buildTransporter();
 }
 
 // Note: sendSlack/sendGenericWebhook/sendEmail intentionally let network and
@@ -116,11 +139,20 @@ async function deliverAlert(message, type = "budget", db = defaultDb) {
   }
 }
 
+// Shared "from" address for every outbound email this app sends (alerts and
+// account emails alike) - one configured mailbox, not a separate one per
+// feature.
+function getEmailFromAddress() {
+  return ALERT_EMAIL_FROM || SMTP_USER;
+}
+
 module.exports = {
   deliverAlert,
   sendSlack,
   sendGenericWebhook,
   sendEmail,
   getEmailTransporter,
+  getAccountEmailTransporter,
+  getEmailFromAddress,
   _setTransporterForTesting,
 };

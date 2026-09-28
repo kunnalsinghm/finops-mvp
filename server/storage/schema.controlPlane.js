@@ -73,6 +73,22 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allow_background INTEGER NOT NULL 
 -- no separate migration file needed.
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotation_recommended INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotation_reason TEXT;
+-- P0: admin-gate X-Disable-PII-Redaction (server/keyIdentity.js's
+-- resolvePiiBypass) - same shape and same reasoning as allow_background
+-- above: a column addition here, not a separate migration, for the same
+-- "control plane isn't migrated by the versioned system yet" reason.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allow_pii_bypass INTEGER NOT NULL DEFAULT 0;
+
+-- P0: self-service "forgot password" + email verification - see
+-- server/tenantUsers.js and the same-shaped migration 0010 for
+-- single-tenant mode (server/users.js). Nullable/graceful-degradation
+-- reasoning is identical to that migration's own comment.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires_at TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token_expires_at TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_control_plane_keys_tenant ON api_keys(tenant_id);
 

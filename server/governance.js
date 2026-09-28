@@ -38,11 +38,28 @@ function getBucketMap(tenantId) {
 }
 
 const DEFAULT_LIMIT = {
-  capacity: 60,       // max requests
-  refillPerSec: 1,     // tokens added per second
+  capacity: 60,       // max requests (burst)
+  refillPerSec: 1,     // tokens added per second (= sustained requests/sec)
 };
 
-function checkRateLimit(keyId, limit = DEFAULT_LIMIT, tenantId = null) {
+// Per-key proxy rate limit. Defaults are unchanged (60 burst, 1/sec
+// sustained) - but that sustained rate is LOW for a real backend sharing one
+// key, which the P0 load test surfaced (a single key tops out at ~1 req/s no
+// matter how fast the proxy itself is). So operators can now raise it via
+// FINOPS_RATE_LIMIT_CAPACITY / FINOPS_RATE_LIMIT_REFILL_PER_SEC. Read at call
+// time (not module load) so it can be tuned/tested without reloading. Invalid
+// or non-positive values fall back to the defaults rather than disabling the
+// limiter by accident.
+function defaultRateLimit() {
+  const capacity = Number(process.env.FINOPS_RATE_LIMIT_CAPACITY);
+  const refillPerSec = Number(process.env.FINOPS_RATE_LIMIT_REFILL_PER_SEC);
+  return {
+    capacity: Number.isFinite(capacity) && capacity >= 1 ? capacity : DEFAULT_LIMIT.capacity,
+    refillPerSec: Number.isFinite(refillPerSec) && refillPerSec > 0 ? refillPerSec : DEFAULT_LIMIT.refillPerSec,
+  };
+}
+
+function checkRateLimit(keyId, limit = defaultRateLimit(), tenantId = null) {
   const buckets = getBucketMap(tenantId);
   const now = Date.now();
   let bucket = buckets.get(keyId);

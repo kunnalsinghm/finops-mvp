@@ -3,7 +3,7 @@
 // returns a decision, so every rule can be checked directly.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { resolveIdentity } = require("../server/keyIdentity");
+const { resolveIdentity, resolvePiiBypass } = require("../server/keyIdentity");
 
 const noStrict = {}; // env without FINOPS_STRICT_IDENTITY
 const strict = { FINOPS_STRICT_IDENTITY: "true" };
@@ -95,4 +95,55 @@ test("team and workload rules compose: a mismatched team is refused before backg
   );
   assert.equal(r.ok, false);
   assert.equal(r.code, "team-mismatch");
+});
+
+test("pii bypass: not requested at all when the header is absent -> ok, piiBypassAllowed false", () => {
+  const r = resolveIdentity({ key_id: "k" }, {}, noStrict);
+  assert.equal(r.ok, true);
+  assert.equal(r.piiBypassAllowed, false);
+});
+
+test("pii bypass: refused for a key that was not granted it", () => {
+  for (const key of [{ key_id: "k", allow_pii_bypass: 0 }, { key_id: "k" }, { key_id: "k", allow_pii_bypass: null }]) {
+    const r = resolveIdentity(key, { piiBypassHeader: "true" }, noStrict);
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 403);
+    assert.equal(r.code, "pii-bypass-not-permitted");
+  }
+});
+
+test("pii bypass: honoured for a key granted it - accepts 1, true and '1' from either DB backend", () => {
+  for (const v of [1, true, "1"]) {
+    const r = resolveIdentity({ key_id: "k", allow_pii_bypass: v }, { piiBypassHeader: "true" }, noStrict);
+    assert.equal(r.ok, true);
+    assert.equal(r.piiBypassAllowed, true);
+  }
+});
+
+test("pii bypass: bootstrap mode may use it (everything is already open before the first key exists)", () => {
+  const r = resolveIdentity({ key_id: "bootstrap" }, { piiBypassHeader: "true" }, noStrict);
+  assert.equal(r.ok, true);
+  assert.equal(r.piiBypassAllowed, true);
+});
+
+test("pii bypass and background are independent privileges: granting one does not grant the other", () => {
+  const r = resolveIdentity(
+    { key_id: "k", allow_background: 1, allow_pii_bypass: 0 },
+    { workloadHeader: "background", piiBypassHeader: "true" },
+    noStrict
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "pii-bypass-not-permitted");
+});
+
+test("resolvePiiBypass: the standalone helper (used directly by ingest.js) matches resolveIdentity's behavior", () => {
+  assert.deepEqual(resolvePiiBypass({ key_id: "k" }, undefined), { ok: true, piiBypassAllowed: false });
+  assert.deepEqual(resolvePiiBypass({ key_id: "k" }, "true"), {
+    ok: false,
+    status: 403,
+    code: "pii-bypass-not-permitted",
+    error: resolvePiiBypass({ key_id: "k" }, "true").error,
+  });
+  assert.deepEqual(resolvePiiBypass({ key_id: "k", allow_pii_bypass: true }, "true"), { ok: true, piiBypassAllowed: true });
+  assert.deepEqual(resolvePiiBypass({ key_id: "bootstrap" }, "true"), { ok: true, piiBypassAllowed: true });
 });

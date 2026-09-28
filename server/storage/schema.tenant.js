@@ -48,6 +48,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_project ON usage_events(project_id);
 CREATE INDEX IF NOT EXISTS idx_usage_cost_center ON usage_events(cost_center);
 CREATE INDEX IF NOT EXISTS idx_usage_agent ON usage_events(agent_id);
 CREATE INDEX IF NOT EXISTS idx_usage_task ON usage_events(task_id);
+-- P0 load test: fraud-signal + smart-tag queries filter on user_id (the API key); see migration 0011.
+CREATE INDEX IF NOT EXISTS idx_usage_user_time ON usage_events(user_id, event_time);
 
 CREATE TABLE IF NOT EXISTS gpu_usage_events (
   id SERIAL PRIMARY KEY,

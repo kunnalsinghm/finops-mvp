@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<title>Verify email · FinOps</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="dashboard.css" />
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .recovery-wrap { width: 100%; max-width: 380px; }
+  .recovery-brand { text-align: center; margin-bottom: 18px; }
+  .recovery-brand h1 { font-size: 18px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .recovery-brand .sub { color: var(--text-muted); font-size: 12.5px; }
+  .recovery-msg { font-size: 12.5px; margin-top: 10px; line-height: 1.5; }
+  .recovery-msg.error { color: var(--danger); }
+  .recovery-msg.ok { color: var(--good); }
+  .recovery-back { display: block; text-align: center; margin-top: 16px; color: var(--text-muted); font-size: 12.5px; text-decoration: none; }
+  .recovery-back:hover { color: var(--text); }
+  input[type="text"] { margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+  <div class="recovery-wrap">
+    <div class="recovery-brand">
+      <h1>FinOps</h1>
+      <span class="sub">Email verification</span>
+    </div>
+
+    <!-- Auto-verify state: a ?token= was in the emailed link, submitted
+         automatically on load. -->
+    <div class="panel" id="verifyPanel" style="display:none;">
+      <h2 class="panel-title">Verifying your email</h2>
+      <div class="tick-rule"></div>
+      <div id="verifyMsg" class="recovery-msg">Verifying…</div>
+    </div>
+
+    <!-- No token in the URL - offer to resend. -->
+    <div class="panel" id="resendPanel" style="display:none;">
+      <h2 class="panel-title">Resend verification email</h2>
+      <div class="tick-rule"></div>
+      <div style="color:var(--text-muted);font-size:12px;margin-bottom:8px;">
+        Enter your username and, if that account needs verifying, we'll send a fresh link.
+      </div>
+      <input id="resendUsername" type="text" placeholder="username" autocomplete="username" />
+      <button id="resendBtn" class="primary" style="width:100%;">Resend email</button>
+      <div id="resendMsg" class="recovery-msg"></div>
+    </div>
+
+    <a class="recovery-back" href="index.html">&larr; Back to dashboard</a>
+  </div>
+
+<script>
+  const GENERIC_QUEUED_MESSAGE = "If an account matching that request exists, an email has been sent.";
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+
+  function setMsg(el, text, kind) {
+    el.textContent = text;
+    el.className = "recovery-msg" + (kind ? " " + kind : "");
+  }
+
+  async function postJson(path, body) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let json = {};
+    try { json = await res.json(); } catch {}
+    return { ok: res.ok, status: res.status, json };
+  }
+
+  if (token) {
+    document.getElementById("verifyPanel").style.display = "";
+    (async () => {
+      const msg = document.getElementById("verifyMsg");
+      const { ok, json } = await postJson("/api/auth/verify-email", { token });
+      if (ok) {
+        setMsg(msg, "Your email is verified. You can close this page.", "ok");
+      } else {
+        setMsg(msg, (json.error || "That verification link is invalid or has expired.") + " Request a new one below.", "error");
+        const resendPanel = document.getElementById("resendPanel");
+        resendPanel.style.display = "";
+      }
+    })();
+  } else {
+    document.getElementById("resendPanel").style.display = "";
+    document.getElementById("resendBtn").addEventListener("click", async () => {
+      const username = document.getElementById("resendUsername").value.trim();
+      const msg = document.getElementById("resendMsg");
+      if (!username) {
+        setMsg(msg, "Enter your username.", "error");
+        return;
+      }
+      setMsg(msg, "Sending…");
+      const { ok, json } = await postJson("/api/auth/resend-verification", { username });
+      setMsg(msg, ok ? (json.message || GENERIC_QUEUED_MESSAGE) : (json.error || "Something went wrong. Try again shortly."), ok ? "ok" : "error");
+    });
+  }
+</script>
+
+</body>
+</html>

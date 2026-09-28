@@ -23,7 +23,9 @@
 //
 // Reads FINOPS_LOAD_TEST_* env vars for configuration (all optional):
 //   FINOPS_LOAD_TEST_URL           default http://127.0.0.1:4000
-//   FINOPS_LOAD_TEST_API_KEY       default: auto-provisions one via bootstrap
+//   FINOPS_LOAD_TEST_API_KEY       default: auto-provisions one via bootstrap.
+//                                  NOTE: bootstrap only works ONCE per fresh DB (the first key
+//                                  closes it) - to run the script again, pass the key it printed.
 //   FINOPS_LOAD_TEST_CONCURRENCY   default 20
 //   FINOPS_LOAD_TEST_TOTAL         default 500
 //   FINOPS_LOAD_TEST_STREAMING     default false ("true" to test the SSE path)
@@ -148,6 +150,16 @@ async function main() {
   console.log(`Latency p95:        ${percentile(latencies, 95)?.toFixed(1)}ms`);
   console.log(`Latency p99:        ${percentile(latencies, 99)?.toFixed(1)}ms`);
   console.log(`Latency max:        ${latencies[latencies.length - 1]?.toFixed(1)}ms`);
+
+  if (statusCounts[429] > 0) {
+    console.log(
+      `\nNOTE: ${statusCounts[429]} request(s) got 429. That is usually the per-key rate limiter (default 60 burst,\n` +
+        `1/sec sustained - see server/governance.js), NOT the proxy running out of capacity. A single key is what\n` +
+        `this script uses. To measure proxy capacity itself, start the SERVER with e.g.\n` +
+        `  FINOPS_RATE_LIMIT_CAPACITY=100000 FINOPS_RATE_LIMIT_REFILL_PER_SEC=100000\n` +
+        `To measure the DEFAULT limiter's real-world effect, leave the defaults and read this as intended throttling.`
+    );
+  }
 
   if (errorCount > 0) {
     console.log(`\n${errorCount} request(s) failed - inspect status codes above and server logs before trusting this configuration under real traffic.`);

@@ -12,7 +12,7 @@ const router = express.Router();
 // A6: rotation_recommended/rotation_reason included so the advisory set by
 // fraudDetection.js's checkKeyFraudSignals is visible directly on the key
 // (GET /api/keys, GET /api/keys/:keyId), not just buried in alerts_log.
-const KEY_COLUMNS = "id, key_id, label, role, team, allow_background, status, quarantine_reason, rotation_recommended, rotation_reason, created_at";
+const KEY_COLUMNS = "id, key_id, label, role, team, allow_background, allow_pii_bypass, status, quarantine_reason, rotation_recommended, rotation_reason, created_at";
 
 function generateKey() {
   return "fk_" + crypto.randomBytes(20).toString("hex");
@@ -37,10 +37,13 @@ router.get("/", requireAuth("read"), async (req, res) => {
 });
 
 router.post("/", requireAuth("manage_keys"), async (req, res) => {
-  const { label, role = "developer", team, allow_background = false } = req.body || {};
+  const { label, role = "developer", team, allow_background = false, allow_pii_bypass = false } = req.body || {};
   if (!label) return res.status(400).json({ error: "label is required" });
   if (typeof allow_background !== "boolean") {
     return res.status(400).json({ error: "allow_background must be true or false" });
+  }
+  if (typeof allow_pii_bypass !== "boolean") {
+    return res.status(400).json({ error: "allow_pii_bypass must be true or false" });
   }
   if (!API_KEY_ROLES.includes(role)) {
     return res.status(400).json({ error: "invalid role" });
@@ -57,22 +60,23 @@ router.post("/", requireAuth("manage_keys"), async (req, res) => {
   // api_keys to tenants on tenant_id. Single-tenant mode has no tenant_id
   // column at all, so it keeps the original direct INSERT.
   if (tenancy.MULTI_TENANT) {
-    const created = await tenancy.createTenantApiKey({ tenant_id: req.tenantId, label, role, team, allow_background });
-    await logAudit(req.apiKey.key_id, "key.create", created.key_id, { role, team: team || null, allow_background }, req.db);
+    const created = await tenancy.createTenantApiKey({ tenant_id: req.tenantId, label, role, team, allow_background, allow_pii_bypass });
+    await logAudit(req.apiKey.key_id, "key.create", created.key_id, { role, team: team || null, allow_background, allow_pii_bypass }, req.db);
     return res.status(201).json(created);
   }
 
   const key_id = generateKey();
-  await req.controlPlaneDb.run("INSERT INTO api_keys (key_id, label, role, team, allow_background) VALUES (?, ?, ?, ?, ?)", [
+  await req.controlPlaneDb.run("INSERT INTO api_keys (key_id, label, role, team, allow_background, allow_pii_bypass) VALUES (?, ?, ?, ?, ?, ?)", [
     key_id,
     label,
     role,
     team || null,
     allow_background ? 1 : 0,
+    allow_pii_bypass ? 1 : 0,
   ]);
 
   // key_id is only ever shown here at creation time - treat it like a password
-  res.status(201).json({ key_id, label, role, team, allow_background });
+  res.status(201).json({ key_id, label, role, team, allow_background, allow_pii_bypass });
 });
 
 // Every mutation below (quarantine/approve/revoke) targets a key by ID
@@ -92,11 +96,12 @@ async function assertOwnsKey(req, keyId) {
   }
 }
 
-// Bind an existing key to a team / grant or revoke background-workload rights
-// without recreating it (recreating would mean redistributing a new secret).
-// A team binding is what makes team budgets, allow-lists and quotas
-// enforceable against this key - see keyIdentity.js. Pass "team": null to
-// unbind. Only the fields present in the body are changed.
+// Bind an existing key to a team / grant or revoke background-workload or
+// PII-redaction-bypass rights without recreating it (recreating would mean
+// redistributing a new secret). A team binding is what makes team budgets,
+// allow-lists and quotas enforceable against this key - see keyIdentity.js.
+// Pass "team": null to unbind. Only the fields present in the body are
+// changed.
 router.patch("/:keyId", requireAuth("manage_keys"), async (req, res) => {
   const body = req.body || {};
   // In multi-tenant mode a key id from ANOTHER tenant must look exactly like an
@@ -107,7 +112,7 @@ router.patch("/:keyId", requireAuth("manage_keys"), async (req, res) => {
   } catch (err) {
     return res.status(err.statusCode || 500).json({ error: err.message });
   }
-  const existing = await req.controlPlaneDb.get("SELECT key_id, team, allow_background FROM api_keys WHERE key_id = ?", [req.params.keyId]);
+  const existing = await req.controlPlaneDb.get("SELECT key_id, team, allow_background, allow_pii_bypass FROM api_keys WHERE key_id = ?", [req.params.keyId]);
   if (!existing) return res.status(404).json({ error: "Unknown key" });
 
   const sets = [];
@@ -126,15 +131,22 @@ router.patch("/:keyId", requireAuth("manage_keys"), async (req, res) => {
     sets.push("allow_background = ?");
     params.push(body.allow_background ? 1 : 0);
   }
-  if (sets.length === 0) return res.status(400).json({ error: "Nothing to update - provide team and/or allow_background" });
+  if ("allow_pii_bypass" in body) {
+    if (typeof body.allow_pii_bypass !== "boolean") {
+      return res.status(400).json({ error: "allow_pii_bypass must be true or false" });
+    }
+    sets.push("allow_pii_bypass = ?");
+    params.push(body.allow_pii_bypass ? 1 : 0);
+  }
+  if (sets.length === 0) return res.status(400).json({ error: "Nothing to update - provide team, allow_background and/or allow_pii_bypass" });
 
   await req.controlPlaneDb.run(`UPDATE api_keys SET ${sets.join(", ")} WHERE key_id = ?`, [...params, req.params.keyId]);
   await logAudit(req.apiKey.key_id, "key.update", req.params.keyId, {
-    before: { team: existing.team, allow_background: Boolean(existing.allow_background) },
+    before: { team: existing.team, allow_background: Boolean(existing.allow_background), allow_pii_bypass: Boolean(existing.allow_pii_bypass) },
     changes: body,
   }, req.db);
-  const updated = await req.controlPlaneDb.get("SELECT key_id, label, role, team, allow_background, status FROM api_keys WHERE key_id = ?", [req.params.keyId]);
-  res.json({ ...updated, allow_background: Boolean(updated.allow_background) });
+  const updated = await req.controlPlaneDb.get("SELECT key_id, label, role, team, allow_background, allow_pii_bypass, status FROM api_keys WHERE key_id = ?", [req.params.keyId]);
+  res.json({ ...updated, allow_background: Boolean(updated.allow_background), allow_pii_bypass: Boolean(updated.allow_pii_bypass) });
 });
 
 router.post("/:keyId/quarantine", requireAuth("approve_quarantine"), async (req, res) => {

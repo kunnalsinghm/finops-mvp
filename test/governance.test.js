@@ -123,3 +123,28 @@ test("getFallback returns null for a model with no defined fallback", () => {
   const fallback = getFallback("openai", "some-unmapped-model");
   assert.equal(fallback, null);
 });
+
+test("checkRateLimit default is 60 burst / 1 per sec, and is overridable via FINOPS_RATE_LIMIT_* env vars (invalid values fall back, never disable the limiter)", () => {
+  const saved = { c: process.env.FINOPS_RATE_LIMIT_CAPACITY, r: process.env.FINOPS_RATE_LIMIT_REFILL_PER_SEC };
+  try {
+    delete process.env.FINOPS_RATE_LIMIT_CAPACITY;
+    delete process.env.FINOPS_RATE_LIMIT_REFILL_PER_SEC;
+    let allowed = 0;
+    for (let i = 0; i < 70; i++) if (checkRateLimit("rl-default-key").allowed) allowed++;
+    assert.equal(allowed, 60, "unchanged default: 60-request burst");
+
+    process.env.FINOPS_RATE_LIMIT_CAPACITY = "200";
+    allowed = 0;
+    for (let i = 0; i < 250; i++) if (checkRateLimit("rl-raised-key").allowed) allowed++;
+    assert.equal(allowed, 200, "operator-raised burst");
+
+    process.env.FINOPS_RATE_LIMIT_CAPACITY = "0";      // would disable the limiter if honoured
+    process.env.FINOPS_RATE_LIMIT_REFILL_PER_SEC = "abc";
+    allowed = 0;
+    for (let i = 0; i < 70; i++) if (checkRateLimit("rl-invalid-key").allowed) allowed++;
+    assert.equal(allowed, 60, "garbage/zero values fall back to defaults");
+  } finally {
+    if (saved.c === undefined) delete process.env.FINOPS_RATE_LIMIT_CAPACITY; else process.env.FINOPS_RATE_LIMIT_CAPACITY = saved.c;
+    if (saved.r === undefined) delete process.env.FINOPS_RATE_LIMIT_REFILL_PER_SEC; else process.env.FINOPS_RATE_LIMIT_REFILL_PER_SEC = saved.r;
+  }
+});
