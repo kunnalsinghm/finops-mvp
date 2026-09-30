@@ -50,7 +50,7 @@
 // to a specific budget row.
 
 const defaultDb = require("./storage");
-const { sinceDaysAgo, dayFloorExpr, todayClause } = require("./storage/dialectSql");
+const { sinceDaysAgo, dayFloorExpr, todayClause, startOfTodayExpr, startOfTomorrowExpr } = require("./storage/dialectSql");
 const { logAlert } = require("./governance");
 const { captureFlaggedTestCase } = require("./flaggedTestCases");
 
@@ -130,8 +130,15 @@ async function checkDailySpendAnomaly({ team, db = defaultDb }) {
   const period = todayUtc();
   if (await hasFiredAnomaly("team", team, period, "daily-spend", db)) return null;
 
+  // Sargable range, not todayClause()'s date(event_time) = date('now') -
+  // see startOfTodayExpr's comment in dialectSql.js. This is the query the
+  // P0 load test's follow-up benchmark found to be the single largest
+  // remaining cost on the request path even after idx_usage_team_time
+  // (migration 0012) existed, because the OLD date()-wrapped predicate
+  // couldn't use that index's event_time column at all.
   const todayRow = await db.get(
-    `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events WHERE team = ? AND ${todayClause("event_time")}`,
+    `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events
+     WHERE team = ? AND event_time >= ${startOfTodayExpr()} AND event_time < ${startOfTomorrowExpr()}`,
     [team]
   );
   const todaySpend = Number(todayRow?.spend || 0);
@@ -219,11 +226,25 @@ async function checkRetryRateAnomaly({ agent_id, db = defaultDb }) {
 const MIN_ORG_HISTORY_FOR_NEW_MODEL_CHECK = 20;
 const MIN_ORG_HISTORY_FOR_NEW_GEOGRAPHY_CHECK = 20;
 
-async function checkNewModelOrgWide({ provider, model, db = defaultDb }) {
+// Shared by checkNewModelOrgWide and checkNewGeographyOrgWide below. Found
+// by the same P0 load test as migration 0012: this is an UNFILTERED
+// COUNT(*) over the whole table, and checkAllAnomalies used to run it
+// twice per request (once inside each function) for the exact same value.
+// historyCount accepts a number, a Promise, or null/undefined
+// (default - compute it fresh) so each function stays independently
+// callable exactly as before (see anomaly.test.js), while
+// checkAllAnomalies can pass a single shared Promise so the query itself
+// only executes once no matter how many of the two checks end up using it.
+async function orgWideHistoryCount(db) {
+  const row = await db.get("SELECT COUNT(*) AS n FROM usage_events");
+  return Number(row?.n || 0);
+}
+
+async function checkNewModelOrgWide({ provider, model, db = defaultDb, historyCount = null }) {
   if (!provider || !model) return null;
 
-  const historyRow = await db.get("SELECT COUNT(*) AS n FROM usage_events");
-  if (Number(historyRow?.n || 0) < MIN_ORG_HISTORY_FOR_NEW_MODEL_CHECK) return null;
+  const n = historyCount === null || historyCount === undefined ? await orgWideHistoryCount(db) : await historyCount;
+  if (n < MIN_ORG_HISTORY_FOR_NEW_MODEL_CHECK) return null;
 
   const seenBefore = await db.get(
     "SELECT 1 AS found FROM usage_events WHERE provider = ? AND model = ? LIMIT 1",
@@ -236,11 +257,11 @@ async function checkNewModelOrgWide({ provider, model, db = defaultDb }) {
   return { flagged: true, type: "new-model", message };
 }
 
-async function checkNewGeographyOrgWide({ client_region, db = defaultDb }) {
+async function checkNewGeographyOrgWide({ client_region, db = defaultDb, historyCount = null }) {
   if (!client_region) return null;
 
-  const historyRow = await db.get("SELECT COUNT(*) AS n FROM usage_events");
-  if (Number(historyRow?.n || 0) < MIN_ORG_HISTORY_FOR_NEW_GEOGRAPHY_CHECK) return null;
+  const n = historyCount === null || historyCount === undefined ? await orgWideHistoryCount(db) : await historyCount;
+  if (n < MIN_ORG_HISTORY_FOR_NEW_GEOGRAPHY_CHECK) return null;
 
   const seenBefore = await db.get(
     "SELECT 1 AS found FROM usage_events WHERE client_region = ? LIMIT 1",
@@ -263,13 +284,20 @@ async function checkNewGeographyOrgWide({ client_region, db = defaultDb }) {
 // required field - team/agent_id/client_region - is absent) and returns
 // every one that fired, so a caller gets "here is everything this event
 // tripped" in one call instead of five.
+//
+// The org-wide history count needed by #4/#5 is computed AT MOST ONCE here
+// (not at all if neither check could possibly run) and handed to both as a
+// shared Promise, rather than each firing its own COUNT(*) - see
+// orgWideHistoryCount's comment above.
 async function checkAllAnomalies({ provider, model, cost_usd, team, agent_id, client_region, db = defaultDb }) {
+  const needsOrgHistoryCount = Boolean(provider && model) || Boolean(client_region);
+  const historyCount = needsOrgHistoryCount ? orgWideHistoryCount(db) : 0;
   const results = await Promise.all([
     checkAnomaly({ provider, model, cost_usd, team, db }),
     checkDailySpendAnomaly({ team, db }),
     checkRetryRateAnomaly({ agent_id, db }),
-    checkNewModelOrgWide({ provider, model, db }),
-    checkNewGeographyOrgWide({ client_region, db }),
+    checkNewModelOrgWide({ provider, model, db, historyCount }),
+    checkNewGeographyOrgWide({ client_region, db, historyCount }),
   ]);
   return results.filter(Boolean);
 }

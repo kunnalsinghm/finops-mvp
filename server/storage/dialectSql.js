@@ -110,6 +110,37 @@ function nowExpr() {
   return dialect === "postgres" ? "NOW()" : "datetime('now')";
 }
 
+// Start of the current UTC calendar day, and start of the next one - a
+// SARGABLE alternative to todayClause() for the specific hot-path queries
+// that need it (anomaly.js's per-team check, fraudDetection.js's per-key
+// check - both run on every proxied/ingested request). todayClause()
+// wraps the COLUMN in a function (date(event_time) = date('now')), which
+// means a database can't use a range scan on any index over that column at
+// all - it has to visit every row matching the rest of the WHERE clause
+// and evaluate the function on each one. event_time >= startOfTodayExpr()
+// AND event_time < startOfTomorrowExpr() is a plain range comparison on
+// the raw column, so a composite index with event_time as a trailing
+// column (idx_usage_team_time, idx_usage_user_time) can bound the scan to
+// just today's slice instead of the whole match set.
+//
+// Deliberately NOT a replacement for todayClause() itself, which stays
+// exactly as-is and is still used by every one of its other ~10 callers
+// (costs.js, tokenQuota.js, ...) - rewriting every "is this today" check
+// in the codebase to this shape is a separately-scoped change (see
+// docs/load-test-results.md); this pair exists for the two call sites
+// actually proven to need it.
+function startOfTodayExpr() {
+  return dialect === "postgres"
+    ? `TO_CHAR(date_trunc('day', NOW() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`
+    : `datetime('now', 'start of day')`;
+}
+
+function startOfTomorrowExpr() {
+  return dialect === "postgres"
+    ? `TO_CHAR(date_trunc('day', NOW() AT TIME ZONE 'UTC') + INTERVAL '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`
+    : `datetime('now', 'start of day', '+1 day')`;
+}
+
 module.exports = {
   sinceDaysAgo,
   yearMonthExpr,
@@ -118,4 +149,6 @@ module.exports = {
   thisWeekClause,
   thisMonthClause,
   nowExpr,
+  startOfTodayExpr,
+  startOfTomorrowExpr,
 };

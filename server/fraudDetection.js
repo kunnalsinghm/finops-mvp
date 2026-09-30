@@ -28,7 +28,7 @@
 // of this pass.
 
 const defaultDb = require("./storage");
-const { sinceDaysAgo, dayFloorExpr, todayClause } = require("./storage/dialectSql");
+const { sinceDaysAgo, dayFloorExpr, todayClause, startOfTodayExpr, startOfTomorrowExpr } = require("./storage/dialectSql");
 const { quarantineKey, isQuarantined } = require("./governance");
 const { logAudit } = require("./audit");
 const { deliverAlert } = require("./alertDelivery");
@@ -56,8 +56,14 @@ const MIN_HISTORY_FOR_MODEL_CHECK = 20; // key needs an established pattern befo
 const MIN_HISTORY_FOR_REGION_CHECK = 5;
 
 async function checkVolumeSpike(key_id, db = defaultDb) {
+  // Sargable range, not todayClause() - see startOfTodayExpr's comment in
+  // dialectSql.js and anomaly.js's matching fix. Same reasoning: this
+  // query is on the hot request path and idx_usage_user_time (migration
+  // 0011) can only bound it to "today" if the predicate is a plain range
+  // comparison, not a function wrapped around the column.
   const todayRow = await db.get(
-    `SELECT COUNT(*) AS n FROM usage_events WHERE user_id = ? AND ${todayClause("event_time")}`,
+    `SELECT COUNT(*) AS n FROM usage_events
+     WHERE user_id = ? AND event_time >= ${startOfTodayExpr()} AND event_time < ${startOfTomorrowExpr()}`,
     [key_id]
   );
   const todayCount = Number(todayRow?.n || 0);

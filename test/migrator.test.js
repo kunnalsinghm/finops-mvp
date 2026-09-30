@@ -27,6 +27,7 @@ test.after(() => { for (const d of tmp) fs.rmSync(d, { recursive: true, force: t
 const mig = (version, name, sqliteFn, pgFn = async () => {}) => ({ version, name, up: { sqlite: sqliteFn, postgres: pgFn } });
 const addCol = (v, name, table, col) => mig(v, name, (db) => db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`));
 const cols = (db, t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+const indexNames = (db, t) => db.prepare(`PRAGMA index_list(${t})`).all().map((i) => i.name);
 const versions = (db) => db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => r.version);
 function baselineDb(dir, name = "app.db") {
   const file = path.join(dir, name);
@@ -100,6 +101,10 @@ test("SQLite: a fresh database gets every migration once, recorded with checksum
   assert.ok(cols(db, "api_keys").includes("allow_pii_bypass"));
   assert.ok(cols(db, "users").includes("email"));
   assert.ok(cols(db, "users").includes("reset_token_hash"));
+  assert.ok(indexNames(db, "usage_events").includes("idx_usage_team_time"));
+  assert.ok(indexNames(db, "usage_events").includes("idx_usage_provider_model_time"));
+  assert.ok(indexNames(db, "usage_events").includes("idx_usage_user_provider_model"));
+  assert.ok(indexNames(db, "usage_events").includes("idx_usage_user_region"));
   assert.ok(cols(db, "users").includes("verify_token_hash"));
   assert.ok(cols(db, "usage_events").includes("key_id"));
   const again = runSqlite(db, { snapshot: false });
@@ -142,7 +147,7 @@ test("SQLite: a database upgraded by the OLD ad-hoc mechanism (columns present, 
   db.prepare("INSERT INTO api_keys (key_id,label,role) VALUES ('fk_real','r','developer')").run();
   db.prepare("INSERT INTO usage_events (event_time,provider,model,user_id,key_id,input_tokens,output_tokens,cost_usd,tagged) VALUES ('2026-01-01','openai','gpt-4o','fk_real','sentinel',1,1,0.1,0)").run();
   assert.doesNotThrow(() => runSqlite(db, { snapshot: false }));
-  assert.deepEqual(versions(db), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(versions(db), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   assert.equal(db.prepare("SELECT key_id FROM usage_events").get().key_id, "sentinel", "the one-time backfill must not run again");
   db.close();
 });
@@ -275,6 +280,7 @@ async function pgPool(schema) {
 }
 async function pgDrop(pool, schema) { try { await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); } finally { await pool.end(); } }
 const pgHasCol = async (pool, t, c) => (await pool.query("SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name=$1 AND column_name=$2", [t, c])).rowCount > 0;
+const pgHasIndex = async (pool, t, i) => (await pool.query("SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND tablename=$1 AND indexname=$2", [t, i])).rowCount > 0;
 const pgVersions = async (pool) => (await pool.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((r) => r.version);
 const pgOnly = { skip: isPostgres ? false : "Postgres backend only (runs in CI's test-postgres job)" };
 
@@ -289,6 +295,10 @@ test("Postgres: fresh baseline gets every migration once; a second run is a no-o
     assert.ok(await pgHasCol(pool, "api_keys", "allow_pii_bypass"));
     assert.ok(await pgHasCol(pool, "users", "email"));
     assert.ok(await pgHasCol(pool, "users", "reset_token_hash"));
+    assert.ok(await pgHasIndex(pool, "usage_events", "idx_usage_team_time"));
+    assert.ok(await pgHasIndex(pool, "usage_events", "idx_usage_provider_model_time"));
+    assert.ok(await pgHasIndex(pool, "usage_events", "idx_usage_user_provider_model"));
+    assert.ok(await pgHasIndex(pool, "usage_events", "idx_usage_user_region"));
     assert.ok(await pgHasCol(pool, "usage_events", "key_id"));
     assert.deepEqual((await migrator.runPostgres(pool)).applied, []);
   } finally { await pgDrop(pool, schema); }
@@ -316,7 +326,7 @@ test("Postgres: a database already upgraded by the old ad-hoc mechanism is adopt
     await pool.query("INSERT INTO api_keys (key_id,label,role) VALUES ('fk_real','r','developer')");
     await pool.query("INSERT INTO usage_events (event_time,provider,model,user_id,key_id,input_tokens,output_tokens,cost_usd,tagged) VALUES ('2026-01-01','openai','gpt-4o','fk_real','sentinel',1,1,0.1,0)");
     await migrator.runPostgres(pool);
-    assert.deepEqual(await pgVersions(pool), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    assert.deepEqual(await pgVersions(pool), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     assert.equal((await pool.query("SELECT key_id FROM usage_events")).rows[0].key_id, "sentinel");
   } finally { await pgDrop(pool, schema); }
 });

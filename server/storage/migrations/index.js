@@ -11,4 +11,5 @@ module.exports = [
   require("./0009_api_keys_allow_pii_bypass"),
   require("./0010_users_email_and_reset_tokens"),
   require("./0011_usage_events_user_time_index"),
+  require("./0012_usage_events_team_and_model_time_indexes"),
 ];

@@ -167,6 +167,42 @@ test("checkDailySpendAnomaly returns null when today's spend is within normal ra
   assert.equal(result, null);
 });
 
+test("PERFORMANCE REGRESSION (P0 load test): checkDailySpendAnomaly's today-spend query is a sargable range, not date(event_time) = date('now')", async (t) => {
+  // The old date()-wrapped equality couldn't use idx_usage_team_time
+  // (migration 0012) at all - SQLite/Postgres had to visit every row for
+  // that team and evaluate the function on each one. Confirmed by direct
+  // benchmark: this was the single largest remaining per-request cost even
+  // after the index existed (docs/load-test-results.md).
+  const { startOfTodayExpr, startOfTomorrowExpr } = require("../server/storage/dialectSql");
+  let capturedSql = null;
+  const originalGet = storage.get.bind(storage);
+  t.mock.method(storage, "get", (sql, ...rest) => {
+    if (/FROM usage_events\s+WHERE team = \?/.test(String(sql))) capturedSql = String(sql);
+    return originalGet(sql, ...rest);
+  });
+
+  const team = `sargable-check-${process.pid}`;
+  await checkDailySpendAnomaly({ team });
+
+  assert.ok(capturedSql, "expected the today-spend query to run and be captured");
+  assert.ok(!/date\(event_time\)\s*=\s*date\('now'\)/.test(capturedSql), "must not use the non-sargable date()=date() equality");
+  assert.ok(capturedSql.includes(startOfTodayExpr()), "must use the sargable lower bound");
+  assert.ok(capturedSql.includes(startOfTomorrowExpr()), "must use the sargable upper bound");
+
+  if (!isPostgres) {
+    const raw = new (require("node:sqlite").DatabaseSync)(dbPath, { readOnly: true });
+    const plan = raw
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events WHERE team = ? AND event_time >= ${startOfTodayExpr()} AND event_time < ${startOfTomorrowExpr()}`
+      )
+      .all(team)
+      .map((r) => r.detail)
+      .join(" | ");
+    raw.close();
+    assert.match(plan, /USING (COVERING )?INDEX idx_usage_team_time/, `expected an index range scan, got: ${plan}`);
+  }
+});
+
 test("checkDailySpendAnomaly flags today's spend when it exceeds the threshold percentage of the baseline, and fires only once per day", async () => {
   const team = `daily-spike-${process.pid}`;
   for (const days of [1, 2, 3, 4]) await seedEvent({ team, cost_usd: 10, event_time: daysAgoIso(days) });
@@ -316,4 +352,28 @@ test("checkAllAnomalies returns an empty array, not an error, when nothing fires
     client_region: null,
   });
   assert.deepEqual(results, []);
+});
+
+test("PERFORMANCE REGRESSION (P0 load test): checkAllAnomalies fires the unfiltered org-wide COUNT(*) AT MOST ONCE per call, not once per org-wide check", async (t) => {
+  // Before this fix, checkNewModelOrgWide and checkNewGeographyOrgWide each
+  // ran their own identical "SELECT COUNT(*) FROM usage_events" (no WHERE
+  // clause at all) on every single proxied/ingested request - two full
+  // redundant scans of the whole table for the exact same number.
+  let unfilteredCountCalls = 0;
+  const originalGet = storage.get.bind(storage);
+  t.mock.method(storage, "get", (sql, ...rest) => {
+    if (/^SELECT COUNT\(\*\) AS n FROM usage_events$/.test(String(sql).trim())) unfilteredCountCalls++;
+    return originalGet(sql, ...rest);
+  });
+
+  await checkAllAnomalies({
+    provider: "openai",
+    model: "gpt-4o",
+    cost_usd: 0.01,
+    team: null,
+    agent_id: null,
+    client_region: `some-region-${process.pid}`,
+  });
+
+  assert.equal(unfilteredCountCalls, 1, "provider+model AND client_region are both present, so both org-wide checks run - the count must still be fetched only once");
 });

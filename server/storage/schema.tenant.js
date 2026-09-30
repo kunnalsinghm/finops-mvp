@@ -50,6 +50,12 @@ CREATE INDEX IF NOT EXISTS idx_usage_agent ON usage_events(agent_id);
 CREATE INDEX IF NOT EXISTS idx_usage_task ON usage_events(task_id);
 -- P0 load test: fraud-signal + smart-tag queries filter on user_id (the API key); see migration 0011.
 CREATE INDEX IF NOT EXISTS idx_usage_user_time ON usage_events(user_id, event_time);
+-- Migration 0012 (single-tenant): same fix, same reasoning, for the
+-- team-scoped and provider+model-scoped anomaly queries in anomaly.js.
+CREATE INDEX IF NOT EXISTS idx_usage_team_time ON usage_events(team, event_time);
+CREATE INDEX IF NOT EXISTS idx_usage_provider_model_time ON usage_events(provider, model, event_time);
+CREATE INDEX IF NOT EXISTS idx_usage_user_provider_model ON usage_events(user_id, provider, model);
+CREATE INDEX IF NOT EXISTS idx_usage_user_region ON usage_events(user_id, client_region);
 
 CREATE TABLE IF NOT EXISTS gpu_usage_events (
   id SERIAL PRIMARY KEY,
