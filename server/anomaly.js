@@ -148,7 +148,7 @@ async function checkDailySpendAnomaly({ team, db = defaultDb }) {
     `SELECT COALESCE(SUM(cost_usd), 0) AS total, COUNT(DISTINCT ${dayFloorExpr("event_time")}) AS days
      FROM usage_events
      WHERE team = ? AND event_time >= ${sinceDaysAgo(DAILY_SPEND_BASELINE_LOOKBACK_DAYS)}
-       AND NOT ${todayClause("event_time")}`,
+       AND event_time < ${startOfTodayExpr()}`,
     [team]
   );
   const baselineDays = Number(baselineRow?.days || 0);

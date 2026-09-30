@@ -223,3 +223,19 @@ test("FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS is configurable - set to 1, a sin
     else process.env.FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS = prev;
   }
 });
+
+test("volume-spike baseline ignores today's rows (range bound, not per-row filter)", async () => {
+  const key = "key_baseline_excludes_today";
+  // Established baseline: 1 request/day on 5 distinct past days.
+  for (let d = 1; d <= 5; d++) {
+    await insertHistoryEvent({ key_id: key, provider: "openai", model: "gpt-4o", daysAgo: d });
+  }
+  // Heavy traffic today. If these leaked into the baseline, the average would
+  // rise and the spike would be masked.
+  for (let i = 0; i < 40; i++) {
+    await insertTodayEvent({ key_id: key, provider: "openai", model: "gpt-4o" });
+  }
+  const result = await checkKeyFraudSignals({ key_id: key, provider: "openai", model: "gpt-4o" });
+  assert.ok(result, "expected a fraud signal to be flagged");
+  assert.ok(result.reasons.includes("volume-spike"), `expected volume-spike in ${result.reasons}`);
+});

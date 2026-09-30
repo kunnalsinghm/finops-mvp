@@ -73,7 +73,7 @@ async function checkVolumeSpike(key_id, db = defaultDb) {
     `SELECT COUNT(*) AS n, COUNT(DISTINCT ${dayFloorExpr("event_time")}) AS days
      FROM usage_events
      WHERE user_id = ? AND event_time >= ${sinceDaysAgo(VOLUME_BASELINE_LOOKBACK_DAYS)}
-       AND NOT ${todayClause("event_time")}`,
+       AND event_time < ${startOfTodayExpr()}`,
     [key_id]
   );
   const days = Number(historyRow?.days || 0);
