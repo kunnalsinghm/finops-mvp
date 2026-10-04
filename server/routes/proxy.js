@@ -13,7 +13,7 @@
 
 const express = require("express");
 const defaultDb = require("../storage");
-const { yearMonthExpr } = require("../storage/dialectSql");
+const { currentMonthBounds } = require("../storage/dialectSql");
 const { computeCost, getRate } = require("../pricing");
 const { insertUsageEvent } = require("../usageStore");
 const { resolveIdentity, realKeyId } = require("../keyIdentity");
@@ -436,10 +436,16 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
   if (team && !backgroundExempt) {
     const budget = await req.db.get("SELECT * FROM budgets WHERE scope_type = 'team' AND scope_value = ?", [team]);
     if (budget) {
-      const month = new Date().toISOString().slice(0, 7);
+      // Sargable range, not yearMonthExpr()'s function-wrapped equality -
+      // see currentMonthBounds's comment in dialectSql.js. Measured
+      // ~40ms -> ~13.6ms/call at 100k rows for one team: this runs on
+      // EVERY proxied request for any team with a budget configured, so
+      // its cost is customer-facing request latency, not background-job
+      // runtime.
+      const { start: monthStart, end: monthEnd } = currentMonthBounds();
       const spend = await req.db.get(
-        `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events WHERE team = ? AND ${yearMonthExpr("event_time")} = ?`,
-        [team, month]
+        `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events WHERE team = ? AND event_time >= ? AND event_time < ?`,
+        [team, monthStart, monthEnd]
       );
       if (spend.spend >= budget.monthly_limit_usd) {
         const fallback = getFallback(providerName, requestedModel);

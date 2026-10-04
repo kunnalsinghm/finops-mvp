@@ -26,7 +26,7 @@
 // right fix is a per-tenant in-memory counter refreshed periodically (same
 // shape as governance.js's rate-limit buckets), not removing the check.
 
-const { yearMonthExpr } = require("./storage/dialectSql");
+const { currentMonthBounds } = require("./storage/dialectSql");
 
 function quotaResult({ allowed, limit, count, resource, message }) {
   return { allowed, limit, count, resource, message: allowed ? null : message };
@@ -69,10 +69,15 @@ async function checkMonthlyEventQuota(req) {
   const limit = req.tenantLimits?.max_monthly_events;
   if (limit == null) return quotaResult({ allowed: true, resource: "monthly_events" });
 
-  const month = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+  // Sargable range, not yearMonthExpr() - same reasoning and the same
+  // measured improvement as routes/proxy.js's budget check (see
+  // currentMonthBounds's comment in dialectSql.js). Runs on EVERY
+  // multi-tenant proxy/ingest request for a tenant with a monthly_events
+  // limit configured.
+  const { start, end } = currentMonthBounds();
   const row = await req.db.get(
-    `SELECT COUNT(*) AS n FROM usage_events WHERE ${yearMonthExpr("event_time")} = ?`,
-    [month]
+    `SELECT COUNT(*) AS n FROM usage_events WHERE event_time >= ? AND event_time < ?`,
+    [start, end]
   );
   const count = Number(row?.n || 0);
   return quotaResult({

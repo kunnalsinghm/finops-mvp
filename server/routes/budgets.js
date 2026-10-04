@@ -3,7 +3,7 @@
 // the underlying threshold math and an endpoint the dashboard/cron can poll.)
 
 const express = require("express");
-const { thisMonthClause } = require("../storage/dialectSql");
+const { currentMonthBounds } = require("../storage/dialectSql");
 const { logAudit } = require("../audit");
 const { requireAuth } = require("../auth");
 const { checkBudgetQuota } = require("../tenantQuota");
@@ -42,6 +42,10 @@ router.post("/", requireAuth("manage_budgets"), async (req, res) => {
 // fetching instead, same pattern as forecast.js.
 router.get("/status", requireAuth("read"), async (req, res) => {
   const budgets = await req.db.all("SELECT * FROM budgets");
+  // Sargable range, not thisMonthClause() - see currentMonthBounds's
+  // comment in dialectSql.js. Computed once for every budget row below,
+  // same as alerts.js's checkBudgetAlerts.
+  const { start: monthStart, end: monthEnd } = currentMonthBounds();
 
   const results = [];
   for (const b of budgets) {
@@ -64,8 +68,8 @@ router.get("/status", requireAuth("read"), async (req, res) => {
     const spend = await req.db.get(
       `SELECT SUM(cost_usd) AS spend
        FROM usage_events
-       WHERE ${col} = ? ${extraClause} AND ${thisMonthClause("event_time")}`,
-      [b.scope_value]
+       WHERE ${col} = ? ${extraClause} AND event_time >= ? AND event_time < ?`,
+      [b.scope_value, monthStart, monthEnd]
     );
 
     const spent = Math.round((spend.spend || 0) * 10000) / 10000;

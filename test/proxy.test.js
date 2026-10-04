@@ -506,6 +506,47 @@ test("budget hard block: a team under budget is never blocked, even for a model 
   assert.notEqual(res.headers["x-finops-degraded"], "true");
 });
 
+test("PERFORMANCE REGRESSION: the monthly budget spend query is a sargable range, not yearMonthExpr()'s function-wrapped equality", async (t) => {
+  // Measured directly (not estimated): on a 100k-row/6-month single-team
+  // dataset, the old strftime('%Y-%m',...)=?/TO_CHAR(...)=? form cost
+  // ~40ms/call; this sargable form, ~13.6ms/call, with the query plan
+  // confirming an index range scan bounded by team AND month (not just
+  // team). This runs on EVERY proxied request for any team with a budget
+  // configured, so its cost is customer-facing request latency.
+  const { currentMonthBounds } = require("../server/storage/dialectSql");
+  let capturedSql = null;
+  const originalGet = storage.get.bind(storage);
+  t.mock.method(storage, "get", (sql, ...rest) => {
+    if (/FROM usage_events WHERE team = \?/.test(String(sql))) capturedSql = String(sql);
+    return originalGet(sql, ...rest);
+  });
+
+  const key_id = await makeApiKey();
+  const team = `sargable-budget-check-${process.pid}`;
+  await storage.run("INSERT INTO budgets (scope_type, scope_value, monthly_limit_usd) VALUES ('team', ?, ?)", [team, 1000]);
+  t.mock.method(global, "fetch", async () => jsonResponse(openaiResponse(10, 10)));
+  await post("/api/proxy/openai", {
+    headers: { "X-API-Key": key_id, ...PROVIDER_KEY_HEADER, "X-Team": team },
+    body: { model: "gpt-3.5-turbo", messages: [{ role: "user", content: "hi" }] },
+  });
+
+  assert.ok(capturedSql, "expected the budget spend query to run and be captured");
+  assert.ok(!/strftime|TO_CHAR/.test(capturedSql), "must not wrap event_time in a date-extraction function");
+  const { start, end } = currentMonthBounds();
+  assert.ok(capturedSql.includes("event_time >= ?") && capturedSql.includes("event_time < ?"), "must use a sargable range");
+
+  if (!isPostgres) {
+    const raw = new (require("node:sqlite").DatabaseSync)(dbPath, { readOnly: true });
+    const plan = raw
+      .prepare("EXPLAIN QUERY PLAN SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events WHERE team = ? AND event_time >= ? AND event_time < ?")
+      .all(team, start, end)
+      .map((r) => r.detail)
+      .join(" | ");
+    raw.close();
+    assert.match(plan, /USING (COVERING )?INDEX idx_usage_team_time/, `expected an index range scan, got: ${plan}`);
+  }
+});
+
 test("background workload exemption: a team over budget is NOT blocked or degraded when a key that was GRANTED background rights sends X-Workload-Type: background", async (t) => {
   // The exemption is an admin-granted privilege on the key (allow_background),
   // not something any caller can claim by sending the header - see

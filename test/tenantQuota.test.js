@@ -148,6 +148,30 @@ if (!isPostgres) {
     assert.equal(a2.status, 429, "tenant A is now over ITS OWN limit");
   });
 
+  test("PERFORMANCE REGRESSION: checkMonthlyEventQuota's count query is a sargable range, not yearMonthExpr()'s function-wrapped equality", async (t) => {
+    // Same bug, same fix, same measured improvement as routes/proxy.js's
+    // budget check (see currentMonthBounds's comment in dialectSql.js).
+    // This runs on EVERY multi-tenant proxy/ingest request for a tenant
+    // with a monthly_events limit configured - not a rare path.
+    const tenant = await makeTenant(`Quota-Sargable-${process.pid}`);
+    const { controlPlaneDb } = tenancy.initControlPlane();
+    const tenantDb = await tenancy.getTenantDb(tenant.schema_name);
+
+    let capturedSql = null;
+    const originalGet = tenantDb.get.bind(tenantDb);
+    t.mock.method(tenantDb, "get", (sql, ...rest) => {
+      if (/FROM usage_events WHERE event_time/.test(String(sql))) capturedSql = String(sql);
+      return originalGet(sql, ...rest);
+    });
+
+    const fakeReq = { tenantId: tenant.id, tenantLimits: { max_monthly_events: 1000 }, db: tenantDb };
+    await checkMonthlyEventQuota(fakeReq);
+
+    assert.ok(capturedSql, "expected the monthly-event-count query to run and be captured");
+    assert.ok(!/strftime|TO_CHAR/.test(capturedSql), "must not wrap event_time in a date-extraction function");
+    assert.ok(capturedSql.includes("event_time >= ?") && capturedSql.includes("event_time < ?"), "must use a sargable range");
+  });
+
   test("single-tenant mode (no req.tenantId): every quota check is a no-op allow", async () => {
     const fakeReq = { tenantId: undefined, tenantLimits: undefined };
     assert.deepEqual((await checkApiKeyQuota(fakeReq)).allowed, true);

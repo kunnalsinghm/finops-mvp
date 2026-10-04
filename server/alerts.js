@@ -10,7 +10,7 @@
 
 const logger = require("./logger");
 const defaultDb = require("./storage");
-const { yearMonthExpr } = require("./storage/dialectSql");
+const { currentMonthBounds } = require("./storage/dialectSql");
 const { deliverAlert } = require("./alertDelivery");
 
 async function hasFired(budgetId, month, tier, db = defaultDb) {
@@ -47,14 +47,18 @@ async function markFired(budgetId, month, tier, db = defaultDb) {
 // whichever schema `db` points at, same as any other tenant-scoped route.
 async function checkBudgetAlerts(db = defaultDb) {
   const budgets = await db.all("SELECT * FROM budgets");
-  const month = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+  const month = new Date().toISOString().slice(0, 7); // 'YYYY-MM' - dedup key for hasFired/markFired below, unrelated to the query fix
+  // Sargable range for the SUM query below, not yearMonthExpr() - see
+  // currentMonthBounds's comment in dialectSql.js. Both computed once
+  // outside the loop since they're the same for every budget row this pass.
+  const { start, end } = currentMonthBounds();
 
   for (const b of budgets) {
     const col = b.scope_type === "team" ? "team" : b.scope_type === "key" ? "user_id" : "environment";
     const spend = await db.get(
       `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events
-       WHERE ${col} = ? AND ${yearMonthExpr("event_time")} = ?`,
-      [b.scope_value, month]
+       WHERE ${col} = ? AND event_time >= ? AND event_time < ?`,
+      [b.scope_value, start, end]
     );
 
     const pct = b.monthly_limit_usd > 0 ? spend.spend / b.monthly_limit_usd : 0;
@@ -91,14 +95,20 @@ async function checkBurnRate(db = defaultDb) {
   const now = new Date();
   const dayOfMonth = now.getDate();
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const month = now.toISOString().slice(0, 7);
+  const month = now.toISOString().slice(0, 7); // dedup key (tier string + hasFired/markFired below), unrelated to the query fix
+  // Sargable range for the SUM query below, not yearMonthExpr() - see
+  // currentMonthBounds's comment in dialectSql.js. Same UTC semantics
+  // `month` already had (toISOString() is always UTC), so this is a
+  // faithful swap for the query, not a change to which rows count as
+  // "this month".
+  const { start, end } = currentMonthBounds(now);
 
   for (const b of budgets) {
     const col = b.scope_type === "team" ? "team" : b.scope_type === "key" ? "user_id" : "environment";
     const spend = await db.get(
       `SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM usage_events
-       WHERE ${col} = ? AND ${yearMonthExpr("event_time")} = ?`,
-      [b.scope_value, month]
+       WHERE ${col} = ? AND event_time >= ? AND event_time < ?`,
+      [b.scope_value, start, end]
     );
 
     const projected = (spend.spend / dayOfMonth) * daysInMonth;

@@ -184,6 +184,22 @@ test("POST /:id/ack marks the specific alert acknowledged, and does not touch ot
 });
 
 test("POST /check-now fires a 50% budget alert exactly once, then does not re-fire it on a second call", async () => {
+  // PRE-EXISTING, DATE-DEPENDENT FLAKE (found while verifying an unrelated
+  // change, confirmed present on unmodified main too - nothing to do with
+  // that change): /check-now runs checkBudgetAlerts AND checkBurnRate
+  // together. checkBurnRate extrapolates today's spend across the whole
+  // month (spend / dayOfMonth * daysInMonth), so early in any calendar
+  // month a single $5 charge looks like a huge projected overrun and fires
+  // its OWN, unrelated "budget"-type alert alongside the 50% tier this
+  // test actually exercises. The two counted as one undifferentiated
+  // `alerts_log WHERE type = 'budget'` total, so this test passed or
+  // failed depending on what day of the month it happened to run on - e.g.
+  // reliably failing in the first few days of a month. Scoped to the 50%
+  // tier specifically (excluding burn-rate's distinct message prefix)
+  // rather than widening what counts as a pass, since the burn-rate
+  // alert's own correctness isn't this test's concern.
+  const budgetAlertFilter = "type = 'budget' AND message NOT LIKE '%Burn-rate%'";
+
   const key_id = await makeApiKey();
   const team = `alerts-team-${process.pid}`;
   const budget = await storage.run(
@@ -195,7 +211,7 @@ test("POST /check-now fires a 50% budget alert exactly once, then does not re-fi
     [new Date().toISOString(), team]
   );
 
-  const alertsBefore = await storage.get("SELECT COUNT(*) AS n FROM alerts_log WHERE type = 'budget'");
+  const alertsBefore = await storage.get(`SELECT COUNT(*) AS n FROM alerts_log WHERE ${budgetAlertFilter}`);
 
   const first = await request("/api/alerts/check-now", { method: "POST", headers: { "X-API-Key": key_id } });
   assert.equal(first.status, 200);
@@ -207,12 +223,12 @@ test("POST /check-now fires a 50% budget alert exactly once, then does not re-fi
   );
   assert.ok(firedRow, "expected the 50% tier to be marked fired for this budget/month");
 
-  const alertsAfterFirst = await storage.get("SELECT COUNT(*) AS n FROM alerts_log WHERE type = 'budget'");
-  assert.equal(alertsAfterFirst.n, alertsBefore.n + 1, "expected exactly one new budget alert logged");
+  const alertsAfterFirst = await storage.get(`SELECT COUNT(*) AS n FROM alerts_log WHERE ${budgetAlertFilter}`);
+  assert.equal(alertsAfterFirst.n, alertsBefore.n + 1, "expected exactly one new 50%-tier budget alert logged");
 
   const second = await request("/api/alerts/check-now", { method: "POST", headers: { "X-API-Key": key_id } });
   assert.equal(second.status, 200);
-  const alertsAfterSecond = await storage.get("SELECT COUNT(*) AS n FROM alerts_log WHERE type = 'budget'");
+  const alertsAfterSecond = await storage.get(`SELECT COUNT(*) AS n FROM alerts_log WHERE ${budgetAlertFilter}`);
   assert.equal(alertsAfterSecond.n, alertsAfterFirst.n, "re-running check-now must not duplicate an already-fired tier alert");
 });
 
