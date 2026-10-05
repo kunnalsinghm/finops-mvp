@@ -15,6 +15,7 @@ Run against `POST /api/proxy/openai` with `scripts/loadtest.js`, using
 | Throughput at ~20-25k rows, single burst (worst case: every row is "today") | ~45 req/s → **~78–88 req/s** after the follow-up fix below |
 | Throughput at ~20-25k rows, realistic history (only ~1.7% of rows are "today", spread over 60 days — see follow-up) | **~78–88 req/s**, roughly **1.8–2x** the original ~41–49 req/s |
 | Postgres, same query, 20k realistic rows | **0.9 ms** (index scan) vs **22.9 ms** (sequential scan) on the unfixed query — **~25x** |
+| Monthly budget check (`routes/proxy.js`, every request for a team with a budget) | **~40.0 ms → ~13.6 ms/call** at 100k rows — **~2.9x** — see Finding 2b |
 | Default per-key rate limit | **1 req/s sustained** (60 burst) — see Finding 3 |
 
 **The honest one-line conclusion:** the proxy is stable and never lost a billing
@@ -23,7 +24,9 @@ the query shapes this pass found — five hot-path queries fixed with additive
 indexes and two rewritten to be sargable — with one remaining, smaller,
 inherent cost documented below and a genuine "make it O(1)" option (a
 maintained rollup table) still on the table for later if a customer's volume
-ever needs it.
+ever needs it. A follow-up audit (Finding 2b) found the same non-sargable
+pattern in the monthly budget/quota checks — the single most expensive query
+found anywhere in the codebase — and closed it the same way.
 
 ## Test environment
 
@@ -173,6 +176,59 @@ volume ever gets large enough that the remaining `COUNT(DISTINCT date())`
 query becomes the bottleneck again, the rollup table is the next step, and
 this pass's benchmarking methodology (seed realistic historical data, not a
 single dense burst) is how to prove it's needed and prove it works.
+
+### 2b. Follow-up pass: the same non-sargable pattern in the monthly budget/quota checks (CLOSED)
+
+Found during a later audit, not this pass's original load test — worth
+recording here because it's the same root cause as Finding 2 and the single
+most expensive query found in the whole codebase, bigger than anything fixed
+above.
+
+`routes/proxy.js`'s monthly budget check wrapped `event_time` in
+`strftime('%Y-%m', event_time) = ?` / `TO_CHAR(...) = ?` (`yearMonthExpr()`)
+instead of a sargable range — the exact mistake already fixed everywhere else
+in Finding 2, just missed on this one query. It runs on **every proxied
+request for any team with a budget configured**, which is a core feature, not
+an edge case.
+
+Measured directly (not estimated) on a 100k-row/6-month single-team dataset:
+
+| | Query plan | Cost |
+|---|---|---|
+| Before (`yearMonthExpr`) | `SEARCH ... USING INDEX idx_usage_team_time (team=?)` | **~40.0 ms/call** |
+| After (sargable range) | `SEARCH ... USING INDEX idx_usage_team_time (team=? AND event_time>? AND event_time<?)` | **~13.6 ms/call** |
+
+~2.9x, and the index now bounds the scan to the current month instead of the
+team's entire history. Grepping for the same `yearMonthExpr`/`thisMonthClause`
+pattern found four more call sites with the identical bug, two of them on the
+same per-request hot path as the one above:
+
+| Location | Hot path? |
+|---|---|
+| `routes/proxy.js` — team budget check | **Yes, every request** |
+| `tenantQuota.js` — monthly event quota | **Yes, every multi-tenant request** |
+| `alerts.js` — `checkBudgetAlerts` | No, scheduled job |
+| `alerts.js` — `checkBurnRate` | No, scheduled job |
+| `routes/budgets.js` — `GET /status` | No, dashboard read |
+
+All five now use a new shared `currentMonthBounds()` helper in `dialectSql.js`
+(a plain `[start, end)` range, no dialect branching needed — unlike
+`startOfTodayExpr()`/`startOfTomorrowExpr()`, a month boundary needs no
+SQL-side date arithmetic at all, just two values computed once in JS).
+
+One adjacent, genuinely pre-existing bug was found and fixed as a byproduct,
+not part of this query fix: a test
+(`"POST /check-now fires a 50% budget alert exactly once..."`) failed, and
+turned out to fail identically on the **unmodified original code** too, given
+certain dates. `/check-now` runs `checkBudgetAlerts` and `checkBurnRate`
+together, and early in any calendar month `checkBurnRate`'s naive
+extrapolation (`spend ÷ dayOfMonth × daysInMonth`) makes a small charge look
+like a large projected overrun, firing a second, unrelated alert the test
+didn't account for. This was very likely the "mystery flaky test" an earlier
+session lost track of — not flaky, just date-dependent, and would have kept
+failing in the first few days of every month. Fixed by scoping the test's
+assertion to the specific tier it's actually testing, not by changing
+`checkBurnRate`'s own (separate, out of scope) extrapolation logic.
 
 ### 3. Default per-key rate limit is 1 request/sec
 The first run returned 439 × HTTP 429 out of 500. That is the per-key token
