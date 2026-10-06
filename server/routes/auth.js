@@ -76,6 +76,23 @@ async function sendBestEffort(sendFn, ...args) {
   }
 }
 
+// For the ANONYMOUS endpoints (forgot-password, resend-verification): start the
+// send but do NOT make the HTTP response wait for it. Awaiting the SMTP
+// round-trip only on the "account exists" branch makes that branch measurably
+// slower (hundreds of ms vs. a single indexed lookup), which lets an
+// unauthenticated caller enumerate accounts by response time even though the
+// response BODY is identical for every branch. sendBestEffort never rejects
+// (it catches and logs), so detaching it cannot produce an unhandled
+// rejection. Authenticated flows (registration) keep awaiting - there's no
+// enumeration concern there and the caller benefits from the send settling.
+//
+// Residual, stated honestly: the match branch still does one extra DB write
+// (issuing the token) and an audit-log write before responding, so response
+// time is no longer dominated by SMTP but is not strictly constant-time.
+function sendInBackground(sendFn, ...args) {
+  void sendBestEffort(sendFn, ...args);
+}
+
 if (tenancy.MULTI_TENANT) {
   // ---- Multi-tenant dashboard accounts ----
 
@@ -175,7 +192,7 @@ if (tenancy.MULTI_TENANT) {
     if (!tenancy.tenantAccessDenialReason(tenantRow)) {
       const result = await requestTenantPasswordReset({ tenant_id, username, db: controlPlaneDb });
       if (result) {
-        await sendBestEffort(sendPasswordResetEmail, result.email, result.token);
+        sendInBackground(sendPasswordResetEmail, result.email, result.token);
         try {
           const tenantDb = await tenancy.getTenantDb(tenantRow.schema_name);
           await logAudit(username, "user.password_reset_requested", username, {}, tenantDb);
@@ -220,7 +237,7 @@ if (tenancy.MULTI_TENANT) {
     const tenantRow = await tenancy.getTenantStatus(tenant_id);
     if (!tenancy.tenantAccessDenialReason(tenantRow)) {
       const result = await requestTenantEmailVerification({ tenant_id, username, db: controlPlaneDb });
-      if (result) await sendBestEffort(sendVerificationEmail, result.email, result.token);
+      if (result) sendInBackground(sendVerificationEmail, result.email, result.token);
     }
     res.json({ ok: true, message: GENERIC_EMAIL_QUEUED_MESSAGE });
   });
@@ -340,7 +357,7 @@ if (tenancy.MULTI_TENANT) {
     if (!username) return res.status(400).json({ error: "username is required" });
     const result = await requestPasswordReset(username);
     if (result) {
-      await sendBestEffort(sendPasswordResetEmail, result.email, result.token);
+      sendInBackground(sendPasswordResetEmail, result.email, result.token);
       await logAudit(username, "user.password_reset_requested", username, {});
     }
     res.json({ ok: true, message: GENERIC_EMAIL_QUEUED_MESSAGE });
@@ -369,7 +386,7 @@ if (tenancy.MULTI_TENANT) {
     const { username } = req.body || {};
     if (!username) return res.status(400).json({ error: "username is required" });
     const result = await requestEmailVerification(username);
-    if (result) await sendBestEffort(sendVerificationEmail, result.email, result.token);
+    if (result) sendInBackground(sendVerificationEmail, result.email, result.token);
     res.json({ ok: true, message: GENERIC_EMAIL_QUEUED_MESSAGE });
   });
 
