@@ -22,6 +22,7 @@
 const crypto = require("crypto");
 const { hashPassword, passwordMatches } = require("./passwordHash");
 const { generateToken, hashToken } = require("./tokenHash");
+const { MAX_ACCOUNTS_PER_EMAIL_RESET, normalizeEmail } = require("./emailLookup");
 
 const tenantSessions = new Map(); // token -> { tenantId, tenantSchema, username, role, expiresAt }
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -127,6 +128,31 @@ async function requestTenantPasswordReset({ tenant_id, username, db }) {
   return { token, email: user.email, username: user.username };
 }
 
+// Reset keyed by EMAIL - see users.js requestPasswordResetByEmail for the full
+// reasoning (verified-only, fan-out cap, never throws on no-match). The one
+// multi-tenant addition: the lookup is ALWAYS scoped by the tenant_id the
+// caller names. The same address in a different tenant is a different person's
+// account and must never be reachable from this one.
+async function requestTenantPasswordResetByEmail({ tenant_id, email, db }) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return [];
+  const rows = await db.all(
+    "SELECT username, email FROM users WHERE tenant_id = ? AND LOWER(TRIM(email)) = ? AND email_verified = 1 ORDER BY username LIMIT ?",
+    [tenant_id, normalized, MAX_ACCOUNTS_PER_EMAIL_RESET]
+  );
+  const results = [];
+  for (const row of rows) {
+    const token = generateToken();
+    const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
+    await db.run(
+      "UPDATE users SET reset_token_hash = ?, reset_token_expires_at = ? WHERE tenant_id = ? AND username = ?",
+      [hashToken(token), expiresAt, tenant_id, row.username]
+    );
+    results.push({ token, email: row.email.trim(), username: row.username });
+  }
+  return results;
+}
+
 // Self-service reset, step 2. Deliberately NOT scoped by tenant_id in the
 // WHERE clause (unlike every other function here) - the caller only has a
 // token from an emailed link, not a tenant_id to assert up front (that's the
@@ -188,6 +214,7 @@ module.exports = {
   destroyAllSessionsForTenant,
   resetTenantPassword,
   requestTenantPasswordReset,
+  requestTenantPasswordResetByEmail,
   resetTenantPasswordWithToken,
   requestTenantEmailVerification,
   verifyTenantEmailToken,

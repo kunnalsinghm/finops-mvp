@@ -33,6 +33,7 @@ const {
   destroySession,
   resetPassword,
   requestPasswordReset,
+  requestPasswordResetByEmail,
   resetPasswordWithToken,
   requestEmailVerification,
   verifyEmailToken,
@@ -44,6 +45,7 @@ const {
   destroyTenantSession,
   resetTenantPassword,
   requestTenantPasswordReset,
+  requestTenantPasswordResetByEmail,
   resetTenantPasswordWithToken,
   requestTenantEmailVerification,
   verifyTenantEmailToken,
@@ -61,6 +63,21 @@ const GENERIC_EMAIL_QUEUED_MESSAGE = "If an account matching that request exists
 
 function isValidEmail(email) {
   return typeof email === "string" && EMAIL_RE.test(email.trim());
+}
+
+// Input-shape validation for the anonymous forgot-password endpoints (both
+// modes). `username` and `email` are alternative ways to name the account and
+// are mutually exclusive: silently preferring one would hide a client bug, and
+// accepting both invites guessing which one "won". Every error here depends
+// ONLY on the request's own shape, never on whether any account exists, so a
+// 400 leaks nothing about accounts. Returns an error string or null.
+function forgotPasswordIdentifierError({ username, email }) {
+  const present = (v) => v !== undefined && v !== null && v !== "";
+  if (!present(username) && !present(email)) return "username or email is required";
+  if (present(username) && present(email)) return "provide either username or email, not both";
+  if (present(username) && typeof username !== "string") return "username must be a string";
+  if (present(email) && !isValidEmail(email)) return "email is not a valid email address";
+  return null;
 }
 
 // A best-effort send - a transient SMTP failure must not surface as a
@@ -180,22 +197,28 @@ if (tenancy.MULTI_TENANT) {
   // ---- Self-service password reset (multi-tenant) ----
 
   router.post("/forgot-password", forgotPasswordRateLimit, async (req, res) => {
-    const { tenant_id, username } = req.body || {};
-    if (!tenant_id || !username) {
-      return res.status(400).json({ error: "tenant_id and username are required" });
+    const { tenant_id, username, email } = req.body || {};
+    if (!tenant_id) {
+      return res.status(400).json({ error: "tenant_id and username (or email) are required" });
     }
+    const shapeError = forgotPasswordIdentifierError({ username, email });
+    if (shapeError) return res.status(400).json({ error: shapeError });
+
     const { controlPlaneDb } = tenancy.initControlPlane();
     const tenantRow = await tenancy.getTenantStatus(tenant_id);
     // A denied/unknown tenant still gets the generic response, same
     // enumeration-safety reasoning as an unknown username - the caller
     // learns nothing about whether tenant_id itself is valid.
     if (!tenancy.tenantAccessDenialReason(tenantRow)) {
-      const result = await requestTenantPasswordReset({ tenant_id, username, db: controlPlaneDb });
-      if (result) {
-        sendInBackground(sendPasswordResetEmail, result.email, result.token);
+      const via = email ? "email" : "username";
+      const results = email
+        ? await requestTenantPasswordResetByEmail({ tenant_id, email, db: controlPlaneDb })
+        : [await requestTenantPasswordReset({ tenant_id, username, db: controlPlaneDb })].filter(Boolean);
+      for (const result of results) {
+        sendInBackground(sendPasswordResetEmail, result.email, result.token, { username: result.username });
         try {
           const tenantDb = await tenancy.getTenantDb(tenantRow.schema_name);
-          await logAudit(username, "user.password_reset_requested", username, {}, tenantDb);
+          await logAudit(result.username, "user.password_reset_requested", result.username, { via }, tenantDb);
         } catch (err) {
           logger.error("Failed to write password-reset-requested audit entry", { error: err.message });
         }
@@ -353,12 +376,20 @@ if (tenancy.MULTI_TENANT) {
   // that would itself be an enumeration/DoS vector) since this is reachable
   // with zero credentials, same as login.
   router.post("/forgot-password", forgotPasswordRateLimit, async (req, res) => {
-    const { username } = req.body || {};
-    if (!username) return res.status(400).json({ error: "username is required" });
-    const result = await requestPasswordReset(username);
-    if (result) {
-      sendInBackground(sendPasswordResetEmail, result.email, result.token);
-      await logAudit(username, "user.password_reset_requested", username, {});
+    const { username, email } = req.body || {};
+    const shapeError = forgotPasswordIdentifierError({ username, email });
+    if (shapeError) return res.status(400).json({ error: shapeError });
+
+    // Both lookup paths normalise to a list (possibly empty) and share one
+    // response, so which path was used - and whether anything matched - is
+    // invisible to the caller.
+    const via = email ? "email" : "username";
+    const results = email
+      ? await requestPasswordResetByEmail(email)
+      : [await requestPasswordReset(username)].filter(Boolean);
+    for (const result of results) {
+      sendInBackground(sendPasswordResetEmail, result.email, result.token, { username: result.username });
+      await logAudit(result.username, "user.password_reset_requested", result.username, { via });
     }
     res.json({ ok: true, message: GENERIC_EMAIL_QUEUED_MESSAGE });
   });
