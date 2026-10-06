@@ -249,6 +249,17 @@ async function meterSafely(params) {
 // shadowTest.js's A8 streaming shadow-test support.
 const { parseOpenAIStreamUsage, parseAnthropicStreamUsage, parseStreamText } = require("../sseParsing");
 
+// A 502 puts err.message in the client's JSON body, but until this existed
+// nothing reached server-side logs, so an operator could see "my users get
+// 502s" in a ticket and have no trace of WHY on the box. Logs the failing
+// provider/model and the caller's key_id (never the provider API key - that
+// is the caller's own secret and is not in err.message for fetch failures).
+// `phase` distinguishes where it died: before any byte was streamed, mid-
+// stream, or on a non-streaming request.
+function logUpstreamFailure({ providerName, effectiveModel, rateLimitKey, phase, err }) {
+  logger.error(`[proxy] upstream ${phase} failed for ${providerName}/${effectiveModel} (key ${rateLimitKey}): ${err.message}`);
+}
+
 router.post("/:provider", requireAuth("write"), async (req, res) => {
   const providerName = req.params.provider.toLowerCase();
   const endpoint = PROVIDER_ENDPOINTS[providerName];
@@ -610,6 +621,12 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       }
 
       const partial = clientAborted || Boolean(streamError);
+      if (streamError) {
+        logUpstreamFailure({
+          providerName, effectiveModel, rateLimitKey, err: streamError,
+          phase: res.headersSent ? "stream (died mid-stream, headers already sent)" : "stream (before first byte)",
+        });
+      }
       if (streamError && !res.headersSent) {
         // Nothing reached the client yet - a clean error is still possible.
         res.status(502).json({ error: "Upstream provider stream failed", detail: streamError.message });
@@ -678,6 +695,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
         if (isTimeoutError(err)) {
           res.status(504).json({ error: `Upstream provider did not respond within ${upstreamTimeoutMs()}ms` });
         } else {
+          logUpstreamFailure({ providerName, effectiveModel, rateLimitKey, phase: "stream request", err });
           res.status(502).json({ error: "Upstream provider stream failed", detail: err.message });
         }
       } else {
@@ -816,6 +834,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
     if (isTimeoutError(err)) {
       return res.status(504).json({ error: `Upstream provider did not respond within ${upstreamTimeoutMs()}ms` });
     }
+    logUpstreamFailure({ providerName, effectiveModel, rateLimitKey, phase: "request", err });
     res.status(502).json({ error: "Upstream provider request failed", detail: err.message });
   }
 });
