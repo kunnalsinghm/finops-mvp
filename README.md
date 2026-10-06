@@ -117,6 +117,19 @@ Two-tenant isolation is proven end-to-end over real HTTP against real Postgres s
 - Multi-tier budgets (team/project/key/background), progressive alerts (50/80/90/100%), burn-rate alerts
 - `GET /api/alerts/status` — a consolidated status endpoint for external monitoring (unacknowledged count, broken down by type, most recent alert) to poll, rather than requiring a monitoring tool to interpret the raw log itself
 - Delivery via Slack Incoming Webhook, a generic webhook (Discord/Teams/ntfy.sh/PagerDuty-compatible), and/or SMTP email; always logged locally regardless of delivery config
+- **Signed generic webhooks (opt-in).** Set `FINOPS_WEBHOOK_SECRET` and every generic-webhook POST carries `X-FinOps-Signature: t=<unix seconds>,v1=<hex>`, where `v1` is HMAC-SHA256 over `<t>.<raw body>` keyed by the secret. The timestamp is inside the signed string, so reject requests whose `t` is more than a few minutes old to stop replays. **If `FINOPS_WEBHOOK_SECRET` is unset, webhooks are sent unsigned, exactly as before** — a deliberate backward-compatibility choice so existing `FINOPS_WEBHOOK_URL` setups don't break on upgrade; a receiver that needs authenticity should set the secret *and* reject requests without the header. Slack and email delivery are unaffected. Receiver-side verification (Node, no dependencies):
+
+  ```js
+  const crypto = require("crypto");
+  // `rawBody` must be the body bytes exactly as received (e.g. express.raw()), NOT re-serialised JSON.
+  function verify(rawBody, header, secret, toleranceSeconds = 300) {
+    const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(header || "");
+    if (!m) return false;
+    if (Math.abs(Date.now() / 1000 - Number(m[1])) > toleranceSeconds) return false; // replay guard
+    const expected = crypto.createHmac("sha256", secret).update(`${m[1]}.${rawBody}`).digest();
+    return crypto.timingSafeEqual(Buffer.from(m[2], "hex"), expected);
+  }
+  ```
 
 ### Optimization engine
 - Rule-based model-switch recommendations, each starting with an explicit caveat: cost-only estimate, quality unverified
