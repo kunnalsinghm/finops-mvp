@@ -104,6 +104,25 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires_at TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token_expires_at TEXT;
+
+-- "Invite a teammate" (see server/invites.js, routes/invites.js, and the
+-- single-tenant twin in migration 0013). Per-tenant: every query against this
+-- table is scoped by tenant_id except the token lookup at accept time, which is
+-- by token hash and derives the tenant FROM the invite row. Only a hash of the
+-- token is stored. MUST stay AFTER the tenants table above (foreign key).
+CREATE TABLE IF NOT EXISTS invites (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+  email TEXT NOT NULL,
+  role TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  invited_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  accepted_at TEXT,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_control_plane_invites_tenant ON invites(tenant_id, email);
 `;
 // NOTE: users.username is UNIQUE PER TENANT here (UNIQUE(tenant_id,
 // username)), not globally unique like single-tenant mode's users table.

@@ -63,4 +63,25 @@ async function sendVerificationEmail(toEmail, token) {
   return true;
 }
 
-module.exports = { sendPasswordResetEmail, sendVerificationEmail };
+// Invitation to join. Sent by an AUTHENTICATED admin (routes/invites.js), so
+// unlike the anonymous reset/verify sends it is awaited: there is no
+// enumeration concern, and the admin is told whether it actually went out.
+// `orgName` is the tenant's name in multi-tenant mode. The inviter's own
+// identifier is deliberately NOT included (an API-key label can be internal).
+async function sendInviteEmail(toEmail, token, { role, orgName } = {}) {
+  const transporter = getAccountEmailTransporter();
+  if (!transporter) return false;
+  const link = appUrl(`/accept-invite.html?token=${token}`);
+  await transporter.sendMail({
+    from: getEmailFromAddress(),
+    to: toEmail,
+    subject: orgName ? `You're invited to join ${orgName} on FinOps` : "You're invited to join FinOps",
+    text:
+      `You've been invited to ${orgName ? `join ${orgName} on` : "join"} FinOps${role ? ` as ${role}` : ""}.\n\n` +
+      `Accept the invitation and choose your username and password: ${link}\n\n` +
+      `This link expires in 7 days and can be used once. If you weren't expecting this, you can safely ignore this email.`,
+  });
+  return true;
+}
+
+module.exports = { sendPasswordResetEmail, sendVerificationEmail, sendInviteEmail };

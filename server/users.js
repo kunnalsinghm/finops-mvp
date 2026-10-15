@@ -23,15 +23,22 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour - short-lived, emailed link
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours - less sensitive than a password reset
 
-async function createUser({ username, password, role = "viewer", email = null }) {
+// `emailVerified: true` is for the one caller that has ALREADY proven control of
+// the address - accepting an invite, whose link was delivered to that address.
+// It stores email_verified = 1 and issues no verification token. Everyone else
+// leaves it false, so a typed-in address stays unverified until its link is used.
+async function createUser({ username, password, role = "viewer", email = null, emailVerified = false }) {
   const { hash, salt } = hashPassword(password);
-  await db.run("INSERT INTO users (username, password_hash, salt, role, email) VALUES (?, ?, ?, ?, ?)", [
+  const verifiedNow = Boolean(email && emailVerified);
+  await db.run("INSERT INTO users (username, password_hash, salt, role, email, email_verified) VALUES (?, ?, ?, ?, ?, ?)", [
     username,
     hash,
     salt,
     role,
     email || null,
+    verifiedNow ? 1 : 0,
   ]);
+  if (verifiedNow) return {};
   // A verification token is issued whenever an email was given, so the
   // caller (routes/auth.js) can send it via accountEmail.js. No email given
   // -> nothing to verify, email_verified just stays its default (0/false)

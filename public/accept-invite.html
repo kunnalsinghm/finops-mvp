@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<title>Accept invitation · FinOps</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- The invitation token is in the URL; don't leak it through Referer. -->
+<meta name="referrer" content="no-referrer" />
+<link rel="stylesheet" href="dashboard.css" />
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .recovery-wrap { width: 100%; max-width: 380px; }
+  .recovery-brand { text-align: center; margin-bottom: 18px; }
+  .recovery-brand h1 { font-size: 18px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .recovery-brand .sub { color: var(--text-muted); font-size: 12.5px; }
+  .recovery-msg { font-size: 12.5px; margin-top: 10px; line-height: 1.5; }
+  .recovery-msg.error { color: var(--danger); }
+  .recovery-msg.ok { color: var(--good); }
+  .recovery-back { display: block; text-align: center; margin-top: 16px; color: var(--text-muted); font-size: 12.5px; text-decoration: none; }
+  .recovery-back:hover { color: var(--text); }
+  input[type="password"], input[type="text"] { margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+  <div class="recovery-wrap">
+    <div class="recovery-brand">
+      <h1>FinOps</h1>
+      <span class="sub">Accept your invitation</span>
+    </div>
+
+    <div class="panel" id="acceptPanel">
+      <h2 class="panel-title">Create your account</h2>
+      <div class="tick-rule"></div>
+      <input id="username" type="text" placeholder="choose a username" autocomplete="username" />
+      <input id="password" type="password" placeholder="password (min 8 characters)" autocomplete="new-password" />
+      <input id="confirmPassword" type="password" placeholder="confirm password" autocomplete="new-password" />
+      <button id="acceptBtn" class="primary" style="width:100%;">Create account</button>
+      <div id="acceptMsg" class="recovery-msg"></div>
+    </div>
+
+    <div class="panel" id="missingPanel" style="display:none;">
+      <h2 class="panel-title">Invitation link incomplete</h2>
+      <div class="tick-rule"></div>
+      <div class="recovery-msg error">This page needs the full link from your invitation email.</div>
+    </div>
+
+    <a class="recovery-back" href="index.html">&larr; Back to dashboard</a>
+  </div>
+
+<script>
+  const token = new URLSearchParams(window.location.search).get("token");
+  const msg = document.getElementById("acceptMsg");
+
+  function setMsg(text, kind) {
+    msg.textContent = text;
+    msg.className = "recovery-msg" + (kind ? " " + kind : "");
+  }
+
+  if (!token) {
+    document.getElementById("acceptPanel").style.display = "none";
+    document.getElementById("missingPanel").style.display = "";
+  } else {
+    document.getElementById("acceptBtn").addEventListener("click", async () => {
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      const confirm = document.getElementById("confirmPassword").value;
+      if (!username) return setMsg("Choose a username.", "error");
+      if (password.length < 8) return setMsg("Password must be at least 8 characters.", "error");
+      if (password !== confirm) return setMsg("Passwords don't match.", "error");
+      setMsg("Creating account…");
+      let res, json = {};
+      try {
+        res = await fetch("/api/invites/accept", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, username, password }),
+        });
+        try { json = await res.json(); } catch {}
+      } catch {
+        return setMsg("Network error. Try again.", "error");
+      }
+      if (res.ok) {
+        const tenant = json.tenant_id != null ? " Your tenant id is " + json.tenant_id + " (you need it to log in)." : "";
+        setMsg("Account created." + tenant + " You can log in now.", "ok");
+        document.getElementById("acceptBtn").disabled = true;
+      } else {
+        setMsg(json.error || "Something went wrong. Try again.", "error");
+      }
+    });
+  }
+</script>
+
+</body>
+</html>
