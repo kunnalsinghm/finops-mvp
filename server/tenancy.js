@@ -159,6 +159,45 @@ function wrapPool(pool) {
   return { get, all, run, exec, transaction, pool };
 }
 
+// `CREATE SCHEMA IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` are NOT safe
+// against a concurrent identical statement from another session: Postgres can
+// raise "duplicate key value violates unique constraint
+// pg_type_typname_nsp_index" (or pg_namespace_nspname_index / "already
+// exists"). For the control plane that is two replicas booting together; for a
+// tenant it is two replicas both serving the first request for a brand-new
+// tenant. Same bug class, same fix as storage/postgres.js's
+// createBaselineSchema().
+//
+// Session-level advisory lock on a DEDICATED connection, released in `finally`
+// (and released by Postgres itself if the connection dies, so a crashed booter
+// can never wedge the others). The key is derived from the schema NAME, not
+// current_schema(), because current_schema() is NULL until the schema exists -
+// exactly the moment this lock matters. The "finops_tenancy_schema:" prefix
+// keeps it distinct from the baseline lock and the migrator's lock.
+async function createSchemaLocked(pool, schemaName, schemaSql) {
+  const lockKey = `finops_tenancy_schema:${schemaName}`;
+  const client = await pool.connect();
+  let broken = false;
+  try {
+    await client.query("SELECT pg_advisory_lock(hashtext($1))", [lockKey]);
+    try {
+      await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+      await client.query(schemaSql);
+    } finally {
+      try {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]);
+      } catch {
+        // Could not unlock cleanly: destroy this connection rather than hand
+        // a lock-holding client back to the pool. Postgres drops the lock
+        // when the session ends.
+        broken = true;
+      }
+    }
+  } finally {
+    client.release(broken ? true : undefined);
+  }
+}
+
 // ---- Control plane: one schema, shared by every tenant, holds ONLY
 // tenants/api_keys/users (see schema.controlPlane.js for why). ----
 
@@ -186,8 +225,7 @@ function initControlPlane() {
   controlPlaneDb = wrapPool(controlPlanePool);
   const { CONTROL_PLANE_SCHEMA_SQL } = require("./storage/schema.controlPlane");
   controlPlaneReady = (async () => {
-    await controlPlanePool.query(`CREATE SCHEMA IF NOT EXISTS ${controlPlaneSchema}`);
-    await controlPlanePool.query(CONTROL_PLANE_SCHEMA_SQL);
+    await createSchemaLocked(controlPlanePool, controlPlaneSchema, CONTROL_PLANE_SCHEMA_SQL);
   })().catch((err) => {
     throw new Error(`Control-plane schema initialization failed: ${err.message}`);
   });
@@ -213,8 +251,7 @@ function getTenantPool(schemaName) {
   const db = wrapPool(pool);
   const { TENANT_SCHEMA_SQL } = require("./storage/schema.tenant");
   const ready = (async () => {
-    await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-    await pool.query(TENANT_SCHEMA_SQL);
+    await createSchemaLocked(pool, schemaName, TENANT_SCHEMA_SQL);
   })().catch((err) => {
     throw new Error(`Tenant schema initialization failed for '${schemaName}': ${err.message}`);
   });

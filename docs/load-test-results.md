@@ -256,9 +256,22 @@ Why it was missed: the suite always ran against a database whose tables already 
 original sandbox had 1 CPU, so `node --test` ran files one at a time. Verify Postgres changes against an
 **empty** database on a machine with several cores.
 
-Not covered by this fix: `server/tenancy.js` creates the control-plane and per-tenant schemas with the
-same unlocked pattern. Concurrent first boot of a *multi-tenant* deployment, and concurrent creation of
-the same tenant, have not been tested and may have the same race.
+Not covered by this fix: `server/tenancy.js` (see 2d below, which closes this gap).
+
+### 2d. Real bug (fixed): the same first-boot race in multi-tenant mode (`server/tenancy.js`)
+
+The gap noted in 2c was real. `server/tenancy.js` created the control-plane schema (`initControlPlane`)
+and each tenant's schema (`getTenantPool`) with the same unlocked `CREATE SCHEMA IF NOT EXISTS` +
+`CREATE TABLE IF NOT EXISTS` pattern. Measured on Postgres 16 (2-core sandbox) against the unfixed code,
+with 8 real child processes starting at once on an empty schema: creating the *same tenant schema* failed
+7 of 8 in round 1; initializing the *control plane* failed 2 of 8 by round 3. Error:
+`duplicate key value violates unique constraint "pg_type_typname_nsp_index"`.
+
+Fix: both paths now go through one helper, `createSchemaLocked()`, which holds a session-level advisory
+lock on a dedicated connection keyed by schema name (`finops_tenancy_schema:<name>`, distinct from the
+baseline and migrator locks), released in `finally`; a connection that fails to unlock is destroyed
+rather than returned to the pool. Regression test: `test/tenancyConcurrentBoot.test.js` (red on the old
+code, green on the fix).
 
 ### 3. Default per-key rate limit is 1 request/sec
 The first run returned 439 × HTTP 429 out of 500. That is the per-key token
