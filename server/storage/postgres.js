@@ -87,11 +87,42 @@ function toPositional(sql) {
 }
 
 const { SCHEMA_SQL } = require("./schema.postgres");
-const ready = (async () => {
-  if (schemaName) {
-    await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+// `CREATE SCHEMA IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` are NOT safe
+// against a concurrent identical statement from another session: Postgres can
+// raise "duplicate key value violates unique constraint
+// pg_type_typname_nsp_index" (or pg_class_relname_nsp_index /
+// pg_namespace_nspname_index / "relation ... already exists"). That is two
+// replicas booting together against a fresh database - and it crashed startup
+// for all but one of them. The migrator already serializes its own step with an
+// advisory lock; this serializes the baseline step that runs just before it.
+//
+// Session-level lock on a dedicated connection, released in `finally` (and
+// released by Postgres itself if the connection dies, so a crashed booter can
+// never wedge the others). The key is derived from the schema NAME, not
+// current_schema(), because current_schema() is NULL until the schema exists -
+// which is exactly the moment this lock matters. It is a different key from the
+// migrator's, so the two never deadlock: this lock is released before
+// runPostgres() takes its own.
+async function createBaselineSchema() {
+  const lockKey = `finops_schema_baseline:${schemaName || "public"}`;
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT pg_advisory_lock(hashtext($1))", [lockKey]);
+    try {
+      if (schemaName) {
+        await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+      }
+      await client.query(SCHEMA_SQL); // frozen version-1 baseline
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]);
+    }
+  } finally {
+    client.release();
   }
-  await pool.query(SCHEMA_SQL); // frozen version-1 baseline
+}
+
+const ready = (async () => {
+  await createBaselineSchema();
   await require("./migrator").runPostgres(pool, { log: require("../logger") });
 })().catch((err) => {
   throw new Error(`Postgres schema initialization failed: ${err.message}`);
