@@ -10,9 +10,18 @@
 const { logAlert } = require("./governance");
 const defaultDb = require("./storage");
 const logger = require("./logger");
+const crypto = require("crypto");
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || "";
 const GENERIC_WEBHOOK_URL = process.env.FINOPS_WEBHOOK_URL || "";
+// Optional. When set, every generic-webhook POST carries an
+// X-FinOps-Signature header (see signWebhookBody below). When unset, the
+// webhook is sent UNSIGNED, exactly as before signing existed. That is a
+// deliberate backward-compatibility choice, not an oversight: failing closed
+// here would silently break every deployment that configured
+// FINOPS_WEBHOOK_URL before this variable existed. Receivers that need
+// authenticity should set the secret and reject unsigned requests.
+const GENERIC_WEBHOOK_SECRET = process.env.FINOPS_WEBHOOK_SECRET || "";
 const SMTP_HOST = process.env.FINOPS_SMTP_HOST || "";
 const SMTP_PORT = Number(process.env.FINOPS_SMTP_PORT) || 587;
 const SMTP_USER = process.env.FINOPS_SMTP_USER || "";
@@ -81,13 +90,38 @@ async function sendSlack(message) {
   });
 }
 
+// Signature scheme (Stripe-style, so receivers can reuse familiar code):
+//   X-FinOps-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, `${t}.${rawBody}`)>
+// The timestamp is inside the signed string so a captured request cannot be
+// replayed later with a refreshed `t`; receivers should reject old `t` values
+// (verifyWebhookSignature below defaults to a 5 minute tolerance).
+function signWebhookBody(body, secret, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const v1 = crypto.createHmac("sha256", secret).update(`${nowSeconds}.${body}`).digest("hex");
+  return `t=${nowSeconds},v1=${v1}`;
+}
+
+// Reference verifier (also what the README snippet mirrors). `body` must be
+// the RAW request body exactly as received - re-serialising parsed JSON
+// changes the bytes and breaks the match.
+function verifyWebhookSignature(body, header, secret, { toleranceSeconds = 300, nowSeconds } = {}) {
+  if (typeof header !== "string" || typeof body !== "string" || !secret) return false;
+  const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(header);
+  if (!m) return false;
+  const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+  if (Math.abs(now - Number(m[1])) > toleranceSeconds) return false;
+  const expected = crypto.createHmac("sha256", secret).update(`${m[1]}.${body}`).digest();
+  const given = Buffer.from(m[2], "hex");
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+
 async function sendGenericWebhook(message) {
   if (!GENERIC_WEBHOOK_URL) return;
-  await fetch(GENERIC_WEBHOOK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: message, timestamp: new Date().toISOString() }),
-  });
+  // Serialise once and sign/send that same string, so the signed bytes are
+  // exactly the bytes on the wire.
+  const body = JSON.stringify({ text: message, timestamp: new Date().toISOString() });
+  const headers = { "Content-Type": "application/json" };
+  if (GENERIC_WEBHOOK_SECRET) headers["X-FinOps-Signature"] = signWebhookBody(body, GENERIC_WEBHOOK_SECRET);
+  await fetch(GENERIC_WEBHOOK_URL, { method: "POST", headers, body });
 }
 
 async function sendEmail(message) {
@@ -150,6 +184,8 @@ module.exports = {
   deliverAlert,
   sendSlack,
   sendGenericWebhook,
+  signWebhookBody,
+  verifyWebhookSignature,
   sendEmail,
   getEmailTransporter,
   getAccountEmailTransporter,

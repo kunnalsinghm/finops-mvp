@@ -30,7 +30,11 @@ function appUrl(path) {
   return `${base}${path}`;
 }
 
-async function sendPasswordResetEmail(toEmail, token) {
+// `username` is optional and only for the body text. It matters because one
+// email address can be on several accounts (reset-by-email sends one message
+// per account); without it the recipient couldn't tell the emails apart. It is
+// only ever sent to the address on file for that very account.
+async function sendPasswordResetEmail(toEmail, token, { username } = {}) {
   const transporter = getAccountEmailTransporter();
   if (!transporter) return false;
   const link = appUrl(`/reset-password.html?token=${token}`);
@@ -39,7 +43,7 @@ async function sendPasswordResetEmail(toEmail, token) {
     to: toEmail,
     subject: "Reset your FinOps password",
     text:
-      `A password reset was requested for your FinOps account.\n\n` +
+      `A password reset was requested for your FinOps account${username ? ` (${username})` : ""}.\n\n` +
       `Reset your password: ${link}\n\n` +
       `This link expires in 1 hour. If you didn't request this, you can safely ignore this email - your password will not be changed.`,
   });

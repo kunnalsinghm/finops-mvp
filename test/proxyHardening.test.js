@@ -607,3 +607,85 @@ test("STREAMING: a stream that yields nothing before failing costs nothing and i
   await settle(); // an absence check must wait, or it would pass even if a write were still in flight
   assert.equal(await countEvents(key), 0);
 });
+
+// ---------------------------------------------------------------------------
+// Every 502 must leave a server-side trace. Before this, err.message reached
+// the CLIENT in the JSON body but nothing reached the logs - an operator
+// debugging "users are getting 502s" had nothing on the box to look at. Each
+// test below drives one 502 site (plus the silent mid-stream variant) and
+// asserts logger.error was called with the provider/model, the caller's key_id
+// and the real cause - and that the caller's provider API key is NOT logged.
+// ---------------------------------------------------------------------------
+const logger = require("../server/logger");
+
+function upstreamFailureLogs(errorMock) {
+  return errorMock.mock.calls.map((c) => String(c.arguments[0])).filter((m) => /\[proxy\] upstream/.test(m));
+}
+const ASK = { model: "claude-haiku-4-5", max_tokens: 50, messages: [{ role: "user", content: "hi" }] };
+
+test("502 LOGGING (non-streaming): an unreachable upstream is logged server-side with provider/model, key and cause - and never the provider key", async (t) => {
+  const errorMock = t.mock.method(logger, "error", () => {});
+  const key = await makeApiKey("developer");
+  t.mock.method(global, "fetch", async () => { throw new Error("socket hang up"); });
+  const res = await post("/api/proxy/openai", { headers: { "X-API-Key": key, ...PK }, body: chat("gpt-4.1") });
+  assert.equal(res.status, 502);
+  assert.match(res.json.detail, /socket hang up/, "client-visible behavior must be unchanged");
+  const logs = upstreamFailureLogs(errorMock);
+  assert.equal(logs.length, 1, `expected exactly one upstream-failure log, got: ${JSON.stringify(logs)}`);
+  assert.match(logs[0], /openai\/gpt-4\.1/);
+  assert.ok(logs[0].includes(key), "log should identify the calling key_id");
+  assert.match(logs[0], /socket hang up/);
+  assert.ok(!errorMock.mock.calls.some((c) => JSON.stringify(c.arguments).includes(PK["X-Provider-Key"])), "the caller's provider API key must never be logged");
+});
+
+test("502 LOGGING (streaming, request fails before a stream exists): logged with the real cause", async (t) => {
+  const errorMock = t.mock.method(logger, "error", () => {});
+  const key = await makeApiKey("developer");
+  t.mock.method(global, "fetch", async () => { throw new Error("ECONNRESET on connect"); });
+  const res = await post("/api/proxy/anthropic", { headers: { "X-API-Key": key, ...PK }, body: { ...ASK, stream: true } });
+  assert.equal(res.status, 502);
+  assert.match(res.json.detail, /ECONNRESET on connect/);
+  const logs = upstreamFailureLogs(errorMock);
+  assert.equal(logs.length, 1, `expected exactly one upstream-failure log, got: ${JSON.stringify(logs)}`);
+  assert.match(logs[0], /anthropic\/claude-haiku-4-5/);
+  assert.ok(logs[0].includes(key));
+  assert.match(logs[0], /ECONNRESET on connect/);
+  assert.match(logs[0], /stream request failed/, "must be the pre-stream catch site, not the in-stream one");
+});
+
+test("502 LOGGING (streaming, dies before the first byte): logged, and the 502 is still returned", async (t) => {
+  const errorMock = t.mock.method(logger, "error", () => {});
+  const key = await makeApiKey("developer");
+  t.mock.method(global, "fetch", async () => ({ ok: true, status: 200, body: streamOf([], { throwAfter: "boom before first byte" }) }));
+  const res = await post("/api/proxy/anthropic", { headers: { "X-API-Key": key, ...PK }, body: { ...ASK, stream: true } });
+  assert.equal(res.status, 502);
+  const logs = upstreamFailureLogs(errorMock);
+  assert.equal(logs.length, 1, `expected exactly one upstream-failure log, got: ${JSON.stringify(logs)}`);
+  assert.match(logs[0], /before first byte/);
+  assert.match(logs[0], /boom before first byte/);
+  assert.ok(logs[0].includes(key));
+});
+
+test("502 LOGGING (streaming, dies MID-stream): previously fully silent - the client got a truncated 200 and nothing was logged", async (t) => {
+  const errorMock = t.mock.method(logger, "error", () => {});
+  const key = await makeApiKey("developer");
+  t.mock.method(global, "fetch", async () => ({ ok: true, status: 200, body: streamOf([anthropicStart(11)], { throwAfter: "upstream died mid-stream" }) }));
+  const res = await post("/api/proxy/anthropic", { headers: { "X-API-Key": key, ...PK }, body: { ...ASK, stream: true } });
+  assert.equal(res.status, 200, "headers were already sent, so a 502 is no longer possible");
+  const logs = upstreamFailureLogs(errorMock);
+  assert.equal(logs.length, 1, `expected exactly one upstream-failure log, got: ${JSON.stringify(logs)}`);
+  assert.match(logs[0], /mid-stream/);
+  assert.match(logs[0], /upstream died mid-stream/);
+});
+
+test("502 LOGGING: a healthy request logs no upstream failure (no false positives)", async (t) => {
+  const errorMock = t.mock.method(logger, "error", () => {});
+  const key = await makeApiKey("developer");
+  t.mock.method(global, "fetch", async () => ({
+    ok: true, status: 200,
+    json: async () => ({ id: "x", choices: [{ message: { role: "assistant", content: "hi" } }], usage: { prompt_tokens: 5, completion_tokens: 2 } }),
+  }));
+  const res = await post("/api/proxy/openai", { headers: { "X-API-Key": key, ...PK }, body: chat("gpt-4.1") });
+  assert.equal(res.status, 200);
+  assert.equal(upstreamFailureLogs(errorMock).length, 0);
+});

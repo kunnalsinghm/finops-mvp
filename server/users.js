@@ -16,6 +16,7 @@ const crypto = require("crypto");
 const db = require("./storage");
 const { hashPassword, passwordMatches } = require("./passwordHash");
 const { generateToken, hashToken } = require("./tokenHash");
+const { MAX_ACCOUNTS_PER_EMAIL_RESET, normalizeEmail } = require("./emailLookup");
 
 const sessions = new Map(); // token -> { username, role, expiresAt }
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -113,6 +114,43 @@ async function requestPasswordReset(username) {
   return { token, email: user.email, username: user.username };
 }
 
+// Step 1 of self-service reset, keyed by EMAIL instead of username. Same
+// enumeration-safety contract as requestPasswordReset: never throws for "no
+// match", returns an empty array so the route can respond identically.
+//
+// Only VERIFIED addresses are eligible (email_verified = 1). The username path
+// will mail whatever address is on file, verified or not, because the caller
+// had to know the username. Here the caller needs only an address, which is
+// far easier to know or guess, and an unverified address may be a typo that
+// belongs to a stranger - letting that stranger type it in and receive a live
+// reset link for someone else's account would be an account-takeover path.
+// (If an "update my email" feature is ever added it MUST reset email_verified
+// to 0, or this guarantee silently breaks.)
+//
+// One address can be on several accounts (no UNIQUE constraint), so this
+// issues a separate token per matching account, capped at
+// MAX_ACCOUNTS_PER_EMAIL_RESET, in a stable order (by username).
+async function requestPasswordResetByEmail(email) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return [];
+  const rows = await db.all(
+    "SELECT username, email FROM users WHERE LOWER(TRIM(email)) = ? AND email_verified = 1 ORDER BY username LIMIT ?",
+    [normalized, MAX_ACCOUNTS_PER_EMAIL_RESET]
+  );
+  const results = [];
+  for (const row of rows) {
+    const token = generateToken();
+    const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
+    await db.run("UPDATE users SET reset_token_hash = ?, reset_token_expires_at = ? WHERE username = ?", [
+      hashToken(token),
+      expiresAt,
+      row.username,
+    ]);
+    results.push({ token, email: row.email.trim(), username: row.username });
+  }
+  return results;
+}
+
 // Step 2: redeem the token from the emailed link. Throws (caller turns this
 // into a 400) rather than returning null, unlike requestPasswordReset -
 // there's no enumeration concern on this side, the caller already has
@@ -174,6 +212,7 @@ module.exports = {
   destroySession,
   resetPassword,
   requestPasswordReset,
+  requestPasswordResetByEmail,
   resetPasswordWithToken,
   requestEmailVerification,
   verifyEmailToken,

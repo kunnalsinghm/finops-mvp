@@ -230,6 +230,36 @@ failing in the first few days of every month. Fixed by scoping the test's
 assertion to the specific tier it's actually testing, not by changing
 `checkBurnRate`'s own (separate, out of scope) extrapolation logic.
 
+### 2c. Real bug (fixed): concurrent first boot on an empty Postgres database crashed all but one process
+
+Found while verifying a later patch series on a developer machine that runs test files in parallel: the
+Postgres test suite failed intermittently-to-always on a *brand-new* database with
+`Postgres schema initialization failed: duplicate key value violates unique constraint
+"pg_type_typname_nsp_index"`, and passed once the tables existed.
+
+Root cause (in production code, not the tests): `server/storage/postgres.js` ran the baseline
+`CREATE SCHEMA IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS` script with no lock. Those statements are
+not safe against a concurrent identical statement from another session. In production this is two
+replicas (or a rolling deploy) booting at the same moment against a fresh database. Only the migrator's
+later step was serialized (advisory lock).
+
+Measured on real Postgres 16, unpatched code, 8 processes starting simultaneously on an empty
+database: **7 of 8 failed in every one of 6 rounds** (error variants seen: `pg_type_typname_nsp_index`,
+`pg_class_relname_nsp_index`, `pg_namespace_nspname_index`, `relation "usage_events" already exists`).
+After the fix: 0 of 8 failed in 6 of 6 rounds (default `public` schema), and the regression test
+`test/postgresConcurrentBoot.test.js` is red on the old code and green on the fix.
+
+Fix: the baseline step now runs under a session-level advisory lock on a dedicated connection, keyed by
+schema name (not `current_schema()`, which is NULL before the schema exists), released in `finally`.
+
+Why it was missed: the suite always ran against a database whose tables already existed, and the
+original sandbox had 1 CPU, so `node --test` ran files one at a time. Verify Postgres changes against an
+**empty** database on a machine with several cores.
+
+Not covered by this fix: `server/tenancy.js` creates the control-plane and per-tenant schemas with the
+same unlocked pattern. Concurrent first boot of a *multi-tenant* deployment, and concurrent creation of
+the same tenant, have not been tested and may have the same race.
+
 ### 3. Default per-key rate limit is 1 request/sec
 The first run returned 439 × HTTP 429 out of 500. That is the per-key token
 bucket working as coded (capacity 60, refill 1/s, previously hard-coded), not a
