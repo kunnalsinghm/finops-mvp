@@ -27,6 +27,7 @@ const crypto = require("crypto");
 const tenancy = require("../tenancy");
 const tenantLifecycle = require("../tenantLifecycle");
 const logger = require("../logger");
+const { buildOverview, OverviewInputError } = require("../platformOverview");
 
 const router = express.Router();
 
@@ -59,6 +60,20 @@ function handleLifecycleError(err, res) {
 
 router.get("/tenants", async (req, res) => {
   res.json(await tenancy.listAllTenants());
+});
+
+// Read-only cross-tenant health/usage overview: per-tenant status, limits,
+// key/user counts, this month's event count and spend, last activity, and a
+// few health flags. Aggregates only - see platformOverview.js for why this is
+// safe to read across tenant schemas and why it is read-only.
+router.get("/overview", async (req, res) => {
+  try {
+    res.json(await buildOverview({ limit: req.query.limit, status: req.query.status }));
+  } catch (err) {
+    if (err instanceof OverviewInputError) return res.status(400).json({ error: err.message });
+    logger.error("Platform overview failed", { error: err.message });
+    res.status(500).json({ error: "Could not build the overview" });
+  }
 });
 
 router.get("/tenants/:id", async (req, res) => {
