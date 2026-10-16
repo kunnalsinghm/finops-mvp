@@ -1,0 +1,138 @@
+# Changelog
+
+All notable changes to this project, newest first.
+
+**How to read this file**
+
+- The project has **no release tags**, and `package.json` still says `0.2.0` (it has not been bumped).
+  Sections are therefore grouped by the pull request or work series they landed in, with commit dates,
+  not by version number. Pick a version scheme before the first tagged release; until then, the commit
+  hash is the identifier.
+- Entries before PR #2 are summarised from the commit messages (many are a one-line subject) and
+  deliberately add no detail beyond them; use `git show <hash>` for specifics. Entries for PR #2 and
+  PR #3 were written from the code and tests and include behaviour notes.
+- "Upgrade notes" call out anything that changes behaviour or needs an operator action.
+
+## [Unreleased]
+
+### Fixed
+- `README.md` contained an unresolved merge-conflict block (`<<<<<<< ours` … `>>>>>>> theirs`) since
+  98d27e8. Both sides documented different environment variables, so the resolved line keeps all of them.
+  `test/noConflictMarkers.test.js` now fails if any text file in the repo has such a block.
+
+### Added
+- This changelog.
+- Written plans (RFC-style) for infrastructure-as-code and horizontal scaling, a real OpenTelemetry
+  exporter, and the dashboard-framework question, under `docs/rfcs/`. No code changes accompany them.
+
+## 2026-10-15 → 2026-10-16 — PR #3 (`p2-series`)
+
+### Added
+- **Invite a teammate** (de061c0): `POST/GET/DELETE /api/invites` and `POST /api/invites/accept`, plus
+  `public/accept-invite.html`, in single- and multi-tenant mode. An admin invites an email address with a
+  role; the recipient follows an emailed link and chooses their own username and password.
+  - Tokens are 32 random bytes and stored only as a SHA-256 hash; they expire after 7 days and redeem
+    exactly once (one atomic conditional `UPDATE`, so concurrent accepts create one account).
+  - An inviter can only grant a role whose permissions they hold; `agent` is never invitable.
+  - Accepting never says why a link failed (unknown, expired, used, revoked, or suspended tenant all
+    return the same `400`); `409` for a taken username returns the link to the invitee.
+  - At most 50 pending invites per deployment/tenant; re-inviting an address supersedes its older link.
+  - The accepted account is created with `email_verified = 1`. The invite email is awaited (the endpoint
+    is authenticated) and the response reports `email_sent`.
+- **Cross-tenant health/usage overview** (4f96eae): `GET /api/platform/overview`, read-only and
+  aggregates only (status, limits, key/user counts, this month's events and spend, last activity, health
+  flags). Gated by `FINOPS_PLATFORM_ADMIN_TOKEN` like the rest of `/api/platform/*`. It deliberately does
+  not use `getTenantDb`, which would recreate a purged tenant's schema.
+- **`/api/v1`** (8429641): every route group is served at both `/api/<name>` and `/api/v1/<name>` (the
+  same router instance). The Stripe webhook, `/api/platform/*` and `/api/health` are not versioned.
+- **OpenAPI**: `GET /api/v1/openapi.json` (unauthenticated) describes proxy, ingest, keys, auth and
+  invites. It is hand-written; a test checks it against the real routers in both directions.
+- Migration 13 (`invites`, single-tenant) and a matching `invites` table in the multi-tenant control plane.
+
+### Fixed
+- **Multi-tenant first-boot race** (68a684e): concurrent first boot of a multi-tenant deployment, or
+  concurrent first requests for a new tenant, crashed all but one process with
+  `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`. Control-plane and
+  per-tenant schema creation now run under a session-level advisory lock. In one run on Postgres 16 with
+  8 simultaneous processes against an empty schema, same-tenant creation failed 7 of 8 and control-plane
+  init failed 2 of 8 (the race is timing-dependent, so counts vary).
+- **Tenant guard bypass risk** (8429641): `server/tenantGuard.js` matched `req.baseUrl` against the exact
+  `/api/<name>`, so a plain `/api/v1` alias would have skipped it for any route group marked not
+  tenant-aware. It now matches the canonical path and is registered at both prefixes. The guard list is
+  empty today, so this was a latent risk, not a live leak.
+
+### Upgrade notes
+- Single-tenant: migration 13 runs automatically on startup. SQLite writes a verified snapshot first;
+  on **Postgres, take a `pg_dump` or snapshot before deploying** (there is no automatic one).
+- Multi-tenant: the new control-plane `invites` table is created with `CREATE TABLE IF NOT EXISTS` on
+  first boot, because the control plane is not covered by the versioned migrator.
+- Invite links use `FINOPS_APP_URL` (as the reset/verify links do); with SMTP unconfigured, invites are
+  created but not sent (`email_sent: false`).
+
+## 2026-10-06 → 2026-10-15 — PR #2 (`p1-series`)
+
+### Security
+- **Generic webhooks are signed** (4b71489): when `FINOPS_WEBHOOK_SECRET` is set, outgoing webhooks carry
+  `X-FinOps-Signature: t=<unix seconds>,v1=<HMAC-SHA256(secret, "<t>.<body>")>`. With the variable unset
+  they are sent unsigned, as before. The README has a verification snippet.
+- **Timing oracle closed** (431bfd4): forgot-password and resend-verification used to answer measurably
+  slower for a real account, because the SMTP send was awaited only on that branch. The email is now sent
+  after the response, in single- and multi-tenant mode.
+
+### Added
+- **Forgot-password by email** (e845c04): `POST /api/auth/forgot-password` accepts `{username}` or
+  `{email}` (exactly one). Email lookup matches **verified** addresses only, is scoped to the tenant in
+  multi-tenant mode, and sends at most 5 emails per request (one address can sit on several accounts).
+  The generic response is unchanged.
+
+### Fixed
+- **Concurrent first boot on an empty Postgres database** (b5e4be8): baseline schema creation is now
+  serialised with an advisory lock; previously all but one process crashed at startup.
+- **Silent upstream failures in the proxy** (1dd75a7): every 502 path, and the previously silent
+  mid-stream failure, now logs the provider, model and key before responding.
+
+## 2026-09-28 → 2026-10-06 — P0 hardening
+
+### Security
+- Admin-gated the `X-Disable-PII-Redaction` bypass; fixed a bug in the fraud check; added self-service
+  password reset and email verification (48edd6a).
+- The legal drafts added in 48edd6a were removed again pending lawyer review (82d158e, a59d0cd).
+
+### Performance
+- Added a `usage_events` index and a load test (48edd6a); bounded the volume and daily-spend baselines
+  with an index range (807ab1d); fixed non-sargable monthly-SUM queries in the budget check, event quota
+  and alerts (8b89488, 6e5e62c). Measurements are in `docs/load-test-results.md`.
+
+### Fixed
+- Multi-tenant `users` schema ordering and a flaky weekly-briefing test (ef40e0e); anomaly-detection and
+  storage-migration updates (90e3b7b).
+
+## 2026-09-23 → 2026-09-27 — A-series
+
+- **A10–A13** (98d27e8): Postgres backup and disaster recovery, a real readiness endpoint
+  (`/health/ready`), reconciliation categorisation, the tech-stack migration plan
+  (`docs/tech-stack-migration-plan.md`), and opt-in OTel-compatible request tracing
+  (`FINOPS_OTEL_ENABLED`, JSON lines on stdout — not yet a real exporter).
+- **A6–A9** (088b3f3): automated fraud response, tool-call governance, shadow-test streaming and judge,
+  and additional RBAC roles.
+- **A5** (71d0909): unified anomaly detection (daily spend, retry rate, new model, new geography).
+- **A1** (6226900): multi-tenancy feature-complete — seven more route groups enabled, session login,
+  per-tenant jobs, quotas and lifecycle.
+- **A2–A4** (5354052): attribution dimensions, tagging rules, FOCUS export.
+
+## 2026-09-18 → 2026-09-20 — governance hardening, migrations, Guard v2
+
+- **Guard v2 scope** (4ca0635): agent-level attribution, smart tagging, blended GPU + API cost view,
+  FOCUS 1.3 split allocation, agent action governance (tool-call tracking).
+- **Governance hardening** (a9071da): identity is bound to the API key, not to request headers (team
+  mismatch → `403`; background exemption is an admin-granted per-key privilege;
+  `FINOPS_STRICT_IDENTITY`); real model IDs are priced (normalisation, family fallback,
+  `FINOPS_UNPRICED_POLICY`, `GET /api/pricing/unpriced`); an upstream timeout
+  (`FINOPS_UPSTREAM_TIMEOUT_MS`); and a durable metering spool so a recording failure no longer turns a
+  billed success into a `502`.
+- **`usage_events.key_id`** (2ef4102): every usage event records the authenticating API key.
+- **Versioned schema migrations** (ae10248): numbered, checksummed, atomic migrations with a SQLite
+  pre-migration snapshot; backups are consistent (`VACUUM INTO`), verified and restorable (also 97c8174,
+  4f595ea).
+- Earlier foundation work (07451b8, da8ff16, 03f12a2, 575db83, fe4e347): multi-tenant data layer,
+  platform update, `package-lock.json`, ignoring the spool file, and removing a one-time patch script.
