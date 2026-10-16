@@ -20,4 +20,10 @@ function normalizeEmail(email) {
   return typeof email === "string" ? email.trim().toLowerCase() : "";
 }
 
-module.exports = { MAX_ACCOUNTS_PER_EMAIL_RESET, normalizeEmail };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isValidEmail(email) {
+  return typeof email === "string" && EMAIL_RE.test(email.trim());
+}
+
+module.exports = { MAX_ACCOUNTS_PER_EMAIL_RESET, normalizeEmail, isValidEmail };

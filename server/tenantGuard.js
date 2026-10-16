@@ -17,13 +17,17 @@
 // is on.
 
 const tenancy = require("./tenancy");
+const { canonicalApiPath } = require("./apiMounts");
 
 const NOT_TENANT_AWARE = [];
 
 function blockInMultiTenant({ isMultiTenant = () => tenancy.MULTI_TENANT } = {}) {
   return function notTenantAware(req, res, next) {
     if (!isMultiTenant()) return next();
-    const entry = NOT_TENANT_AWARE.find((e) => req.baseUrl === e.path);
+    // Match on the CANONICAL path so /api/v1/<name> is guarded exactly like
+    // /api/<name> (see apiMounts.js for why this must not be exact-match on one
+    // spelling).
+    const entry = NOT_TENANT_AWARE.find((e) => canonicalApiPath(req.baseUrl) === e.path);
     return res.status(501).json({
       error: `${req.baseUrl} is not available in multi-tenant mode yet: ${entry ? entry.why : "it is not tenant-aware"}. It is disabled rather than risk showing one tenant another tenant's data.`,
     });

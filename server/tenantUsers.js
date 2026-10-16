@@ -29,12 +29,16 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour - see users.js, identical reasoning
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-async function createTenantUser({ tenant_id, username, password, role = "viewer", email = null, db }) {
+// `emailVerified: true` - see users.js's createUser: only for a caller that has
+// already proven control of the address (accepting an invite).
+async function createTenantUser({ tenant_id, username, password, role = "viewer", email = null, emailVerified = false, db }) {
   const { hash, salt } = hashPassword(password);
+  const verifiedNow = Boolean(email && emailVerified);
   await db.run(
-    "INSERT INTO users (tenant_id, username, password_hash, salt, role, email) VALUES (?, ?, ?, ?, ?, ?)",
-    [tenant_id, username, hash, salt, role, email || null]
+    "INSERT INTO users (tenant_id, username, password_hash, salt, role, email, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [tenant_id, username, hash, salt, role, email || null, verifiedNow ? 1 : 0]
   );
+  if (verifiedNow) return {};
   if (email) {
     return { verifyToken: await issueTenantEmailVerificationToken({ tenant_id, username, db }) };
   }

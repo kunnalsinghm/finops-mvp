@@ -21,6 +21,8 @@ const recommendationsRoute = require("./routes/recommendations");
 const proxyRoute = require("./routes/proxy");
 const { router: gitopsRoute } = require("./routes/gitops");
 const authRoute = require("./routes/auth");
+const invitesRoute = require("./routes/invites");
+const { mountApi } = require("./apiMounts");
 const ssoRoute = require("./routes/sso");
 const reconcileRoute = require("./routes/reconcile");
 const auditRoute = require("./routes/audit");
@@ -107,41 +109,46 @@ app.use("/health", healthRoute);
 
 // Route groups not yet converted to per-tenant databases are switched off in multi-tenant
 // mode (501) instead of silently serving the default schema. See tenantGuard.js.
-for (const { path: guarded } of NOT_TENANT_AWARE) app.use(guarded, blockInMultiTenant());
+for (const { path: guarded } of NOT_TENANT_AWARE) mountApi(app, guarded, blockInMultiTenant());
 
-app.use("/api/ingest", ingestRoute);
-app.use("/api/costs", costsRoute);
-app.use("/api/budgets", budgetsRoute);
-app.use("/api/pricing", pricingRoute);
-app.use("/api/keys", keysRoute);
-app.use("/api/alerts", alertsRoute);
-app.use("/api/recommendations", recommendationsRoute);
-app.use("/api/proxy", proxyRoute);
-app.use("/api/gitops", gitopsRoute);
-app.use("/api/auth", authRoute);
-app.use("/api/sso", ssoRoute);
-app.use("/api/reconcile", reconcileRoute);
-app.use("/api/audit", auditRoute);
-app.use("/api/cache", cacheRoute);
-app.use("/api/semantic-cache", semanticCacheRoute);
-app.use("/api/data", dataRoute);
-app.use("/api/backup", backupRoute);
-app.use("/api/shadow-test", shadowTestRoute);
-app.use("/api/model-allowlist", modelAllowlistRoute);
-app.use("/api/tool-call-denylist", toolCallDenylistRoute);
-app.use("/api/token-quotas", tokenQuotaRoute);
-app.use("/api/commitments", commitmentsRoute);
-app.use("/api/reports", reportsRoute);
-app.use("/api/billing", billingRoute);
-app.use("/api/agents", agentsRoute);
-app.use("/api/tags", tagsRoute);
-app.use("/api/region-allowlist", regionAllowlistRoute);
-app.use("/api/tool-calls", toolCallsRoute);
-app.use("/api/gpu-usage", gpuUsageRoute);
-app.use("/api/query", queryRoute);
+// The API description. Unauthenticated on purpose: it documents the public surface
+// and contains no tenant data. Versioned path only - it describes /api/v1.
+app.get("/api/v1/openapi.json", (req, res) => res.json(require("./openapi")));
+
+mountApi(app, "/api/ingest", ingestRoute);
+mountApi(app, "/api/costs", costsRoute);
+mountApi(app, "/api/budgets", budgetsRoute);
+mountApi(app, "/api/pricing", pricingRoute);
+mountApi(app, "/api/keys", keysRoute);
+mountApi(app, "/api/alerts", alertsRoute);
+mountApi(app, "/api/recommendations", recommendationsRoute);
+mountApi(app, "/api/proxy", proxyRoute);
+mountApi(app, "/api/gitops", gitopsRoute);
+mountApi(app, "/api/auth", authRoute);
+mountApi(app, "/api/invites", invitesRoute);
+mountApi(app, "/api/sso", ssoRoute);
+mountApi(app, "/api/reconcile", reconcileRoute);
+mountApi(app, "/api/audit", auditRoute);
+mountApi(app, "/api/cache", cacheRoute);
+mountApi(app, "/api/semantic-cache", semanticCacheRoute);
+mountApi(app, "/api/data", dataRoute);
+mountApi(app, "/api/backup", backupRoute);
+mountApi(app, "/api/shadow-test", shadowTestRoute);
+mountApi(app, "/api/model-allowlist", modelAllowlistRoute);
+mountApi(app, "/api/tool-call-denylist", toolCallDenylistRoute);
+mountApi(app, "/api/token-quotas", tokenQuotaRoute);
+mountApi(app, "/api/commitments", commitmentsRoute);
+mountApi(app, "/api/reports", reportsRoute);
+mountApi(app, "/api/billing", billingRoute);
+mountApi(app, "/api/agents", agentsRoute);
+mountApi(app, "/api/tags", tagsRoute);
+mountApi(app, "/api/region-allowlist", regionAllowlistRoute);
+mountApi(app, "/api/tool-calls", toolCallsRoute);
+mountApi(app, "/api/gpu-usage", gpuUsageRoute);
+mountApi(app, "/api/query", queryRoute);
 // Tenant signup - deliberately unauthenticated (a new customer has no key yet) and a 404
 // unless FINOPS_MULTI_TENANT=true. See routes/tenants.js.
-app.use("/api/tenants", tenantsRoute);
+mountApi(app, "/api/tenants", tenantsRoute);
 // Operator/ops surface for tenant lifecycle - gated by its own shared
 // secret (FINOPS_PLATFORM_ADMIN_TOKEN), not a tenant API key or session.
 // See routes/platformAdmin.js's header for the full reasoning.
