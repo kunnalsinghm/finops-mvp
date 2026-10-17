@@ -28,4 +28,23 @@ const db = new DatabaseSync(DB_PATH);
 db.exec("PRAGMA journal_mode = WAL;");
 db.exec(SCHEMA_SQL);
 
+// Teardown must release EVERY handle on the file. storage/sqlite.js opens its
+// own handle on the same path, and tests only ever call this module's close().
+// Linux lets an open file be unlinked; Windows refuses (EBUSY), so each test
+// run left a stale .tmp-*.db behind. close() therefore also closes the storage
+// handle - but only if that module is already loaded (never load it here: see
+// the header about creation order).
+const nativeClose = db.close.bind(db);
+db.close = function close() {
+  try {
+    nativeClose();
+  } finally {
+    const loaded = require.cache[require.resolve("./storage/sqlite")];
+    const storageRaw = loaded && loaded.exports && loaded.exports.raw;
+    if (storageRaw && storageRaw !== db) {
+      try { storageRaw.close(); } catch { /* already closed */ }
+    }
+  }
+};
+
 module.exports = db;
