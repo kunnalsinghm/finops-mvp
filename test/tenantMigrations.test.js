@@ -20,6 +20,9 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
 } else {
   const CP_SCHEMA = `cp_h1a_${process.pid}`;
   process.env.FINOPS_CONTROL_PLANE_SCHEMA = CP_SCHEMA;
+  // These tests assert "the next request retries"; the retry backoff window
+  // (covered in tenantInitBackoff.test.js) would hide that, so turn it off.
+  process.env.FINOPS_TENANT_INIT_RETRY_MS = "0";
 
   const { Pool } = require("pg");
   const tenancy = require("../server/tenancy");
@@ -38,6 +41,11 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
       await db.run(`INSERT INTO ${table} (n) VALUES (?)`, [version]);
     });
 
+  // The real control-plane list is no longer empty (migration 2, H1b): fixtures
+  // build on top of it and the real entries are restored after each test.
+  const cpReal = [...cpList];
+  const cpRealVersions = [1, ...cpReal.map((m) => m.version)];
+  const cpBase = cpRealVersions[cpRealVersions.length - 1];
   const created = new Set();
   const name = (tag) => {
     const s = `tenant_h1a_${tag}_${process.pid}`.toLowerCase();
@@ -64,7 +72,7 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
 
   test.afterEach(() => {
     tenantList.length = 0;
-    cpList.length = 0;
+    cpList.splice(0, cpList.length, ...cpReal);
   });
 
   test.after(async () => {
@@ -197,21 +205,22 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
   });
 
   test("control plane is versioned the same way, and a failed init is retried, not cached", async () => {
-    cpList.push(marker(2, "h1a_cp_marker"));
+    await tenancy.closeAll(); // earlier tests may have opened it (status recording); start cold
+    cpList.push(marker(cpBase + 1, "h1a_cp_marker"));
     const first = tenancy.initControlPlane();
     await first.controlPlaneReady;
     await withAdmin(async (admin) => {
-      assert.deepEqual((await versionsOf(admin, CP_SCHEMA)).map((r) => r.version), [1, 2]);
+      assert.deepEqual((await versionsOf(admin, CP_SCHEMA)).map((r) => r.version), [...cpRealVersions, cpBase + 1]);
       assert.equal(await count(admin, CP_SCHEMA, "h1a_cp_marker"), 1);
     });
     await tenancy.closeAll();
 
-    cpList.push(fx(3, "cp_boom", async () => { throw new Error("cp boom"); }));
-    await assert.rejects(() => tenancy.initControlPlane().controlPlaneReady, /Control-plane schema initialization failed.*Migration 3 \(cp_boom\) failed/s);
+    cpList.push(fx(cpBase + 2, "cp_boom", async () => { throw new Error("cp boom"); }));
+    await assert.rejects(() => tenancy.initControlPlane().controlPlaneReady, new RegExp(`Control-plane schema initialization failed.*Migration ${cpBase + 2} \\(cp_boom\\) failed`, "s"));
 
     cpList.pop();
     await tenancy.initControlPlane().controlPlaneReady;
-    await withAdmin(async (admin) => assert.deepEqual((await versionsOf(admin, CP_SCHEMA)).map((r) => r.version), [1, 2]));
+    await withAdmin(async (admin) => assert.deepEqual((await versionsOf(admin, CP_SCHEMA)).map((r) => r.version), [...cpRealVersions, cpBase + 1]));
   });
 
   test("postgres-only migrations validate on their own; both-dialect lists still need both", () => {

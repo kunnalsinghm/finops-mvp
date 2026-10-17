@@ -39,10 +39,27 @@ only defines `up.postgres`.
   tenant created before versioning is adopted: the baseline is recorded and only
   newer migrations run.
 - A failed migration rolls back, is reported with the tenant's schema name, and
-  is **not** cached: the next request for that tenant retries.
+  is not cached forever: after `FINOPS_TENANT_INIT_RETRY_MS` (default 15 s) the next
+  request for that tenant retries, and requests in between get the same error
+  without touching the database. `0` retries on every request.
 - If a change touches a table that exists in both single-tenant and tenant
   schemas, it needs a migration in **both** lists. `test/tenantMigrations.test.js`
   (PARITY) fails if the two schemas diverge.
+- `npm run migrate-tenants` migrates the control plane and then every tenant, one
+  at a time, instead of waiting for each tenant's first request. A failure on one
+  tenant is printed (with the tenant id, schema and reason), recorded on its
+  control-plane row, and does not stop the others; the exit code is 1. Fix the
+  cause and run the same command again: tenants already current are skipped, so
+  it only does what is still behind. `-- --dry-run` lists what is pending and
+  changes nothing, `-- --tenant <id>` limits it to one tenant, `-- --json` is
+  machine-readable. Deleted tenants are skipped, and a tenant whose schema is
+  missing is reported as failed, never recreated empty. It is safe while the
+  server is serving traffic (each schema takes its own lock).
+- Suggested release order for a migration that touches tenants: take a `pg_dump`,
+  deploy the new build, run `npm run migrate-tenants -- --dry-run`, then
+  `npm run migrate-tenants`. Migrations must be additive and backward compatible
+  so the old build keeps working against a migrated tenant for the length of the
+  rollout; see the next point for what happens if it cannot.
 - An older build refuses to open a schema that is already at a newer version
   (`FINOPS_ALLOW_NEWER_SCHEMA=true` overrides). During a rolling deploy, an old
   instance that first opens an already-migrated tenant will return errors for

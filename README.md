@@ -131,6 +131,7 @@ Copy `.env.example` to `.env`. Everything works without any of these set. The on
 | `PORT` | `4000` | HTTP port |
 | `FINOPS_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` exposes the server, including bootstrap mode, to your network |
 | `FINOPS_TRUST_PROXY` | none | Trust `X-Forwarded-For` from your load balancer so per-IP rate limits see the real client. A hop count (`1`) or a list of proxy IPs/CIDRs (`10.0.0.0/8,192.168.1.5`). Invalid values, including `true`, stop the server from starting |
+| `FINOPS_TENANT_INIT_RETRY_MS` | `15000` | Multi-tenant: after a tenant's schema fails to initialize or migrate, how long requests for it get the same error before the next retry. `0` retries on every request |
 | `FINOPS_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
 | `FINOPS_POSTGRES_URL` | none | Connection string; required for Postgres |
 | `FINOPS_DB_PATH` | `data/finops.db` | SQLite file |
@@ -176,7 +177,7 @@ Less common tuning variables:
 
 **Backups.** SQLite: a verified snapshot at startup and every 6 hours. Postgres: `pg_dump` snapshots in single-tenant mode, verified by restoring into a throwaway database. Commands: `npm run backup`, `npm run backup:verify`, `npm run restore`. In multi-tenant mode backups are manual, because a restore replaces every tenant at once. Procedure and measured recovery times: [docs/backup-restore-runbook.md](docs/backup-restore-runbook.md) and [docs/reliability.md](docs/reliability.md).
 
-**Migrations.** Schema changes are numbered, checksummed migrations applied at startup. SQLite takes a verified snapshot first. **On Postgres, take your own `pg_dump` before upgrading.** The multi-tenant control-plane and per-tenant schemas are versioned the same way, when each is first opened ([how](server/storage/migrations/README.md)).
+**Migrations.** Schema changes are numbered, checksummed migrations applied at startup. SQLite takes a verified snapshot first. **On Postgres, take your own `pg_dump` before upgrading.** The multi-tenant control-plane and per-tenant schemas are versioned the same way, when each is first opened, and `npm run migrate-tenants` migrates every tenant up front and tells you which failed ([how](server/storage/migrations/README.md)).
 
 **Metering spool.** If recording a usage event fails after a successful provider call, the event is written to the spool file and an alert is raised. Recover it with `npm run replay-spool`.
 
