@@ -52,9 +52,57 @@ test("hasConflictBlock: detects a real block, ignores a lone heading underline",
   assert.equal(hasConflictBlock(block.replace(/\n/g, "\r\n")), true, "CRLF files too");
 });
 
+// Reads each listed file and returns those with a conflict block.
+//
+// The listing comes from walking the working tree, not from git, so it can
+// include a file that another test is creating and deleting at that moment
+// (gitops.test.js writes a temporary finops.yaml in the repo root). A file that
+// is gone by the time we read it cannot hold a conflict block, so it is
+// skipped. Any OTHER read error (permissions, a directory named like a file) is
+// real and must still fail the test.
+function findConflicted(files) {
+  const conflicted = [];
+  for (const f of files) {
+    let text;
+    try {
+      text = fs.readFileSync(f, "utf8");
+    } catch (err) {
+      if (err.code === "ENOENT") continue;
+      throw err;
+    }
+    if (hasConflictBlock(text)) conflicted.push(f);
+  }
+  return conflicted;
+}
+
+test("findConflicted: a file that vanishes between listing and reading is skipped, not an error", () => {
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "finops-conflict-"));
+  try {
+    const clean = path.join(dir, "clean.md");
+    const bad = path.join(dir, "bad.md");
+    const gone = path.join(dir, "gone.md"); // listed, then deleted by another process
+    fs.writeFileSync(clean, "all fine\n");
+    fs.writeFileSync(bad, [OPEN + "ours", "a", "=".repeat(7), "b", CLOSE + "theirs"].join("\n"));
+    assert.deepEqual(findConflicted([clean, gone, bad]), [bad], "the real conflict is still found");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findConflicted: a real read error is NOT swallowed", () => {
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "finops-conflict-"));
+  try {
+    const dirNamedLikeAFile = path.join(dir, "folder.md");
+    fs.mkdirSync(dirNamedLikeAFile);
+    assert.throws(() => findConflicted([dirNamedLikeAFile]), /EISDIR/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("no tracked text file contains an unresolved merge-conflict block", () => {
   const files = walk(ROOT);
   assert.ok(files.length > 50, `walker found only ${files.length} files - it is not looking at the repo`);
-  const conflicted = files.filter((f) => hasConflictBlock(fs.readFileSync(f, "utf8"))).map((f) => path.relative(ROOT, f));
+  const conflicted = findConflicted(files).map((f) => path.relative(ROOT, f));
   assert.deepEqual(conflicted, [], "resolve these files: they contain a merge-conflict block");
 });
