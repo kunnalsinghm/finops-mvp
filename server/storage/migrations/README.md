@@ -39,7 +39,9 @@ only defines `up.postgres`.
   tenant created before versioning is adopted: the baseline is recorded and only
   newer migrations run.
 - A failed migration rolls back, is reported with the tenant's schema name, and
-  is **not** cached: the next request for that tenant retries.
+  is not cached forever: after `FINOPS_TENANT_INIT_RETRY_MS` (default 15 s) the next
+  request for that tenant retries, and requests in between get the same error
+  without touching the database. `0` retries on every request.
 - If a change touches a table that exists in both single-tenant and tenant
   schemas, it needs a migration in **both** lists. `test/tenantMigrations.test.js`
   (PARITY) fails if the two schemas diverge.

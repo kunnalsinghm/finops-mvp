@@ -131,6 +131,7 @@ Copy `.env.example` to `.env`. Everything works without any of these set. The on
 | `PORT` | `4000` | HTTP port |
 | `FINOPS_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` exposes the server, including bootstrap mode, to your network |
 | `FINOPS_TRUST_PROXY` | none | Trust `X-Forwarded-For` from your load balancer so per-IP rate limits see the real client. A hop count (`1`) or a list of proxy IPs/CIDRs (`10.0.0.0/8,192.168.1.5`). Invalid values, including `true`, stop the server from starting |
+| `FINOPS_TENANT_INIT_RETRY_MS` | `15000` | Multi-tenant: after a tenant's schema fails to initialize or migrate, how long requests for it get the same error before the next retry. `0` retries on every request |
 | `FINOPS_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
 | `FINOPS_POSTGRES_URL` | none | Connection string; required for Postgres |
 | `FINOPS_DB_PATH` | `data/finops.db` | SQLite file |

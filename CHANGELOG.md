@@ -31,7 +31,12 @@ All notable changes to this project, newest first.
 ### Fixed
 - **A failed tenant (or control-plane) schema init is no longer cached.** The rejected promise stayed in the
   pool map, so one failure left that tenant answering 500 until the process restarted. The entry is now dropped
-  and its connections released, so the next request retries.
+  and its connections released, so a later request retries. The retry is rate-limited: a failure is
+  remembered for `FINOPS_TENANT_INIT_RETRY_MS` (default 15000; `0` = every request), and requests inside the
+  window get the same error without touching the database. Without that, H1a's first version re-ran a failing
+  migration (lock, BEGIN, DDL, ROLLBACK, a new connection pool) once per request: in a reproduction 6 requests
+  ran it 6 times, and 5 control-plane calls ran it 5 times; now once each. Applies per tenant, so one broken
+  tenant never delays another. Each attempt logs one error line; requests in the window do not.
 
 ### Added
 - **`FINOPS_TRUST_PROXY`** (RFC 0001, phase A2). Opt-in setting passed to Express `trust proxy`: a hop count

@@ -20,6 +20,9 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
 } else {
   const CP_SCHEMA = `cp_h1a_${process.pid}`;
   process.env.FINOPS_CONTROL_PLANE_SCHEMA = CP_SCHEMA;
+  // These tests assert "the next request retries"; the retry backoff window
+  // (covered in tenantInitBackoff.test.js) would hide that, so turn it off.
+  process.env.FINOPS_TENANT_INIT_RETRY_MS = "0";
 
   const { Pool } = require("pg");
   const tenancy = require("../server/tenancy");
