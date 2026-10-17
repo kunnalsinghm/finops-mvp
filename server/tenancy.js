@@ -224,11 +224,25 @@ function initControlPlane() {
   });
   controlPlaneDb = wrapPool(controlPlanePool);
   const { CONTROL_PLANE_SCHEMA_SQL } = require("./storage/schema.controlPlane");
-  controlPlaneReady = (async () => {
-    await createSchemaLocked(controlPlanePool, controlPlaneSchema, CONTROL_PLANE_SCHEMA_SQL);
+  const { migrateSchema } = require("./storage/schemaRunner");
+  const pool = controlPlanePool;
+  const ready = (async () => {
+    // Baseline (frozen), then every numbered control-plane migration the
+    // schema has not recorded yet. See storage/schemaRunner.js.
+    await createSchemaLocked(pool, controlPlaneSchema, CONTROL_PLANE_SCHEMA_SQL);
+    await migrateSchema(pool, "controlPlane");
   })().catch((err) => {
+    // Do not cache a failure: forget this attempt so the next call retries
+    // (a transient error or a fixed migration must not need a restart).
+    if (controlPlaneReady === ready) {
+      controlPlanePool = null;
+      controlPlaneReady = null;
+      controlPlaneDb = null;
+    }
+    pool.end().catch(() => {});
     throw new Error(`Control-plane schema initialization failed: ${err.message}`);
   });
+  controlPlaneReady = ready;
 
   return { controlPlanePool, controlPlaneReady, controlPlaneDb };
 }
@@ -250,9 +264,18 @@ function getTenantPool(schemaName) {
   });
   const db = wrapPool(pool);
   const { TENANT_SCHEMA_SQL } = require("./storage/schema.tenant");
+  const { migrateSchema } = require("./storage/schemaRunner");
   const ready = (async () => {
+    // Baseline (frozen), then every numbered tenant migration this schema has
+    // not recorded yet. A schema created before versioning is adopted here.
     await createSchemaLocked(pool, schemaName, TENANT_SCHEMA_SQL);
+    await migrateSchema(pool, "tenant");
   })().catch((err) => {
+    // Do not cache a failure: it used to leave this tenant answering 500
+    // until the process restarted. Forget the entry so the next request
+    // retries, and release this attempt's connections.
+    if (tenantPools.get(schemaName)?.ready === ready) tenantPools.delete(schemaName);
+    pool.end().catch(() => {});
     throw new Error(`Tenant schema initialization failed for '${schemaName}': ${err.message}`);
   });
 
