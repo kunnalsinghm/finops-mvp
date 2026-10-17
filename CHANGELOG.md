@@ -27,6 +27,16 @@ All notable changes to this project, newest first.
   98d27e8. Both sides documented different environment variables, so the resolved line keeps all of them.
   `test/noConflictMarkers.test.js` now fails if any text file in the repo has such a block.
 
+### Changed
+- **README rewritten** as a short front door (what it is, a verified five-minute start, deployment modes,
+  configuration table, operations, testing, documentation map, status). The detailed feature list, route
+  table, multi-tenancy notes, guarantees, reliability notes and known gaps moved, with their text
+  unchanged, to `docs/features.md`, `docs/api-reference.md`, `docs/multi-tenancy.md`,
+  `docs/guarantees.md`, `docs/reliability.md` and `docs/known-gaps.md`. The old quick start ran
+  `register` first, which only works before any API key exists; the new one creates the key first.
+  Test counts were refreshed (the old text said 563). Comments in code that pointed at README sections now
+  point at the new pages.
+
 ### Added
 - `FINOPS_BACKUP_DIR` to relocate SQLite backups (default unchanged: `data/backups`).
 - `stop_grace_period: 30s` for the app service in `docker-compose.yml` (Docker's 10s default would kill a drain).

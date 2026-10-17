@@ -1,7 +1,7 @@
 // pricing.js - Pricing Catalogue Engine (Phase 1)
 //
 // Ships with a static baseline catalogue (update these numbers periodically -
-// see README for where to check current vendor pricing) PLUS a manual override
+// see docs/guarantees.md for where to check current vendor pricing) PLUS a manual override
 // table, since the blueprint flagged auto-scraped pricing as a trust-risk if
 // it silently goes stale. Overrides always win.
 
