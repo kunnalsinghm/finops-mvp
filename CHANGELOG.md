@@ -15,6 +15,24 @@ All notable changes to this project, newest first.
 
 ## [Unreleased]
 
+### Changed
+- **Multi-tenant schemas are versioned** (H1a). The control-plane schema and every tenant schema now go
+  through the same migrator as single-tenant mode: numbered, checksummed, ordered and advisory-locked per
+  schema, applied when the schema is first opened. `schema.tenant.js` and `schema.controlPlane.js` are now the
+  frozen version-1 baseline; changes go in `server/storage/migrations/tenant` and `controlPlane` (both empty
+  today). A tenant created earlier is adopted: its baseline row is recorded and its data is untouched. The
+  migrator takes a `dialects` option so these Postgres-only lists need only `up.postgres`; single-tenant
+  checksums are unchanged. A new PARITY test compares a fresh tenant schema with a fresh single-tenant schema
+  (columns, types, defaults, indexes) and found no drift at this commit. Upgrade note: an older build refuses to
+  open a schema recorded at a newer version, so during a rolling deploy an old instance that first opens an
+  already-migrated tenant returns errors for that tenant. Rollback: revert; the only database change is a
+  `schema_migrations` table per schema, which older builds ignore.
+
+### Fixed
+- **A failed tenant (or control-plane) schema init is no longer cached.** The rejected promise stayed in the
+  pool map, so one failure left that tenant answering 500 until the process restarted. The entry is now dropped
+  and its connections released, so the next request retries.
+
 ### Added
 - **`FINOPS_TRUST_PROXY`** (RFC 0001, phase A2). Opt-in setting passed to Express `trust proxy`: a hop count
   (1-32) or a comma-separated list of proxy IPs/CIDRs. Behind a load balancer every client used to share the

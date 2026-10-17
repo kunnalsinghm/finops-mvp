@@ -25,6 +25,25 @@ Rules that keep customer data safe:
 - Postgres: **take a `pg_dump` or snapshot before you deploy** - there is no
   automatic one.
 
-The multi-tenant control-plane and per-tenant schemas
-(`schema.controlPlane.js`, `schema.tenant.js`) are not migrated by this system
-yet; that is part of making multi-tenant mode production-ready.
+## Multi-tenant schemas
+
+The multi-tenant control-plane schema and every per-tenant schema are versioned
+by the same migrator, with their own lists: `migrations/controlPlane/index.js`
+and `migrations/tenant/index.js`. They are Postgres-only, so a migration there
+only defines `up.postgres`.
+
+- `schema.controlPlane.js` and `schema.tenant.js` are now the **frozen version-1
+  baseline** of those schemas. Do not edit them; add a numbered file instead.
+- A schema is migrated when its pool is first opened (`server/tenancy.js`), under
+  the same per-schema advisory lock, checksum and ordering rules as above. A
+  tenant created before versioning is adopted: the baseline is recorded and only
+  newer migrations run.
+- A failed migration rolls back, is reported with the tenant's schema name, and
+  is **not** cached: the next request for that tenant retries.
+- If a change touches a table that exists in both single-tenant and tenant
+  schemas, it needs a migration in **both** lists. `test/tenantMigrations.test.js`
+  (PARITY) fails if the two schemas diverge.
+- An older build refuses to open a schema that is already at a newer version
+  (`FINOPS_ALLOW_NEWER_SCHEMA=true` overrides). During a rolling deploy, an old
+  instance that first opens an already-migrated tenant will return errors for
+  that tenant until it is replaced.

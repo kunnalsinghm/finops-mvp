@@ -32,6 +32,11 @@ const fs = require("fs");
 const path = require("path");
 
 const BASELINE_VERSION = 1;
+// A migration list normally defines both dialects. The multi-tenant schemas
+// (per-tenant and control plane) exist on Postgres only, so their lists are
+// validated and checksummed over ["postgres"] alone. The default is unchanged,
+// so every existing checksum stays byte-identical.
+const ALL_DIALECTS = ["sqlite", "postgres"];
 const MIGRATIONS_TABLE = "schema_migrations";
 const KEEP_PRE_MIGRATION_SNAPSHOTS = 5;
 
@@ -50,14 +55,12 @@ function normalizeSource(fn) {
   return String(fn).replace(/\r\n?/g, "\n").trim();
 }
 
-function checksum(m) {
-  return crypto
-    .createHash("sha256")
-    .update(`${m.version}|${m.name}|${normalizeSource(m.up.sqlite)}|${normalizeSource(m.up.postgres)}`)
-    .digest("hex");
+function checksum(m, dialects = ALL_DIALECTS) {
+  const sources = dialects.map((d) => normalizeSource(m.up[d])).join("|");
+  return crypto.createHash("sha256").update(`${m.version}|${m.name}|${sources}`).digest("hex");
 }
 
-function validateMigrations(list) {
+function validateMigrations(list, { dialects = ALL_DIALECTS } = {}) {
   let prev = BASELINE_VERSION;
   for (const m of list) {
     if (!Number.isInteger(m.version) || m.version <= BASELINE_VERSION) {
@@ -66,8 +69,12 @@ function validateMigrations(list) {
     if (typeof m.name !== "string" || !/^[a-z0-9_]+$/.test(m.name)) {
       throw new MigrationError(`Migration ${m.version} has an invalid name '${m.name}' (lowercase letters, digits, underscores)`);
     }
-    if (typeof m.up?.sqlite !== "function" || typeof m.up?.postgres !== "function") {
-      throw new MigrationError(`Migration ${m.version} (${m.name}) must define both up.sqlite and up.postgres`);
+    if (!dialects.every((d) => typeof m.up?.[d] === "function")) {
+      throw new MigrationError(
+        dialects.length === ALL_DIALECTS.length
+          ? `Migration ${m.version} (${m.name}) must define both up.sqlite and up.postgres`
+          : `Migration ${m.version} (${m.name}) must define ${dialects.map((d) => `up.${d}`).join(" and ")}`
+      );
     }
     if (m.version <= prev) {
       throw new MigrationError(`Migration versions must be strictly increasing; ${m.version} (${m.name}) follows ${prev}`);
@@ -78,7 +85,7 @@ function validateMigrations(list) {
 
 // Pure decision function: given what's known and what's recorded, what runs?
 // Throws on anything that means "do not touch this database".
-function planMigrations(migrations, appliedRows, { allowNewer = false } = {}) {
+function planMigrations(migrations, appliedRows, { allowNewer = false, dialects = ALL_DIALECTS } = {}) {
   const known = new Map(migrations.map((m) => [m.version, m]));
   const applied = new Map(appliedRows.map((r) => [Number(r.version), r]));
   const maxKnown = migrations.length ? migrations[migrations.length - 1].version : BASELINE_VERSION;
@@ -94,7 +101,7 @@ function planMigrations(migrations, appliedRows, { allowNewer = false } = {}) {
 
   for (const [v, row] of applied) {
     if (v === BASELINE_VERSION || !known.has(v)) continue;
-    const expected = checksum(known.get(v));
+    const expected = checksum(known.get(v), dialects);
     if (row.checksum !== expected) {
       throw new MigrationError(
         `Migration ${v} (${row.name}) was modified after it was applied to this database ` +
@@ -277,8 +284,9 @@ async function runPostgres(pool, opts = {}) {
     allowNewer = process.env.FINOPS_ALLOW_NEWER_SCHEMA === "true",
     log = { info() {}, warn() {} },
     now = () => new Date(),
+    dialects = ALL_DIALECTS, // ["postgres"] for the multi-tenant schemas (see schemaRunner.js)
   } = opts;
-  validateMigrations(migrations);
+  validateMigrations(migrations, { dialects });
 
   const client = await pool.connect();
   const lockSql = "SELECT pg_advisory_lock(hashtext('finops_migrations:' || current_schema()))";
@@ -297,7 +305,7 @@ async function runPostgres(pool, opts = {}) {
         [BASELINE_VERSION, now().toISOString()]
       );
       const readApplied = async () => (await client.query(`SELECT version, name, checksum FROM ${MIGRATIONS_TABLE} ORDER BY version`)).rows;
-      const { pending } = planMigrations(migrations, await readApplied(), { allowNewer });
+      const { pending } = planMigrations(migrations, await readApplied(), { allowNewer, dialects });
       if (pending.length === 0) return { applied: [], version: Math.max(...(await readApplied()).map((r) => r.version)) };
 
       log.warn("Applying Postgres migrations - take a pg_dump / snapshot BEFORE deploying schema changes; there is no automatic snapshot on Postgres", {
@@ -310,7 +318,7 @@ async function runPostgres(pool, opts = {}) {
         try {
           await m.up.postgres(ctx);
           await client.query(`INSERT INTO ${MIGRATIONS_TABLE} (version, name, checksum, applied_at) VALUES ($1, $2, $3, $4)`, [
-            m.version, m.name, checksum(m), now().toISOString(),
+            m.version, m.name, checksum(m, dialects), now().toISOString(),
           ]);
           await client.query("COMMIT");
         } catch (err) {
