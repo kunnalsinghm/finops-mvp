@@ -15,6 +15,15 @@ All notable changes to this project, newest first.
 
 ## [Unreleased]
 
+### Added
+- **`FINOPS_TRUST_PROXY`** (RFC 0001, phase A2). Opt-in setting passed to Express `trust proxy`: a hop count
+  (1-32) or a comma-separated list of proxy IPs/CIDRs. Behind a load balancer every client used to share the
+  balancer's address, so the login (10 per 15 min) and forgot-password (5 per 15 min) limits, the only users of
+  `req.ip`, were effectively global. Unset behaves exactly as before. `true`, ranges that match every address
+  (`0.0.0.0/0`, `::/0`), `false`, zero, over 32 hops and anything malformed make the server refuse to start with a
+  message naming the setting. Upgrade note: if you turn it on, set it to the real number of proxies; too high a
+  count or too wide a range lets clients fake their address with `X-Forwarded-For`. Rollback: unset it.
+
 ### Fixed
 - **Graceful shutdown** (RFC 0001, phase A1). A `SIGTERM` (scale-down, rolling deploy) used to kill the
   process mid-request. The proxy calls the provider first and meters after, so a kill in between lost

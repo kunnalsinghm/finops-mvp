@@ -55,6 +55,19 @@ const { checkWeeklyBriefing } = require("./weeklyBriefing");
 
 const app = express();
 
+// FINOPS_TRUST_PROXY (RFC 0001 A2): opt-in "trust proxy" so per-IP rate limits
+// see the real client behind a load balancer. Unset = unchanged. An invalid
+// value refuses to start rather than silently trusting every client header.
+// See trustProxy.js.
+const { applyTrustProxy } = require("./trustProxy");
+try {
+  const trusted = applyTrustProxy(app, process.env.FINOPS_TRUST_PROXY);
+  if (trusted !== undefined) logger.info(`FINOPS_TRUST_PROXY=${JSON.stringify(trusted)}: trusting X-Forwarded-For from that proxy setting`);
+} catch (err) {
+  console.error(`[FATAL] ${err.message}`);
+  process.exit(1);
+}
+
 // Drain support (see shutdown.js): once SIGTERM arrives, every response says
 // "Connection: close" so keep-alive clients reconnect elsewhere.
 const shutdown = require("./shutdown");
