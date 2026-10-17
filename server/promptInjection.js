@@ -28,7 +28,7 @@
 //     strip zero-width characters) to catch trivial spacing/casing evasion
 //     without pretending to defeat serious obfuscation (base64, unicode
 //     homoglyphs, translation-based smuggling, etc. are explicitly OUT of
-//     scope for this v1 - see Known gaps in the README).
+//     scope for this v1 - see docs/known-gaps.md).
 
 // Strips zero-width/invisible characters sometimes used to break up a
 // flagged phrase (e.g. "ignore\u200Ball\u200Bprevious\u200Binstructions"),

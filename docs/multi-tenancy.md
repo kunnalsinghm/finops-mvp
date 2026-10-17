@@ -1,0 +1,23 @@
+# Multi-tenancy
+
+How multi-tenant mode works: isolation model, sessions, background jobs, quotas, and the operator (platform) surface. Single-tenant deployments can ignore this page.
+
+*Part of the FinOps Guard docs. Section names in quotes (for example "Bootstrap mode" or "Deployment modes") refer to sections of the [README](../README.md).*
+
+Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connection pool per tenant** (`server/tenancy.js`), not a shared pool with a per-request `search_path` reset — a tenant's connections are physically incapable of serving another tenant's query, by construction, rather than relying on every call site remembering to reset state. Identity/routing data (which tenants exist, which API keys/users belong to which tenant) lives in a separate shared `control_plane` schema; a request resolves its tenant there first, then gets routed to that tenant's own schema for everything else.
+
+Multi-tenant mode is now feature-complete: every route group is tenant-aware, including the seven that were previously switched off (`alerts`, `commitments`, `gitops`, `reconcile`, `reports`, `query`, `tool-calls`) — `server/tenantGuard.js`'s block-list is empty, kept only as a safety net for any future route that ships before its own multi-tenant conversion is done.
+
+**Dashboard session login works in multi-tenant mode.** Accounts are tenant-scoped (`server/tenantUsers.js`) — usernames are unique *per tenant*, not globally, so login takes a `tenant_id` alongside `username`/`password` (`POST /api/auth/login`), and the resulting `X-Session-Token` resolves to that tenant's own schema on every subsequent request, same as an API key does.
+
+**Background jobs run once per active tenant**, not once against a single global database (`server/tenantJobs.js`) — budget alerts, burn-rate, commitment alerts, and the weekly briefing all fire per tenant, with one tenant's failure isolated from every other tenant's run.
+
+**In-memory rate-limit and quarantine state is partitioned per tenant** (`server/governance.js`), the same `tenantId -> Map` pattern the response caches already used — a noisy tenant's key churn can no longer grow a data structure every other tenant's requests also hash into.
+
+**Per-tenant resource quotas** (`max_api_keys`, `max_budgets`, `max_monthly_events`, configurable per tenant, sane defaults otherwise) are enforced on key creation, budget creation, and every ingest/proxy call, returning `429` with the current count/limit once exceeded.
+
+**Full tenant lifecycle management** lives behind `/api/platform/*`, gated by a single shared `FINOPS_PLATFORM_ADMIN_TOKEN` secret (not a general admin-identity system — see the route file's own header comment for why that's a deliberate, documented stopgap rather than an oversight): suspend/reactivate a tenant, request offboarding with a grace period (soft-delete, data stays intact and exportable) or cancel it, export every row of a tenant's data as JSON, and irreversibly purge a tenant's schema (requires an explicit `{"confirm": "PURGE"}` body). A trial tenant (`trial_days` at signup) is blocked automatically the moment its trial expires, whether or not the periodic sweep has run yet. **`GET /api/platform/overview`** is a read-only cross-tenant health/usage view for the operator: per tenant its status, limits, API-key and user counts, this calendar month's event count and spend, last activity, and health flags (`quota_near`, `quota_exceeded`, `trial_ending_soon`, `no_events_this_month`), sorted by spend, with `?status=` and `?limit=` (default 200, max 500; `totals.truncated` says if more matched). It returns **aggregates only** (no usage rows, keys, usernames or schema names), reads each tenant's own schema with a schema-qualified table name — it deliberately does *not* use `getTenantDb`, which would recreate a purged tenant's schema — and one tenant whose schema is gone or broken reports `usage: null` with a reason instead of failing the report.
+
+Tenant signup (`POST /api/tenants`) can optionally provision a first dashboard login (`admin_username`/`admin_password`) and/or a trial period (`trial_days`) at the same time it creates the tenant's first API key.
+
+Two-tenant isolation is proven end-to-end over real HTTP against real Postgres schemas — `test/multiTenantIsolation.test.js`, `test/multiTenantHardening.test.js`, `test/tenancy.test.js`, `test/tenantGuard.test.js`, `test/tenantJobs.test.js`, `test/tenantQuota.test.js`, `test/tenantLifecycle.test.js`, `test/tenants.test.js` — one isolation test per feature, each writing real data as tenant A and proving tenant B's identical read comes back empty.

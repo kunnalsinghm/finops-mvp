@@ -4,7 +4,7 @@
 // CANNOT be fully tested without a real identity provider (Okta, Azure AD,
 // Google Workspace, Auth0, etc.) - that requires YOU to register an
 // application with your IdP and get a client_id/client_secret, which only
-// you can do for your own org. What's tested here (see README) is the
+// you can do for your own org. What's tested here (see docs/known-gaps.md) is the
 // discovery-document parsing and token-exchange logic against a mock OIDC
 // server - the protocol handling is correct; the live handshake with a real
 // provider is the one piece you'll need to verify yourself once configured.

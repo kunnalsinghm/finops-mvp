@@ -1,52 +1,114 @@
-﻿# FinOps Guard — Self-Hosted AI API Cost Management Platform
+﻿# FinOps Guard
 
-**Developed and maintained by Vidhi Sharma and kunal.sm**
+[![CI](https://github.com/kunnalsinghm/finops-mvp/actions/workflows/ci.yml/badge.svg)](https://github.com/kunnalsinghm/finops-mvp/actions/workflows/ci.yml)
 
-A platform for tracking, governing, and optimizing spend on LLM APIs (OpenAI, Anthropic) plus self-hosted GPU inference. Runs single-tenant on SQLite with zero setup for local/self-hosted use, or opts into Postgres — single-tenant or fully multi-tenant — for a hosted deployment. Real-time cost metering, hard/soft budget enforcement, RBAC, PII/prompt-injection protection, fraud detection, agent-level cost attribution, data-residency enforcement, caching, shadow A/B model testing, Stripe billing, and a themeable dashboard UI.
+**A self-hosted gateway that meters, governs and optimizes what you spend on LLM APIs** (OpenAI, Anthropic) and self-hosted GPU inference.
 
-Runs on `localhost:4000` from VS Code with three commands: `npm install`, `npm run seed`, `npm start` (or `npm run serve` for crash auto-restart).
+Point your OpenAI or Anthropic client at it and every call is priced, attributed to a team, checked against budgets and policies, and recorded, in the request path, with streaming supported. Run it on SQLite with zero setup, or on Postgres for a hosted single-tenant or multi-tenant deployment.
 
-## Stack
+*Developed and maintained by Vidhi Sharma and kunal.sm.*
 
-- **Backend:** Node.js + Express
-- **Database:** SQLite by default (via `node:sqlite`, no native compilation) — or Postgres (`FINOPS_DB_DRIVER=postgres`) for a hosted single-tenant or multi-tenant deployment
-- **Frontend:** Vanilla HTML/CSS/JS + Chart.js, zero build step, custom light/dark design system
-- **Security:** Helmet (security headers), IP-based login rate limiting, `scrypt` password hashing
-- **Billing:** Stripe subscriptions for the platform's own flat-fee tiers (optional — off unless `STRIPE_SECRET_KEY` is set)
-- **Testing:** Node's native test runner (`node --test`) — zero external test dependencies
-- **Deployment:** Docker + `docker-compose.yml`, GitHub Actions CI (tests against both SQLite and Postgres, plus a Docker build check)
-- **Config:** `finops.yaml` for GitOps-style budget management and declarative tagging rules
+## What you get
+
+| | |
+|---|---|
+| **Cost tracking** | Per-call cost from a pricing catalogue; breakdowns by team, model, feature, customer, project, cost center and region; forecasting; prepaid-commitment tracking; weekly briefings |
+| **Budget enforcement** | Soft (degrade to a cheaper model) and hard (`402`) limits, progressive alerts, burn-rate alerts, token quotas, per-key rate limits |
+| **Safety** | PII redaction, prompt-injection blocking, model allow-lists, data-residency checks, tool-call governance with human approval |
+| **Anomaly and fraud detection** | Org-wide anomalies, plus per-key fraud signals that can auto-quarantine a key |
+| **Optimization** | Model-switch recommendations, exact and semantic caching, shadow A/B testing against a cheaper model |
+| **Access control** | Six API-key roles, dashboard logins, invitations, password reset by email, OIDC single sign-on |
+| **Operations** | Health and readiness probes, graceful shutdown, verified backups, versioned migrations, a durable metering spool |
+| **Multi-tenancy** | Schema-per-tenant on Postgres, tenant lifecycle, quotas and an operator overview |
+| **Interfaces** | Dashboard UI, REST API under `/api/v1`, OpenAPI document, zero-dependency client SDK, FinOps-as-Code via `finops.yaml` |
+
+Full detail for every item: [docs/features.md](docs/features.md).
 
 ## Quick start
 
+You need **Node.js 22 or newer** (the SQLite driver, `node:sqlite`, is built in; CI and the Docker image run Node 22).
+
 ```bash
 npm install
-npm run seed      # populates ~2 weeks of sample usage data
-npm run serve      # starts with auto-restart on crash (recommended)
-# or: npm start    # starts without the supervisor
+npm run seed      # optional: ~2 weeks of sample usage data
+npm run serve     # starts with auto-restart on crash (or: npm start)
 ```
 
-Open `http://localhost:4000`. On first run, auth is unlocked (bootstrap mode) until you create your first API key or user account — see "Bootstrap mode" below before exposing this beyond your own machine.
+Open `http://localhost:4000`.
+
+**Docker**
 
 ```bash
-curl -X POST http://localhost:4000/api/auth/register -H "Content-Type: application/json" -d '{"username":"you","password":"a-real-password"}'
+docker compose up --build                      # SQLite (default)
+docker compose --profile postgres up --build   # Postgres
 ```
 
-Or with Docker:
+### First five minutes
+
+A fresh install is in **bootstrap mode**: every request is served as admin until you create the first API key or user, which closes that window (see [Bootstrap mode](#bootstrap-mode)). Create the key first.
 
 ```bash
-docker compose up --build                    # SQLite (default)
-docker compose --profile postgres up --build # Postgres
+# 1. Create your first admin API key. The response contains the key_id; keep it.
+curl -X POST http://localhost:4000/api/keys \
+  -H "Content-Type: application/json" \
+  -d '{"label":"my-first-key","role":"admin"}'
+
+# 2. Create a dashboard login (needs the key from step 1, because bootstrap mode is now closed).
+curl -X POST http://localhost:4000/api/auth/register \
+  -H "Content-Type: application/json" -H "X-API-Key: fk_..." \
+  -d '{"username":"you","password":"a-real-password","role":"admin"}'
+
+# 3. Send an LLM call through the gateway.
+curl -X POST http://localhost:4000/api/proxy/openai \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: fk_..." \
+  -H "X-Provider-Key: sk-your-real-openai-key" \
+  -H "X-Team: growth" -H "X-Environment: dev" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-## Architecture
+The response is the provider's, unchanged, plus headers such as `X-FinOps-Cost-USD`. Your provider key is forwarded and never stored. Sign in to the dashboard with the username and password from step 2.
+
+To try it without spending anything, run the local stand-in provider in a second terminal and point the gateway at it:
+
+```bash
+node scripts/mock-provider.js                                          # listens on :5001
+OPENAI_BASE_URL=http://localhost:5001/v1/chat/completions npm start    # in the first terminal
+```
+
+### Use it from code
+
+Either change your client's `baseURL` to `http://localhost:4000/api/proxy/openai` (or `anthropic`) and send the headers above, or use the bundled client:
+
+```js
+const { FinOpsClient } = require("./sdk/finops-client");
+const client = new FinOpsClient({
+  baseUrl: "http://localhost:4000",
+  apiKey: "fk_...",          // your FinOps Guard key
+  providerKey: "sk-...",     // your real provider key
+  team: "growth",
+  environment: "prod",
+});
+const reply = await client.chat("openai", {
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "hello" }],
+});
+```
+
+Events from systems that do not go through the gateway can be sent to `POST /api/ingest`.
+
+## How it works
 
 Two ways data gets in:
 
-1. **Log Integrator** (`POST /api/ingest`) — webhook-style event recording.
-2. **Gateway Proxy** (`POST /api/proxy/:provider`) — point your OpenAI/Anthropic client's `baseURL` here. Real-time metering, governance, and opt-in caching enforced in the request path, with full streaming (SSE) support.
+1. **Gateway proxy** (`POST /api/proxy/:provider`): metering, governance and opt-in caching in the request path, with streaming (SSE).
+2. **Log integrator** (`POST /api/ingest`): webhook-style recording of events you already have.
 
-Both write to the same `usage_events` table and share the same budgeting/alerting/reporting/attribution layer. A separate `gpu_usage_events` table tracks self-hosted GPU inference cost, blended with API spend into one normalized view (see "Unified GPU + API cost view" below).
+Both write to the same `usage_events` table, which feeds budgets, alerts, reports and attribution. Self-hosted GPU cost goes in `gpu_usage_events` and is blended with API spend into one per-team view.
+
+The proxy calls the provider first and records the usage afterwards, so a recording failure cannot undo spend that already happened. If the write fails, the response still goes back to the caller and the event is spooled to disk for `npm run replay-spool` (details in [docs/guarantees.md](docs/guarantees.md)).
+
+**Stack:** Node.js and Express; SQLite (`node:sqlite`) or Postgres; vanilla HTML/CSS/JS with Chart.js and no build step; Helmet, `scrypt` password hashing and login rate limiting; optional Stripe billing; Node's built-in test runner.
 
 ## Deployment modes
 
@@ -54,122 +116,91 @@ Both write to the same `usage_events` table and share the same budgeting/alertin
 |---|---|---|
 | **Single-tenant, local** (default) | SQLite | Self-hosted, one team, zero config |
 | **Single-tenant, hosted** | Postgres (`FINOPS_DB_DRIVER=postgres`) | One customer's own hosted deployment |
-| **Multi-tenant, hosted** | Postgres (`FINOPS_DB_DRIVER=postgres` + `FINOPS_MULTI_TENANT=true`) | Serving multiple customers from one deployment |
+| **Multi-tenant, hosted** | Postgres + `FINOPS_MULTI_TENANT=true` | Serving several customers from one deployment |
 
-Multi-tenant isolation is **schema-per-tenant with a dedicated Postgres connection pool per tenant** (`server/tenancy.js`), not a shared pool with a per-request `search_path` reset — a tenant's connections are physically incapable of serving another tenant's query, by construction, rather than relying on every call site remembering to reset state. Identity/routing data (which tenants exist, which API keys/users belong to which tenant) lives in a separate shared `control_plane` schema; a request resolves its tenant there first, then gets routed to that tenant's own schema for everything else.
+Multi-tenant mode isolates each tenant in its own Postgres schema with its own connection pool, and routes every request through a shared control-plane schema. Operators manage tenants through `/api/platform/*`, which is gated by `FINOPS_PLATFORM_ADMIN_TOKEN`. How it works, and what it proves: [docs/multi-tenancy.md](docs/multi-tenancy.md).
 
-Multi-tenant mode is now feature-complete: every route group is tenant-aware, including the seven that were previously switched off (`alerts`, `commitments`, `gitops`, `reconcile`, `reports`, `query`, `tool-calls`) — `server/tenantGuard.js`'s block-list is empty, kept only as a safety net for any future route that ships before its own multi-tenant conversion is done.
+**Run a single instance for now.** Dashboard sessions, SSO state and rate-limit buckets are held in memory, and there is no shared job lock, so a second instance behind a load balancer breaks logins and runs every scheduled job twice. The plan to lift this is [RFC 0001](docs/rfcs/0001-horizontal-scaling-and-iac.md); graceful shutdown, its first step, is done.
 
-**Dashboard session login works in multi-tenant mode.** Accounts are tenant-scoped (`server/tenantUsers.js`) — usernames are unique *per tenant*, not globally, so login takes a `tenant_id` alongside `username`/`password` (`POST /api/auth/login`), and the resulting `X-Session-Token` resolves to that tenant's own schema on every subsequent request, same as an API key does.
+## Configuration
 
-**Background jobs run once per active tenant**, not once against a single global database (`server/tenantJobs.js`) — budget alerts, burn-rate, commitment alerts, and the weekly briefing all fire per tenant, with one tenant's failure isolated from every other tenant's run.
+Copy `.env.example` to `.env`. Everything works without any of these set. The ones you are most likely to need:
 
-**In-memory rate-limit and quarantine state is partitioned per tenant** (`server/governance.js`), the same `tenantId -> Map` pattern the response caches already used — a noisy tenant's key churn can no longer grow a data structure every other tenant's requests also hash into.
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `4000` | HTTP port |
+| `FINOPS_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` exposes the server, including bootstrap mode, to your network |
+| `FINOPS_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
+| `FINOPS_POSTGRES_URL` | none | Connection string; required for Postgres |
+| `FINOPS_DB_PATH` | `data/finops.db` | SQLite file |
+| `FINOPS_MULTI_TENANT` | off | `true` enables multi-tenant mode (Postgres only) |
+| `FINOPS_PLATFORM_ADMIN_TOKEN` | none | Enables `/api/platform/*`; unset means those routes return `404` |
+| `FINOPS_STRICT_IDENTITY` | off | `true` refuses API keys that are not bound to a team |
+| `FINOPS_UNPRICED_POLICY` | flag | `block` refuses models that have no price instead of flagging them |
+| `FINOPS_METERING_FAILURE_POLICY` | open | `closed` refuses requests while the usage store is unreachable |
+| `FINOPS_UPSTREAM_TIMEOUT_MS` | `120000` | How long a hung provider can hold a request (`504`) |
+| `FINOPS_RATE_LIMIT_CAPACITY` / `FINOPS_RATE_LIMIT_REFILL_PER_SEC` | `60` / `1` | Per-key token bucket |
+| `FINOPS_SHUTDOWN_GRACE_MS` | `25000` | How long to wait for in-flight requests on `SIGTERM` |
+| `FINOPS_BACKUP_RETENTION` / `FINOPS_BACKUP_DIR` | `7` / `data/backups` | Backups kept and where SQLite backups go |
+| `FINOPS_SPOOL_PATH` | `data/metering-spool.jsonl` | Where unrecorded usage events wait for replay |
+| `FINOPS_LOG_DIR` | `logs` | Structured JSON logs, rotated daily |
+| `FINOPS_APP_URL` | relative links | Public base URL used in emailed links (reset, verify, invite) |
+| `FINOPS_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` | none | SMTP for alert and account emails |
+| `FINOPS_ALERT_EMAIL_TO` / `FINOPS_ALERT_EMAIL_FROM` | none | Alert email recipient and sender |
+| `SLACK_WEBHOOK_URL` | none | Slack alerts |
+| `FINOPS_WEBHOOK_URL` / `FINOPS_WEBHOOK_SECRET` | none | Generic alert webhook; the secret signs each request ([details](docs/features.md)) |
+| `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URI` | none | Single sign-on |
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | none | Platform billing; without them billing routes return `501` |
+| `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` | provider defaults | Point the gateway at another endpoint, such as the mock provider |
+| `FINOPS_OTEL_ENABLED` | off | `true` prints one OpenTelemetry-shaped JSON line per proxied request ([plan for a real exporter](docs/rfcs/0002-opentelemetry-exporter.md)) |
 
-**Per-tenant resource quotas** (`max_api_keys`, `max_budgets`, `max_monthly_events`, configurable per tenant, sane defaults otherwise) are enforced on key creation, budget creation, and every ingest/proxy call, returning `429` with the current count/limit once exceeded.
+Less common tuning variables:
 
-**Full tenant lifecycle management** lives behind `/api/platform/*`, gated by a single shared `FINOPS_PLATFORM_ADMIN_TOKEN` secret (not a general admin-identity system — see the route file's own header comment for why that's a deliberate, documented stopgap rather than an oversight): suspend/reactivate a tenant, request offboarding with a grace period (soft-delete, data stays intact and exportable) or cancel it, export every row of a tenant's data as JSON, and irreversibly purge a tenant's schema (requires an explicit `{"confirm": "PURGE"}` body). A trial tenant (`trial_days` at signup) is blocked automatically the moment its trial expires, whether or not the periodic sweep has run yet. **`GET /api/platform/overview`** is a read-only cross-tenant health/usage view for the operator: per tenant its status, limits, API-key and user counts, this calendar month's event count and spend, last activity, and health flags (`quota_near`, `quota_exceeded`, `trial_ending_soon`, `no_events_this_month`), sorted by spend, with `?status=` and `?limit=` (default 200, max 500; `totals.truncated` says if more matched). It returns **aggregates only** (no usage rows, keys, usernames or schema names), reads each tenant's own schema with a schema-qualified table name — it deliberately does *not* use `getTenantDb`, which would recreate a purged tenant's schema — and one tenant whose schema is gone or broken reports `usage: null` with a reason instead of failing the report.
+| Variable | Default | Purpose |
+|---|---|---|
+| `FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS` | `2` | Concurrent fraud signals needed to auto-quarantine a key (one signal only recommends rotation) |
+| `FINOPS_DB_HEALTH_TIMEOUT_MS` | `2000` | Timeout of the readiness database check |
+| `FINOPS_DB_CIRCUIT_FAILURE_THRESHOLD` / `FINOPS_DB_CIRCUIT_OPEN_MS` | `3` / `30000` | Readiness circuit breaker |
+| `FINOPS_SIGNUP_RATE_LIMIT` | `10` | Tenant signups allowed per minute, across all callers (a global cap, not per IP) |
+| `FINOPS_SEMANTIC_CACHE_MODE` / `_THRESHOLD` | `local` | Semantic cache mode and similarity threshold |
+| `FINOPS_SHADOW_TEST_SAMPLE_RATE` and related | see `.env.example` | Shadow A/B testing |
 
-Tenant signup (`POST /api/tenants`) can optionally provision a first dashboard login (`admin_username`/`admin_password`) and/or a trial period (`trial_days`) at the same time it creates the tenant's first API key.
+[`.env.example`](.env.example) lists the rest with comments.
 
-Two-tenant isolation is proven end-to-end over real HTTP against real Postgres schemas — `test/multiTenantIsolation.test.js`, `test/multiTenantHardening.test.js`, `test/tenancy.test.js`, `test/tenantGuard.test.js`, `test/tenantJobs.test.js`, `test/tenantQuota.test.js`, `test/tenantLifecycle.test.js`, `test/tenants.test.js` — one isolation test per feature, each writing real data as tenant A and proving tenant B's identical read comes back empty.
+## Operations
 
-## Features
+**Health.** `GET /health` is liveness (the process is up). `GET /health/ready` is readiness: it queries the database and returns `503` with a reason if it cannot, and also while the server is shutting down.
 
-### Cost tracking & attribution
-- Per-event cost from a local pricing catalogue with manual overrides
-- Team/environment/git-branch/feature/customer/project/cost-center tagging (`X-Feature-Id`, `X-Customer-Id`, `X-Project-Id`, `X-Cost-Center` on the proxy, or the equivalent body fields on ingest) — missing tags warn, not reject
-- Dashboards: cost over time, cost by team, by model, by feature, by customer, by project, by cost center, by region, untagged spend
-- **Spend forecasting**: a simple moving-average projection (`GET /api/costs/forecast`) — averages recent daily spend (default: last 7 days) and extends it forward (default: 30 days). Refuses to forecast (`available: false`) with fewer than 3 days of data rather than returning a falsely-precise number
-- **Forecast variance** (`GET /api/costs/forecast-variance?team=`): actual vs. predicted spend for a team's most recent 7-day window, as a governance signal ("our own forecast was off by X%")
-- **Commitment tracking**: prepaid credit balances tracked against real burn (`/api/commitments`), with tiered remaining-balance alerts (healthy → low → critical → exhausted)
-- **Weekly briefings**: an auto-generated digest (total spend, week-over-week delta, top 3 movers by team) delivered through the same channels as budget alerts, once per ISO week
-- **Unified GPU + API cost view** (`/api/gpu-usage/blended`): self-hosted GPU inference cost (`/api/gpu-usage/ingest`) blended with API spend into one normalized per-team total. A cluster shared across teams has its cost **split proportionally by each team's relative API spend** (`shared_across_teams` field) — a documented approximation, not a precisely measured allocation, since there's no per-team GPU-utilization telemetry to split by instead
-- **Agent-level attribution** (`/api/agents`): per-agent cost-per-task, cost-per-successful-completion (excludes tasks that never reached `success`), retry rate (fraction of tasks needing more than one event), and a token-efficiency-ratio proxy — set via `X-Agent-Id`/`X-Session-Id`/`X-Task-Id`/`X-Task-Status` on the proxy or the equivalent ingest fields. Each metric's exact formula and judgment calls are documented in `server/agentAttribution.js`
-- **Smart/inferred tagging**: an untagged event gets a best-guess team inferred from that API key's own tagging history (never from the request content), with a time-of-day fallback for keys shared across teams on different schedules (e.g. day-shift/night-shift) when the key's overall history has no clear majority. Stored separately from the real tag and never silently applied — review via `GET /api/tags/inferences`, apply via `POST /api/tags/:usageEventId/correct`. A correction feeds back into future inferences for that key automatically, since it's written onto the real `team` column
-- **"Ask your dashboard"** (`GET /api/query?q=`): plain-English queries like "what did we spend on the growth team last week" or "top spenders this month", answered by rule-based intent parsing — deliberately not LLM-backed (see `server/nlQuery.js` for why)
+**Graceful shutdown.** On `SIGTERM` or `SIGINT` the server stops accepting connections, lets in-flight requests finish (so a provider call already made is still metered), closes the database and exits `0`. Past `FINOPS_SHUTDOWN_GRACE_MS` it cuts what remains and exits `1`. Set your orchestrator's stop timeout above that value (`docker-compose.yml` uses 30 s). This does not cover `SIGKILL`, power loss or an out-of-memory kill, and on Windows `SIGTERM` ends the process without running any code.
 
-### Content safety & data protection
-- **PII redaction** (on by default, opt out per-request via `X-Disable-PII-Redaction: true` — only for a key an admin has granted `allow_pii_bypass`, the same admin-controlled-privilege shape as `allow_background`; a key without it that sends the header is refused with 403, not silently redacted anyway): regex-based detection of email, SSN, credit card (Luhn-validated), phone, and IP address patterns. Redact-and-continue, not block, for a permitted key. Applied at both the proxy and ingest
-- **Prompt-injection detection** (always on, not opt-out): rule-based pattern matching against known jailbreak/injection phrasings. Blocks the request (HTTP 400). Applied at both the proxy and ingest
-- **Data-residency enforcement**: block a request whose declared region (`X-Client-Region`) isn't on the applicable allow-list (`/api/region-allowlist`, key-then-team precedence, same pattern as model allow-listing below). Region is self-reported, not real IP geolocation — a real, useful control for well-behaved clients, not a substitute for network-level geofencing. The same self-reported region is also available as its own cost-breakdown dimension (`GET /api/costs/by-region`), independent of whether an allow-list is even configured
-- **Agent action governance** (`/api/tool-calls`): audit trail for agent tool calls (file access, API calls, command execution) — distinct from LLM completions. Rule-based risky-command detection (destructive filesystem/database operations, privilege escalation), per-agent volume-spike detection, and the same data-residency check as above. The logged-call path (`POST /api/tool-calls`) is a **reporting/audit mechanism, not a live blocking gate** — a tool call happens outside this service's control, so it can only be flagged for review after the fact, not stopped. For actual prevention, an orchestrator can opt in to a **pre-flight check** (`POST /api/tool-calls/check`) *before* letting an agent act: a `tool_name`/`target` deny-list (`/api/tool-call-denylist`, key-then-team precedence, same scoping pattern as model allow-listing) denies outright, and a match against the same risky-command criteria queues the action for **human approval** (`GET /api/tool-calls/approvals`, `POST .../approve` | `/deny`) instead of denying it outright. This is opt-in by construction — nothing forces an orchestrator to call it — but it's the only way to add real prevention given the architectural constraint above
+**Backups.** SQLite: a verified snapshot at startup and every 6 hours. Postgres: `pg_dump` snapshots in single-tenant mode, verified by restoring into a throwaway database. Commands: `npm run backup`, `npm run backup:verify`, `npm run restore`. In multi-tenant mode backups are manual, because a restore replaces every tenant at once. Procedure and measured recovery times: [docs/backup-restore-runbook.md](docs/backup-restore-runbook.md) and [docs/reliability.md](docs/reliability.md).
 
-### Governance (enforced live in the proxy)
-- Token-bucket rate limiting per API key
-- **Budget enforcement, two tiers**: over budget with a cheaper same-provider fallback configured → degrades to it (circuit breaker). Over budget with **no fallback available** → hard-blocks with `402`, rather than silently letting the request through unthrottled at full price
-- **Background/continuous-inference budget class**: traffic tagged `X-Workload-Type: background` (24/7 monitoring/compliance-scanning agents) is exempt from the circuit-breaker/hard-block above — throttling it could break the function it exists to perform — but is still tracked and alertable via its own `scope_type: 'background'` budget, separate from that team's regular spend
-- Quarantine mode: flagged keys capped to 1 req/min pending admin approval
-- **Anomaly detection**: one system (`server/anomaly.js`), five trigger types, all logged to `/api/alerts` under `type: "anomaly"`, all advisory/flag-only, never auto-blocking:
-  - single-event cost spike (any one event costing more than 5x the 30-day rolling average for that provider/model)
-  - daily-spend-exceeds-normal (a team's total spend today vs. its own 14-day rolling daily average, >200% of normal)
-  - retry-rate-exceeds-threshold (an agent whose fraction of multi-attempt tasks crosses 50%, min 5 tasks)
-  - new-model-appears / new-geography-begins - both **org-wide**: a provider/model or client-declared region never seen anywhere in this deployment before (deliberately not per-key - see below)
-- **Fraud/compromised-key detection**: a SEPARATE, deliberately-not-merged system, scoped to one key rather than the whole org - flags a sudden request-volume spike, a brand-new provider/model combo, or a first-time client region, all relative to THAT KEY's own history (not everyone's). Logged to the same `/api/alerts` as anomaly detection, but answering a different question ("does this one credential's behavior look compromised" vs. "is anything about this event/team/deployment unusual") - the two can legitimately both fire on the same event for different reasons. **No longer flag-only**: a single signal alone sets a softer `rotation_recommended` advisory on the key (visible on `GET /api/keys`, cleared via `POST /api/keys/:keyId/dismiss-rotation`); two or more concurrent signals on the same request **auto-quarantine** the key, logged to the audit trail under actor `system:fraud-detection` so it's distinguishable from a manual admin quarantine, and never double-quarantines an already-quarantined key. The signal count required is configurable (`FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS`, default `2`)
-- **Model allow-listing**: restrict specific keys/teams to a pre-approved list of models. Manage via `/api/model-allowlist`
-- **Token quotas**: cap raw input+output token consumption per key/team over a daily and/or weekly window. Manage via `/api/token-quotas`
+**Migrations.** Schema changes are numbered, checksummed migrations applied at startup. SQLite takes a verified snapshot first. **On Postgres, take your own `pg_dump` before upgrading.** The multi-tenant control-plane and tenant schemas are not covered by the migrator yet.
 
-### Caching — two independent, opt-in tiers
-- **Exact-match** (`X-Enable-Cache: true`): identical provider+model+message requests return a cached response, with tracked cost savings
-- **Semantic/near-duplicate** (`X-Enable-Semantic-Cache: true`): catches reworded prompts that mean the same thing. Local zero-dependency word-overlap mode by default, or real OpenAI embeddings if `FINOPS_EMBEDDING_API_KEY` is set
+**Metering spool.** If recording a usage event fails after a successful provider call, the event is written to the spool file and an alert is raised. Recover it with `npm run replay-spool`.
 
-### Budgeting & alerts
-- Multi-tier budgets (team/project/key/background), progressive alerts (50/80/90/100%), burn-rate alerts
-- `GET /api/alerts/status` — a consolidated status endpoint for external monitoring (unacknowledged count, broken down by type, most recent alert) to poll, rather than requiring a monitoring tool to interpret the raw log itself
-- Delivery via Slack Incoming Webhook, a generic webhook (Discord/Teams/ntfy.sh/PagerDuty-compatible), and/or SMTP email; always logged locally regardless of delivery config
-- **Signed generic webhooks (opt-in).** Set `FINOPS_WEBHOOK_SECRET` and every generic-webhook POST carries `X-FinOps-Signature: t=<unix seconds>,v1=<hex>`, where `v1` is HMAC-SHA256 over `<t>.<raw body>` keyed by the secret. The timestamp is inside the signed string, so reject requests whose `t` is more than a few minutes old to stop replays. **If `FINOPS_WEBHOOK_SECRET` is unset, webhooks are sent unsigned, exactly as before** — a deliberate backward-compatibility choice so existing `FINOPS_WEBHOOK_URL` setups don't break on upgrade; a receiver that needs authenticity should set the secret *and* reject requests without the header. Slack and email delivery are unaffected. Receiver-side verification (Node, no dependencies):
+**Behind a reverse proxy.** The server does not trust `X-Forwarded-For`, so every client appears to come from the proxy's address. The login and password-reset rate limits then become global rather than per client. A `FINOPS_TRUST_PROXY` setting is planned in RFC 0001.
 
-  ```js
-  const crypto = require("crypto");
-  // `rawBody` must be the body bytes exactly as received (e.g. express.raw()), NOT re-serialised JSON.
-  function verify(rawBody, header, secret, toleranceSeconds = 300) {
-    const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(header || "");
-    if (!m) return false;
-    if (Math.abs(Date.now() / 1000 - Number(m[1])) > toleranceSeconds) return false; // replay guard
-    const expected = crypto.createHmac("sha256", secret).update(`${m[1]}.${rawBody}`).digest();
-    return crypto.timingSafeEqual(Buffer.from(m[2], "hex"), expected);
-  }
-  ```
+**Load testing.** `npm run loadtest` drives the proxy with concurrent requests; point it at `scripts/mock-provider.js` for zero API cost. Results so far: [docs/load-test-results.md](docs/load-test-results.md).
 
-### Optimization engine
-- Rule-based model-switch recommendations, each starting with an explicit caveat: cost-only estimate, quality unverified
-- **Shadow A/B testing** (opt-in via `X-Enable-Shadow-Test: true`): a sample of real traffic is also sent to the recommended cheaper model, purely to compare — supports both streaming and non-streaming requests (a streamed primary gets a streamed shadow call too, for a fair comparison). Similarity is scored two ways: an always-on local word-overlap lexical score, plus an optional **LLM-as-judge** semantic score (gated behind `FINOPS_SHADOW_JUDGE_MODEL`, unset by default) stored additively alongside it, never as a replacement. Once a model pair has enough samples, `/api/recommendations` reports a real measured confidence: `shadow-tested-similar` or `shadow-tested-diverges`. A comparison scoring below `FINOPS_SHADOW_FLAG_SIMILARITY_THRESHOLD` (default `0.5`) is also captured to `GET /api/shadow-test/flagged-test-cases` — cheap groundwork for a future eval-suite pipeline, not the pipeline itself
-- Caching-opportunity heuristic for repeated/templated prompt patterns
+## Bootstrap mode
 
-### Shadow-spend reconciliation
-- Upload a provider billing CSV (`date,provider,cost`) to compare reported vs. tracked spend per day/provider
-- Re-uploading a period replaces prior numbers rather than double-counting
-- **Categorized gap breakdown** (A12): every flagged gap (`gap_usd`/`gap_pct`/`flagged` are unchanged, kept for backward compatibility) also gets a best-guess `category`, using signals this module can already see rather than new instrumentation: `pricing-mismatch` (tracked usage in that window was recorded unpriced or at an approximate catalogue rate — see `GET /api/pricing/unpriced`), `timing-difference` (the adjacent day shows an offsetting gap in the other direction — a billing-period boundary not lining up with our UTC day, not a real discrepancy), `tracking-gap` (nothing at all was tracked that day/provider — an outage window or spool-replay failure), or `unexplained` (none of the above — the honest bucket, not a forced guess). **Not attempted**: "provider invoice adjustments" (credits, retroactive corrections) — there's no data source for that in this codebase (the CSV import has no concept of a credit line distinct from an ordinary charge), so this stays an explicit gap rather than a faked heuristic
+On a fresh install, before you have created your first API key or user, **every request is served as admin** in single-tenant mode. This is deliberate local-development convenience. Creating a key or user closes the window automatically. Multi-tenant mode has no bootstrap window.
 
-### Billing (the platform's own subscription — separate from the AI spend it tracks)
-- Stripe Checkout for the two flat-fee tiers (`$999/mo` up to 5 members, `$2,500/mo` unlimited) via `POST /api/billing/checkout-session`
-- A dedicated raw-body webhook route (`POST /api/billing/webhook`, mounted before the app's global JSON parser — Stripe signature verification needs the untouched raw body)
-- Cleanly returns `501`, not a crash, when `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` aren't set — see `docs/stripe-live-checkout-runbook.md` for the manual end-to-end verification steps a real Stripe test-mode account requires (this can't be fully automated in CI)
+The server binds to `127.0.0.1` by default, so the window cannot be reached from another machine. Setting `FINOPS_HOST=0.0.0.0` exposes it to your network until you create the first key or user; the server logs a `[WARN]` when that is the case.
 
-### Access control
-- API keys (roles: admin, budget-manager, developer, viewer, auditor, agent) for services/the proxy. **Auditor** is read-only but scoped narrowly to audit/compliance evidence (audit log, alerts log, reconciliation report, billing status, tool-call approval history) rather than general dashboard access — a distinct `audit_read` permission, not an alias for `viewer`'s `read`. **Agent** is machine-scoped: holds only `write` (the ingest/proxy/tool-call-logging path), nothing else — no dashboard reads, no key/budget management — and is API-key-only, deliberately excluded from dashboard-account creation (`POST /api/auth/register` rejects it)
-- Session-based human login for the dashboard, `scrypt`-hashed passwords, in **both** single-tenant and multi-tenant mode (multi-tenant login additionally takes a `tenant_id`, since usernames are only unique within a tenant — see "Deployment modes")
-- **Self-service password reset + email verification** (`POST /api/auth/forgot-password`, `/reset-password`, `/resend-verification`, `/verify-email`, plus `reset-password.html`/`verify-email.html` for the dashboard) — an optional `email` on a dashboard account (`POST /api/auth/register`) enables it; accounts with no email on file simply can't use it (still fall back to an admin-triggered reset, `POST /api/auth/users/:username/reset-password`). Reset/verification tokens are single-use, expire (1 hour / 24 hours), stored only as a hash, and every "does this account/email exist" response is deliberately identical regardless of the answer, in both single- and multi-tenant mode. IP-rate-limited separately from login (5 requests/15 min for forgot-password/resend-verification, since a wrong guess there costs an attacker nothing the way a wrong login password does). Reuses the same SMTP transport as alerting (`FINOPS_SMTP_*` below) but does **not** require `FINOPS_ALERT_EMAIL_TO` to be set — sends to the user's own address instead of a fixed ops recipient. With no SMTP configured at all, every endpoint above still responds normally (generic message, no error) — it just has no email to actually send. **Reset by email:** `POST /api/auth/forgot-password` accepts either `{username}` or `{email}` (exactly one — both or neither is a `400` that depends only on the request's shape, never on whether an account exists; multi-tenant mode additionally requires `tenant_id`, and the email lookup is *always* scoped to that tenant, so the same address in another tenant is unreachable). Because `users.email` has no `UNIQUE` constraint, one address can sit on several accounts: a request mails one reset link per matching account (each naming its account), capped at 5 per request. **Email lookup only matches *verified* addresses** (the username path mails whatever is on file) — an unverified address may be a typo belonging to a stranger, who could otherwise request a live reset link for someone else's account; consequence: accounts that never verified their email must use the username path or an admin reset. Matching is case/whitespace-insensitive (SQLite's `LOWER()` only folds ASCII). The reset email is sent *after* the response (never awaited on the anonymous endpoints), because awaiting SMTP only on the match path made a real account answer in ~600 ms vs ~2 ms for an unknown one — an account-enumeration timing oracle; residual: the match path still does a token write + audit write before responding, so response time is not strictly constant. The dashboard page (`reset-password.html`) still submits username only; email is API-level for now
-- **Invite a teammate** (`POST /api/invites`, `GET /api/invites`, `DELETE /api/invites/:id`, `POST /api/invites/accept`, plus `accept-invite.html`) — an admin invites an email address with a role; the recipient follows the emailed link and chooses their own username and password (single- and multi-tenant mode; multi-tenant invites live in the control plane and every query is scoped by `tenant_id`, with the tenant for an accepted invite taken from the invite itself, never from the request). Tokens are 32 random bytes, stored only as a hash, expire after 7 days, and redeem **exactly once** (one atomic conditional `UPDATE`, so concurrent accepts of one link create one account). An inviter can only grant a role whose permissions they hold themselves (today only `admin` holds `manage_keys`, so in practice admins invite any dashboard role; `agent` is never invitable). Re-inviting an address supersedes its older pending link; at most 50 invites can be pending per deployment/tenant. The raw token is only ever in the email — never in an API response or the database. Accepting never says *why* a link failed (unknown, expired, used, revoked, or a suspended tenant all return the same `400`); the only account-specific answer is `409 that username is already taken`, which gives the invitee their link back. The accepted account is created with `email_verified = 1` (the link proved control of the address). **Unlike the anonymous endpoints, the invite email is awaited**: creation is authenticated so response time leaks nothing, and the response carries `email_sent` so the admin knows whether it went out (with no SMTP configured it is `false` — use `POST /api/auth/register` instead). Redeeming is IP-rate-limited with the same limiter as reset-token redemption. Single-tenant tables come from migration 13; multi-tenant from the control-plane schema
-- Spec-compliant OIDC (SSO) client — needs your own identity provider app registration to fully activate
+## API
 
-### Audit & data governance
-- Immutable audit trail for all administrative actions (budget changes, key lifecycle, pricing overrides, tag corrections, region allow-list changes)
-- Data export (JSON/CSV) and explicit-cutoff retention purging via `/api/data`
-- **FOCUS-spec export** (`/api/data/export/focus`) — includes both API and GPU spend in one unified schema. A GPU row from a shared cluster carries its split-allocation method in `Tags`, so a reader can tell an allocated number apart from a directly-measured one
+Every route group is served at `/api/<name>` and at the stable, versioned `/api/v1/<name>`. A machine-readable OpenAPI description of the proxy, ingest, keys, auth and invites groups is at `GET /api/v1/openapi.json`. The other groups work under `/api/v1` but are not described there yet.
 
-### Reliability & operations
-- **Security:** Helmet security headers, IP-based login rate limiting (10 attempts / 15 min)
-- **Logging:** structured JSON logs written to `logs/`, daily rotation
-- **Backups:** automatic SQLite backup on boot and every 6 hours, retention-pruned; manual trigger via `npm run backup`
-- **Crash recovery:** `npm run serve` runs a self-written supervisor that respawns the server on crash with exponential backoff
-- **Load testing:** `npm run loadtest` — a dependency-free concurrent load test against the proxy (point it at `scripts/mock-provider.js` for zero real API cost), reporting throughput and latency percentiles. This is the closest thing to an automated answer for "is the proxy actually fast enough" — genuine load behavior still needs a human to run this and read the output, not something a unit test can assert
+Main groups: `ingest`, `proxy`, `costs`, `budgets`, `alerts`, `keys`, `auth`, `invites`, `agents`, `tags`, `tool-calls`, `gpu-usage`, `recommendations`, `shadow-test`, `reconcile`, `audit`, `data`, `backup`, `billing`, `gitops`, `tenants`, `platform`.
+
+The full route table, with methods and purposes: [docs/api-reference.md](docs/api-reference.md).
 
 ### FinOps as Code
-- `finops.yaml` defines budgets declaratively; `POST /api/gitops/sync` pushes them in and removes any budget no longer in the file
-- `finops.yaml` also defines declarative tagging rules under `tagging_rules:` — `- match: { api_key_prefix }` / `assign: { team, environment, project_id, cost_center, customer_id, feature_id }` — synced by the same `POST /api/gitops/sync` call, same create/update/remove-drift semantics as budgets. A rule only fills in a field the caller left blank; it never overrides an explicit tag or a key's bound team (see `server/tagRules.js` for the full precedence order against smart/inferred tagging and key-team binding). Longest-matching-prefix wins when more than one rule matches the same key, so a team can declare a broad default and a narrower override without the two being order-dependent
 
-Example `finops.yaml` (also in `finops.yaml.example`):
+`finops.yaml` declares budgets and tagging rules; `POST /api/gitops/sync` applies them and removes anything no longer in the file. A starting point is [`finops.yaml.example`](finops.yaml.example).
+
 ```yaml
 budgets:
   - scope_type: team
@@ -182,161 +213,59 @@ tagging_rules:
     assign:
       team: growth
       environment: prod
-  - match:
-      api_key_prefix: "fk_growth_eu_"
-    assign:
-      team: growth
-      environment: prod
-      project_id: eu-checkout
-      cost_center: cc-4821
 ```
 
-### Testing
-- 563 automated tests (`npm test`), 553 passing / 10 skipped by default on SQLite — the 10 skips are the multi-tenant-only suites, which have no SQLite equivalent and self-skip unless `FINOPS_DB_DRIVER=postgres` is set. Run the same command against a real Postgres database to execute all 631, including full multi-tenant isolation, session login, per-tenant background jobs, resource quotas, tenant lifecycle, RBAC role enforcement, fraud auto-quarantine, tool-call deny-list/approval-queue, and shadow-test coverage
-- `scripts/mock-provider.js` — a local stand-in for the OpenAI/Anthropic APIs, so the full proxy flow (including load testing) can be exercised end-to-end at zero real API cost
+## Testing
 
-### Client SDK
-- `sdk/finops-client.js` — a zero-dependency wrapper for calling the proxy without hand-managing headers, supporting both standard and streaming requests
+```bash
+npm test                                                      # SQLite
+FINOPS_DB_DRIVER=postgres FINOPS_POSTGRES_URL=postgres://user:pass@host:5432/db \
+  npm test -- --test-concurrency=8                            # Postgres, empty database
+```
 
-### CI/CD
-- GitHub Actions (`.github/workflows/ci.yml`): runs the full test suite against both SQLite and Postgres backends, plus a Docker build check, on every push/PR to `main`
+As of this writing the SQLite run has 696 tests (685 pass, 11 skipped: the suites that need Postgres) and the Postgres run has 797 (796 pass, 1 skipped). The counts change as tests are added; the point is that both backends are green. CI runs both, plus a Docker build, on every push and pull request to `main`.
 
-## API reference
+Some tests start the real server and send it a real `SIGTERM`; they are skipped on Windows. Tests write scratch databases to `test/.tmp-*` (git-ignored) and `npm test` removes leftovers first. Live provider calls, a real identity provider and real Stripe checkout cannot be automated; see [docs/known-gaps.md](docs/known-gaps.md) for what you need to verify yourself.
 
-**Versioning.** Every route group below is served at both `/api/<name>` (the original path, kept working) and **`/api/v1/<name>`** (the stable, versioned path) — the *same* router instance, so the two cannot differ. Not versioned, on purpose: `POST /api/billing/webhook` (Stripe is configured with that exact URL and it needs the raw body), `/api/platform/*` (operator surface) and `/api/health`. The multi-tenant guard for route groups that are not tenant-aware (`server/tenantGuard.js`) is registered at **both** prefixes and matches on the canonical path — a plain `/api/v1` alias mounted beside the old guard would have silently bypassed it; `server/apiMounts.js` exists so mounting and guarding cannot drift, and `test/apiVersioning.test.js` fails if a mount in `index.js` skips it. The client SDK still calls `/api/proxy/...`, which keeps working. There is no deprecation policy or `v2` yet.
+## Project layout
 
-**OpenAPI.** `GET /api/v1/openapi.json` (unauthenticated — it describes the public surface and holds no tenant data) serves a hand-written OpenAPI 3.0 description of **proxy, ingest, keys, auth and invites only**; the other groups work under `/api/v1` but are not described yet. Because it is hand-written, `test/openapi.test.js` introspects the real Express routers and fails if a documented path/method does not exist **or** if a route those five routers serve is not documented. Request/response *schemas* are reviewed by hand, not machine-checked against handlers.
+```
+server/        Express app, routes/, storage/ (SQLite and Postgres adapters, migrations)
+public/        Dashboard and account pages (no build step)
+sdk/           Zero-dependency client for the proxy
+scripts/       supervisor, backup/restore, load test, mock provider, spool replay
+test/          node --test suites
+docs/          Detailed reference, runbooks, RFCs
+```
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/api/ingest` | Record a usage event |
-| POST | `/api/proxy/:provider` | Proxy a request to `openai`/`anthropic` (streaming + caching + agent-attribution headers supported) |
-| GET | `/api/costs/summary` \| `/by-team` \| `/by-model` \| `/by-feature` \| `/by-customer` \| `/by-project` \| `/by-cost-center` \| `/by-region` \| `/over-time` \| `/untagged` | Cost dashboards |
-| GET | `/api/costs/forecast` | Simple moving-average spend projection |
-| GET | `/api/costs/forecast-variance?team=` | Actual vs. predicted spend for a team |
-| GET/POST | `/api/budgets` | List / create budgets (scope: team/project/key/background) |
-| GET | `/api/budgets/status` | Budgets with spend-to-date and alert tier |
-| GET/POST/DELETE | `/api/commitments` | Prepaid credit balance tracking |
-| GET | `/api/reports/weekly/preview` \| POST `/send-now` | Weekly digest preview / manual send |
-| GET/POST | `/api/agents` | Per-agent cost attribution summaries |
-| GET | `/api/agents/:agentId` \| `/tasks` | One agent's summary / task-level breakdown |
-| GET | `/api/tags/inferences` | Smart-tagging inferences awaiting review |
-| POST | `/api/tags/:usageEventId/correct` | Confirm/correct an inference, applying it as a real tag |
-| GET/POST/DELETE | `/api/region-allowlist` | Data-residency allow-list management |
-| GET/POST | `/api/tool-calls` | Agent tool-call audit log / ingestion (post-hoc, reporting only) |
-| POST | `/api/tool-calls/check` | Pre-flight check before an agent acts: denylist / human-approval / allowed |
-| GET | `/api/tool-calls/approvals` | Pending human-approval queue |
-| POST | `/api/tool-calls/approvals/:id/approve` \| `/deny` | Decide a pending approval (admin only) |
-| GET/POST/DELETE | `/api/tool-call-denylist` \| `/:id` | Tool-call deny-list management (`tool_name`/`target_pattern`, key-then-team scoping) |
-| POST | `/api/gpu-usage/ingest` | Record GPU/self-hosted inference cost |
-| GET | `/api/gpu-usage/blended` | Combined API + GPU cost per team |
-| GET | `/api/query?q=` | Plain-English dashboard query |
-| GET | `/api/pricing/catalogue` | View baseline pricing |
-| POST | `/api/pricing/override` | Correct/add a pricing rate |
-| GET/POST | `/api/keys` | List / create API keys |
-| POST | `/api/keys/:id/quarantine` \| `/approve` \| `/revoke` | Key governance actions |
-| POST | `/api/keys/:keyId/dismiss-rotation` | Clear a fraud-detection rotation-recommended advisory |
-| GET | `/api/alerts` | Alert log |
-| GET | `/api/alerts/status` | Consolidated alert status for monitoring |
-| POST | `/api/alerts/check-now` | Manually trigger budget/burn-rate checks |
-| GET/POST | `/api/model-allowlist` | List / add allow-list entries |
-| DELETE | `/api/model-allowlist/:id` | Remove an entry (admin only) |
-| GET/POST | `/api/token-quotas` | List / add quotas |
-| DELETE | `/api/token-quotas/:id` | Remove a quota (budget-manager or admin) |
-| GET | `/api/recommendations` | Optimization suggestions |
-| GET | `/api/shadow-test/summary` \| `/comparisons` \| `/flagged-test-cases` | Shadow A/B test results / low-similarity flagged cases |
-| POST | `/api/gitops/sync` | Sync budgets and declarative tagging rules from `finops.yaml` |
-| POST | `/api/auth/register` \| `/login` \| `/logout` | Human user accounts (single-tenant and multi-tenant mode; multi-tenant login also requires `tenant_id`) |
-| POST | `/api/auth/forgot-password` \| `/reset-password` \| `/resend-verification` \| `/verify-email` | Self-service password reset / email verification (same generic response regardless of whether the account exists; multi-tenant versions also require `tenant_id`; `forgot-password` takes `username` **or** `email`) |
-| POST/GET/DELETE | `/api/invites` \| `/api/invites/:id` \| `/api/invites/accept` | Invite a teammate by email (admin: create, list pending, revoke); the invitee redeems the emailed single-use token at `/accept` (anonymous, rate-limited) and chooses a username/password. `accept` returns `tenant_id` in multi-tenant mode |
-| POST | `/api/tenants` | Multi-tenant signup: creates a tenant + first API key, optionally a first dashboard login and/or a trial period |
-| GET/POST/PATCH | `/api/platform/tenants/*` | Tenant lifecycle: list, suspend/reactivate, offboard/cancel, export, purge, adjust quotas (gated by `FINOPS_PLATFORM_ADMIN_TOKEN`) |
-| GET | `/api/platform/overview` | Read-only cross-tenant health/usage overview (aggregates only; `?status=`, `?limit=`; gated by `FINOPS_PLATFORM_ADMIN_TOKEN`) |
-| GET | `/api/sso/login` \| `/callback` | OIDC SSO flow |
-| POST | `/api/reconcile/upload` | Import a billing CSV |
-| GET | `/api/reconcile/report` | Shadow-spend comparison report |
-| GET | `/api/audit` | Audit trail (admin only) |
-| GET | `/api/cache/stats` \| POST `/clear` | Exact-match cache statistics / manual clear |
-| GET | `/api/semantic-cache/stats` \| POST `/clear` | Semantic cache statistics / manual clear |
-| GET | `/api/data/export` \| `/export/focus` | Export usage events (JSON/CSV) / unified FOCUS-spec export (API + GPU) |
-| DELETE | `/api/data/purge` | Retention purge (explicit cutoff required) |
-| GET/POST | `/api/backup` \| `/run` | List / trigger backups |
-| GET/POST | `/api/billing/plans` \| `/checkout-session` | Platform subscription plans / Stripe Checkout |
-| GET | `/api/billing/status` | Current platform subscription status |
-| POST | `/api/billing/webhook` | Stripe webhook receiver (raw body) |
-| GET | `/health` | Unauthenticated liveness probe (Docker `HEALTHCHECK`, load balancers) — process-is-up only, no dependency checks |
-| GET | `/health/ready` | Unauthenticated readiness probe — actually queries the database (control-plane pool in multi-tenant mode), `503` with a reason if unreachable; reports Postgres connection-pool stats where applicable |
+## Documentation
 
-## Configuration
+| | |
+|---|---|
+| [docs/features.md](docs/features.md) | Every feature in depth |
+| [docs/api-reference.md](docs/api-reference.md) | Route table, versioning, OpenAPI |
+| [docs/multi-tenancy.md](docs/multi-tenancy.md) | Isolation model, tenant lifecycle, operator overview |
+| [docs/guarantees.md](docs/guarantees.md) | Identity, pricing and metering rules |
+| [docs/reliability.md](docs/reliability.md) | Probes, shutdown, backups, RTO/RPO |
+| [docs/backup-restore-runbook.md](docs/backup-restore-runbook.md) | Backup and restore procedure |
+| [docs/stripe-live-checkout-runbook.md](docs/stripe-live-checkout-runbook.md) | Verifying Stripe billing end to end |
+| [docs/load-test-results.md](docs/load-test-results.md) | Measured throughput |
+| [docs/known-gaps.md](docs/known-gaps.md) | What is not built, and what is not verified |
+| [docs/tech-stack-migration-plan.md](docs/tech-stack-migration-plan.md) | TypeScript, React, queue, OpenTelemetry, S3: assessed one by one |
+| [docs/rfcs/](docs/rfcs/) | Plans: [scaling and infrastructure](docs/rfcs/0001-horizontal-scaling-and-iac.md), [OpenTelemetry exporter](docs/rfcs/0002-opentelemetry-exporter.md), [dashboard framework](docs/rfcs/0003-dashboard-framework.md) |
+| [CHANGELOG.md](CHANGELOG.md) | What changed, newest first |
 
-Copy `.env.example` to `.env`. Vars worth understanding before you touch them: `FINOPS_HOST` (see "Bootstrap mode"), `FINOPS_DB_DRIVER` and `FINOPS_MULTI_TENANT` (see "Deployment modes"), `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` (see "Billing" above and `docs/stripe-live-checkout-runbook.md`), `FINOPS_PLATFORM_ADMIN_TOKEN` (enables the `/api/platform/*` tenant-lifecycle routes — see "Deployment modes"; unset means those routes 404 rather than silently accepting no credential), `FINOPS_FRAUD_AUTO_QUARANTINE_MIN_SIGNALS` (default `2` — how many concurrent fraud signals trigger automatic key quarantine rather than just a rotation-recommended advisory; see "Governance" above), `FINOPS_SHADOW_JUDGE_MODEL` / `FINOPS_SHADOW_FLAG_SIMILARITY_THRESHOLD` (both optional — see "Optimization engine" above), `FINOPS_BACKUP_RETENTION` (backup count kept, both backends — see "Backups, restore and migrations"), `FINOPS_DB_HEALTH_TIMEOUT_MS`/`FINOPS_DB_CIRCUIT_FAILURE_THRESHOLD`/`FINOPS_DB_CIRCUIT_OPEN_MS` (readiness-check timeout and circuit-breaker tuning — see "Reliability: readiness, RTO/RPO"), and `FINOPS_OTEL_ENABLED` (opt-in, OTel-compatible request tracing on `/api/proxy/:provider` — see `docs/tech-stack-migration-plan.md` §4).
+## Status
 
-## Identity, pricing and metering guarantees
+Working and tested: everything under "What you get", on both SQLite and Postgres. Not built yet, by design and with written plans: running more than one instance, infrastructure-as-code, a real OpenTelemetry exporter, centralized logging and metrics, a secrets-manager integration and usage-based billing. The most important current limits:
 
-These are the rules the proxy enforces so that a budget means what it says.
+- One instance only (see [Deployment modes](#deployment-modes)).
+- PII redaction, prompt-injection and risky-command detection are pattern-based, not ML classifiers, and are not a compliance guarantee.
+- Data-residency checks rely on a client-declared region header, not IP geolocation.
+- Postgres backups are periodic snapshots, not point-in-time recovery.
+- Recovery times and load numbers were measured on small datasets on a development machine; re-measure before putting them in an SLA.
 
-**Who a request is acting as.** A key can be *bound* to a team (`POST /api/keys` with `team`, or `PATCH /api/keys/:keyId`). A bound key's team is authoritative: usage, budgets, allow-lists and quotas all apply to it whatever headers the client sends, and an `X-Team` that names a different team is refused `403`. An *unbound* key still falls back to the `X-Team` header for backward compatibility — but that is a self-declared label, and a client can omit it to avoid team-scoped limits. Set `FINOPS_STRICT_IDENTITY=true` to refuse unbound keys on the proxy.
-
-**Which key sent an event.** Every usage event records `key_id`: the API key that actually authenticated the request. This is distinct from `user_id`, which `/api/ingest` lets the client declare, so `key_id` is the one to trust when you need to act on the source of an event (for example, quarantining the key behind a runaway agent via `POST /api/keys/:keyId/quarantine`). It is `NULL` for dashboard-session logins and bootstrap mode, since neither is a revocable key. Existing databases gain the column on startup and are backfilled where `user_id` matches a real key (best-effort: rows with a client-declared `user_id` stay `NULL`).
-
-**Background workloads.** `X-Workload-Type: background` exempts a request from the budget degrade/hard-block, so it is a privilege an admin grants to a key (`allow_background: true`), not something a caller can assert. A key without it that sends the header gets `403`. Upgrade note: existing keys default to `allow_background = 0`, so any service that relied on sending the header must be granted it.
-
-**PII redaction bypass.** `X-Disable-PII-Redaction: true` (proxy and ingest) skips PII redaction on the request/payload, so it is the same kind of privilege as background workloads: an admin grants it to a key (`allow_pii_bypass: true`, `PATCH /api/keys/:keyId`), it is never something a caller can claim by sending the header, and a key without it that sends the header gets `403` rather than being silently redacted anyway or silently allowed through unredacted. Upgrade note: existing keys default to `allow_pii_bypass = 0`, so any service that relied on sending this header must be granted it.
-
-**Pricing.** Model IDs are normalized (a dated snapshot such as `gpt-4o-2024-08-06` is priced as `gpt-4o`), and the catalogue covers current OpenAI and Anthropic models. A *new* model in a known family is priced by a family guess and labelled approximate (`X-FinOps-Price-Approximate`); a model with **no** price is never silently costed at $0 without a trace — it is flagged (`X-FinOps-Unpriced`, an alert, an `unpriced` marker on the event) or, with `FINOPS_UNPRICED_POLICY=block`, refused. `GET /api/pricing/unpriced` lists everything currently unpriced or approximate. The catalogue is a dated snapshot, not a live feed — verify against your provider's pricing page and correct with `POST /api/pricing/override`.
-
-**Metering durability.** Usage is recorded *after* the provider call, so a recording failure can't undo the spend. The proxy therefore (a) always returns the provider's response, (b) spools the un-recorded event to `data/metering-spool.jsonl` and alerts, and (c) lets you recover it with `npm run replay-spool`. A stream that is cut short — by the client or the provider — is metered with the usage seen so far and flagged `partial` (OpenAI only reports usage at the very end of a stream, so a cut-short OpenAI stream may record zero tokens). `FINOPS_METERING_FAILURE_POLICY=closed` additionally refuses requests up front while the usage store is unreachable. `FINOPS_UPSTREAM_TIMEOUT_MS` bounds how long a hung provider can hold a request (`504`).
-
-## Backups, restore and migrations
-
-SQLite backups are consistent snapshots (`VACUUM INTO`), verified the moment they are written, taken at startup and every 6 hours into `data/backups/`. Postgres backups (single-tenant mode; see below) use `pg_dump` in custom format on the same startup-plus-every-6-hours schedule into `data/backups-postgres/`, verified by actually restoring into a real throwaway database rather than just checking the file exists — a periodic logical snapshot, not continuous WAL-archiving/PITR (see `docs/backup-restore-runbook.md` for why that's the deliberate choice here). `npm run backup` / `npm run backup:verify` / `npm run restore` all dispatch automatically based on `FINOPS_DB_DRIVER`, so you don't need to know which backend you're on. **Multi-tenant mode**: every tenant's schema lives in the same physical Postgres database, so a manual `npm run backup` captures every tenant — but automatic scheduling is deliberately single-tenant-only for now (a restore replaces the whole database, i.e. every tenant at once; there's no per-tenant-schema restore yet). Schema changes are versioned migrations applied automatically at startup, with a verified snapshot taken first on SQLite, so you no longer delete `data/finops.db` after a schema change. Full procedure: [docs/backup-restore-runbook.md](docs/backup-restore-runbook.md).
-
-## Reliability: readiness, RTO/RPO
-
-- **Liveness vs. readiness.** `GET /health` and `GET /api/health` are pure liveness — "the process is up" — unconditionally `200`, no dependency checks, so a slow database doesn't get a healthy container killed and restarted by a liveness probe. `GET /health/ready` is real **readiness**: it queries the database (the control-plane pool in multi-tenant mode) with a 2s timeout (`FINOPS_DB_HEALTH_TIMEOUT_MS`) and returns `503` with a specific reason if it can't reach it. On Postgres it also reports connection-pool stats (`total`/`idle`/`waiting`/`exhausted`) — informational, not itself a cause for `503`, so a brief queue under a load spike doesn't get treated as an outage.
-- **Graceful shutdown.** On `SIGTERM`/`SIGINT` the server stops accepting connections, lets in-flight requests finish (so a provider call already made is still metered), closes the database, then exits `0`. `GET /health/ready` returns `503` while draining so a load balancer stops routing to it. `FINOPS_SHUTDOWN_GRACE_MS` (default `25000`) caps the wait; past it, remaining connections are cut and the exit code is `1`. Set your orchestrator's stop timeout above it (`docker-compose.yml` uses `stop_grace_period: 30s`; Kubernetes' default `terminationGracePeriodSeconds` is 30). Not covered: `SIGKILL`, power loss, an out-of-memory kill (that is what the metering spool is for), and Windows, where `SIGTERM` ends the process without running any code. `FINOPS_BACKUP_DIR` overrides where SQLite backups are written (default `data/backups`).
-- **DB-layer circuit breaker.** After `FINOPS_DB_CIRCUIT_FAILURE_THRESHOLD` (default 3) consecutive readiness-check failures, the breaker opens for `FINOPS_DB_CIRCUIT_OPEN_MS` (default 30s) and fails fast without attempting a new connection — the smallest thing that's honestly better than nothing for a database that's genuinely down, distinct from `FINOPS_UPSTREAM_TIMEOUT_MS` (which bounds LLM *provider* calls, not the database).
-- **A real crash this pass found and fixed**: none of this codebase's three `pg.Pool` instances had an `.on("error", ...)` handler, so an idle client losing its connection (a Postgres restart, a network blip) crashed the *entire process* via Node's default uncaught-exception behavior — not just failed a health check. All three now log and continue; verified by restarting Postgres under a running server and confirming it stays up and `/health/ready` correctly flips to `503` and back to `200`.
-- **Measured RTO** (time to restore), from `test/backup.test.js` / `test/backupPostgres.test.js` and a manual timing run against 2,000 `usage_events` rows on this development machine: SQLite backup ≈14ms, verify ≈13ms, restore ≈19ms; Postgres backup+verify (restoring to a throwaway database is part of the verify step) ≈384ms, restore to a fresh database ≈387ms. These numbers scale with data volume and machine I/O, and 2,000 rows is nowhere near a real production dataset — they're a real floor, not a promise, and should be re-measured against your actual data volume before you put a number in an SLA. **RPO** (potential data loss) is bounded by the backup interval: up to ~6 hours on the default schedule, or however often you run `npm run backup` yourself.
-- **Still unmeasured**: RTO/RPO under real concurrent production load, for a multi-tenant Postgres database at realistic scale, and for the per-tenant restore granularity multi-tenant mode doesn't have yet (see `docs/backup-restore-runbook.md` §5) — `scripts/loadtest.js` has now been run twice (see [docs/load-test-results.md](docs/load-test-results.md): stable, zero dropped billing events; the throughput-decays-with-history problem found in the first pass is now closed with additive indexes and sargable query rewrites, roughly 1.8-2x on the same scenario, proven ~25x on an isolated Postgres query-plan check; a later audit found and closed the same non-sargable pattern in the monthly budget/quota checks too, ~2.9x on the single most expensive query found anywhere in the codebase, ~40ms/call at 100k rows down to ~13.6ms; one smaller inherent cost in the fraud-baseline query still documented as open since it needs per-row date evaluation regardless of indexing), but only on a 1-vCPU SQLite box for the end-to-end throughput numbers, so RTO/RPO under load and full Postgres/multi-tenant throughput numbers remain unmeasured.
-
-## Bootstrap mode
-
-On a fresh install, before you've created your first API key or user, **every request is served as admin** in single-tenant mode — deliberate local-dev convenience. Once you create a key or user, this window closes automatically. (Multi-tenant mode has no bootstrap window — see "Deployment modes.")
-
-The server binds to `127.0.0.1` by default, so the bootstrap window can't be reached from anywhere else. Setting `FINOPS_HOST=0.0.0.0` exposes it network-wide, including the bootstrap window, until you create your first key/user — the server logs a loud one-time `[WARN]` on boot and on first bootstrap-mode access.
-
-## What's tested vs. what needs your own verification
-
-**Tested live during development:** proxy metering (streaming + non-streaming, both providers), the two-tier budget enforcement (soft degrade + hard block), background-workload exemption, data-residency blocking, agent-attribution field threading, fraud/anomaly detection, commitment/weekly-briefing alerting, GPU blended cost + FOCUS split allocation, rate limiting, quarantine, RBAC, GitOps sync, reconciliation with dedupe, session login + SSO mechanics against a mock IdP, exact-match caching, security headers, login rate limiting, automatic backups, crash-restart via the supervisor, Stripe's "not configured" paths and webhook event application, and multi-tenant schema creation / connection pool isolation, dashboard session login, per-tenant background jobs, per-tenant resource quotas, and the full tenant lifecycle (suspend/reactivate/offboard/export/purge/trial-expiry) — against **both** SQLite and Postgres.
-
-**Needs your own verification:** a live request against your real OpenAI/Anthropic account, a live SSO handshake against your real identity provider, an actual Stripe test-mode checkout end-to-end (see `docs/stripe-live-checkout-runbook.md` — this genuinely can't be automated), and the proxy under real production-like concurrent load (`npm run loadtest` gets you the tooling; reading and acting on the results is still on you).
-
-## Known gaps
-
-- Token quotas are checked using consumption *so far*, not including the current request — the request that crosses the threshold is still allowed through; only the next request after that is blocked. Deliberate: no provider exposes token cost before generating the response
-- PII redaction, prompt-injection detection, and risky-command detection are all pattern-based, not ML classifiers — none is a compliance guarantee on its own, and all can be evaded by a sufficiently motivated obfuscation
-- Shadow-test lexical similarity (local word-overlap cosine) is always on; the optional LLM-as-judge score (`FINOPS_SHADOW_JUDGE_MODEL`) is additive, not a replacement — neither is true human quality judgment
-- Token-efficiency-ratio is a proxy ("output tokens on tasks that reached success" ÷ "all tokens consumed"), not a measure of whether the successful output was actually good — see `server/agentAttribution.js` for the full reasoning
-- Smart tagging infers from an API key's own tagging history (including history created by human corrections), plus a same-key time-of-day fallback — calling-service identity and prompt-template-fingerprint signals from the original plan aren't implemented yet, since both need request metadata this service doesn't collect today
-- GPU shared-cluster cost allocation is a relative-API-spend approximation, not a measured per-team utilization split — there's no GPU-hours telemetry to split by instead
-- Tool-call pre-flight prevention (`POST /api/tool-calls/check`) is opt-in by construction — an orchestrator that never calls it gets no denylist/approval-gate protection, only the pre-existing post-hoc audit trail. There is no way to force a call to happen before the action, since the action happens outside this service's control
-- The `flagged_test_cases` "cheap groundwork for Compass" table has a `thumbs-down` source defined but unwired — there's no response-rating feature anywhere in this codebase yet to hook it up to
-- Data residency (both the proxy check and tool-call flagging) relies on self-reported region headers, not real IP geolocation — a real control for well-behaved clients, not resistant to a malicious one
-- "Ask your dashboard" is rule-based pattern matching over a handful of known query shapes, not a general natural-language-to-SQL engine — an unrecognized phrasing says so plainly rather than guessing
-- SQLite backups are file copies, not point-in-time/incremental; Postgres deployments are responsible for their own backup strategy
-- No agent-level GPU utilization ingestion beyond cluster-level totals (no per-agent GPU-hours breakdown)
-- `/api/platform/*` tenant-lifecycle admin routes are gated by one shared `FINOPS_PLATFORM_ADMIN_TOKEN` secret, not a real per-operator admin-identity/RBAC system — a deliberate, documented stopgap (see `server/routes/platformAdmin.js`) until a proper platform-admin console exists; because there is no operator identity, **impersonation-for-support and internal notes are deliberately not built** (they could not be attributed to anyone), and the overview read is not audit-logged for the same reason
-- Historical usage recorded at $0 before a model had a price is not retroactively re-priced (`GET /api/pricing/unpriced` finds unpriced models, not stale $0 rows)
-- Schema migrations cover the single-tenant SQLite and Postgres schemas; the multi-tenant control-plane and per-tenant schemas are not migrated yet
-- Postgres backups (A10) are `pg_dump`-based periodic snapshots, verified by restoring into a real throwaway database — not continuous WAL-archiving/point-in-time recovery, and (for now) not scheduled automatically in multi-tenant mode, where a restore would roll back every tenant at once (see `docs/backup-restore-runbook.md`)
-- Reconciliation gap categorization (A12) is a best-guess heuristic layer over signals this codebase already has (pricing markers, adjacent-day offsets, zero-tracked-usage) — it does not, and cannot, detect provider invoice credits/adjustments, since there's no data source for those in a plain `date,provider,cost` CSV export
-- `/health/ready`'s DB-layer circuit breaker (A11) is a single global consecutive-failure counter, not a full resilience framework — no per-endpoint breakers, no half-open request budgeting; and in multi-tenant mode it checks the control-plane pool only, not every tenant's own schema/pool, so a single tenant's schema-level problem won't show up here
-- RTO/RPO figures (see "Reliability: readiness, RTO/RPO") are measured against a small (2,000-row) dataset on a development machine, not real production concurrency/scale — re-measure before committing to an SLA
-- Tech-stack deviations from the Guard spec (TypeScript, React, a real message queue, full OpenTelemetry, S3-compatible storage) are assessed with concrete cost/migration-effort/recommendation for each in [docs/tech-stack-migration-plan.md](docs/tech-stack-migration-plan.md); this pass only acted on one of the five (A13: minimal opt-in OTel-compatible tracing on `/api/proxy/:provider`, `FINOPS_OTEL_ENABLED=true`) — the other four remain open, by design, with a stated trigger point for each
-- `reset-password.html`/`verify-email.html` are single-tenant only (no `tenant_id` field) - consistent with the rest of the dashboard UI, which doesn't have multi-tenant login either yet; multi-tenant mode's forgot-password/reset-password/verify-email/resend-verification API endpoints work today, just without a dashboard page in front of them. Relatedly, `POST /api/tenants` (signup) doesn't yet take an `admin_email` for the tenant's first user - only `POST /api/auth/register` (which needs an already-authenticated admin) does
-- Invitations are API-level for the *sending* side: there is no dashboard screen for an admin to send/list/revoke invites yet (`accept-invite.html` for the invitee does exist, and is single-tenant-style like the other account pages: it shows the `tenant_id` after accepting but the dashboard login itself still has no tenant field). Nothing enforces the per-seat member limits in the billing tiers, so invites are not counted against a plan. A pending invite cannot be edited (re-invite to change the role), and an invite whose email never arrives has to be re-sent by inviting again (`email_sent: false` tells the admin when the transport failed or is unconfigured). Detached sends can be lost on abrupt shutdown only on the anonymous endpoints; invite sends are awaited
-- `/api/v1` aliases every route group, but only proxy, ingest, keys, auth and invites are in the OpenAPI document, and its schemas are not verified against handler behaviour (only that each documented path/method exists and none is missing). The unversioned `/api` paths are an indefinite alias, not deprecated; the dashboard (`public/dashboard.js`) and `sdk/finops-client.js` still use them. Route groups added later must be mounted with `mountApi()` (a test enforces this) — and `/api/v1` has no separate rate limit or auth, it is the same code path
+The complete list is in [docs/known-gaps.md](docs/known-gaps.md).
 
 ## License
 

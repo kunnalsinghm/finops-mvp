@@ -17,7 +17,7 @@
 //      code (the "restore last month's backup after an upgrade" case).
 //
 // Postgres deployments are not covered here: use pg_dump / your provider's
-// snapshots and point-in-time recovery (still an open item - see README).
+// snapshots and point-in-time recovery (still an open item - see docs/known-gaps.md).
 
 const fs = require("fs");
 const path = require("path");
