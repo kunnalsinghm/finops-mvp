@@ -130,6 +130,7 @@ Copy `.env.example` to `.env`. Everything works without any of these set. The on
 |---|---|---|
 | `PORT` | `4000` | HTTP port |
 | `FINOPS_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` exposes the server, including bootstrap mode, to your network |
+| `FINOPS_TRUST_PROXY` | none | Trust `X-Forwarded-For` from your load balancer so per-IP rate limits see the real client. A hop count (`1`) or a list of proxy IPs/CIDRs (`10.0.0.0/8,192.168.1.5`). Invalid values, including `true`, stop the server from starting |
 | `FINOPS_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
 | `FINOPS_POSTGRES_URL` | none | Connection string; required for Postgres |
 | `FINOPS_DB_PATH` | `data/finops.db` | SQLite file |
@@ -179,7 +180,7 @@ Less common tuning variables:
 
 **Metering spool.** If recording a usage event fails after a successful provider call, the event is written to the spool file and an alert is raised. Recover it with `npm run replay-spool`.
 
-**Behind a reverse proxy.** The server does not trust `X-Forwarded-For`, so every client appears to come from the proxy's address. The login and password-reset rate limits then become global rather than per client. A `FINOPS_TRUST_PROXY` setting is planned in RFC 0001.
+**Behind a reverse proxy.** By default the server ignores `X-Forwarded-For`, so every client appears to come from the proxy's address and the login and password-reset rate limits become one global bucket for everyone. Set `FINOPS_TRUST_PROXY` to fix that: use the number of proxies between the internet and the server (`1` for a single load balancer), or list the proxy addresses (`10.0.0.0/8`). Count carefully. A hop count higher than the real number of proxies, or a range wider than your proxies, lets any client choose its own address by sending the header, which defeats the rate limits. The server refuses to start on `true`, on ranges that match every address, and on anything it cannot parse.
 
 **Load testing.** `npm run loadtest` drives the proxy with concurrent requests; point it at `scripts/mock-provider.js` for zero API cost. Results so far: [docs/load-test-results.md](docs/load-test-results.md).
 
