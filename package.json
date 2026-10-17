@@ -9,6 +9,7 @@
     "serve": "node scripts/supervisor.js",
     "dev": "node --watch server/index.js",
     "seed": "node server/seed.js",
+    "pretest": "node scripts/clean-test-tmp.js",
     "test": "node --test",
     "backup": "node scripts/backup.js",
     "backup:verify": "node scripts/verify-backup.js",

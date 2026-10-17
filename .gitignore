@@ -24,3 +24,6 @@ test/*.db-wal
 _stray_autopilot_files/
 
 test/backups/
+
+# scratch databases created by the test suite
+test/.tmp-*
