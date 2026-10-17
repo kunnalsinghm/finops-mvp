@@ -27,7 +27,9 @@ const logger = require("./logger");
 const migrator = require("./storage/migrator");
 
 const DATA_DIR = path.join(__dirname, "..", "data");
-const BACKUP_DIR = path.join(DATA_DIR, "backups");
+// FINOPS_BACKUP_DIR lets a test (or an operator with a dedicated volume) keep
+// backups elsewhere; unset keeps the historical data/backups.
+const BACKUP_DIR = process.env.FINOPS_BACKUP_DIR || path.join(DATA_DIR, "backups");
 const DB_PATH = process.env.FINOPS_DB_PATH || path.join(DATA_DIR, "finops.db");
 const RETENTION_COUNT = Number(process.env.FINOPS_BACKUP_RETENTION) || 7;
 

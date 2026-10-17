@@ -16,11 +16,20 @@ All notable changes to this project, newest first.
 ## [Unreleased]
 
 ### Fixed
+- **Graceful shutdown** (RFC 0001, phase A1). A `SIGTERM` (scale-down, rolling deploy) used to kill the
+  process mid-request. The proxy calls the provider first and meters after, so a kill in between lost
+  billed spend without reaching the spool: in a reproduction the client got `ECONNRESET` and 0 usage rows
+  were recorded (1 in the no-signal control). The server now drains: it stops listening, lets in-flight
+  requests finish and be metered, closes the database and exits `0`; `/health/ready` returns `503` while
+  draining and periodic jobs stop starting. `FINOPS_SHUTDOWN_GRACE_MS` (default 25000) caps the wait; past
+  it connections are cut and the exit code is `1`. Not covered: `SIGKILL`/power loss/OOM, and Windows.
 - `README.md` contained an unresolved merge-conflict block (`<<<<<<< ours` … `>>>>>>> theirs`) since
   98d27e8. Both sides documented different environment variables, so the resolved line keeps all of them.
   `test/noConflictMarkers.test.js` now fails if any text file in the repo has such a block.
 
 ### Added
+- `FINOPS_BACKUP_DIR` to relocate SQLite backups (default unchanged: `data/backups`).
+- `stop_grace_period: 30s` for the app service in `docker-compose.yml` (Docker's 10s default would kill a drain).
 - This changelog.
 - Written plans (RFC-style) for infrastructure-as-code and horizontal scaling, a real OpenTelemetry
   exporter, and the dashboard-framework question, under `docs/rfcs/`. No code changes accompany them.
