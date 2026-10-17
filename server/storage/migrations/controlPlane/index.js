@@ -5,4 +5,6 @@
 // Version 1 is the frozen baseline: schema.controlPlane.js as it stood when
 // the control plane became versioned. Do not edit that file again; add a
 // numbered file here instead. Each migration only needs `up.postgres`.
-module.exports = [];
+module.exports = [
+  require("./0002_tenants_schema_status"),
+];

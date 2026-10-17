@@ -69,6 +69,32 @@ function initRetryMs() {
 const initFailures = new Map(); // schema_name -> { error, until }
 let controlPlaneFailure = null; // { error, until }
 
+// Best-effort record of a tenant's schema state on its control-plane row
+// (schema_version / schema_migration_error / schema_migration_error_at, added by
+// control-plane migration 2). Called after every init attempt, from the lazy
+// path and from `npm run migrate-tenants`. It must NEVER fail or delay a
+// request: any problem here is logged and swallowed. A tenant with no row (a
+// schema opened by name in a test) simply updates nothing.
+async function recordSchemaStatus(schemaName, { version = null, error = null } = {}) {
+  try {
+    const { controlPlaneReady, controlPlaneDb } = initControlPlane();
+    await controlPlaneReady;
+    if (error) {
+      await controlPlaneDb.run(
+        "UPDATE tenants SET schema_migration_error = ?, schema_migration_error_at = ? WHERE schema_name = ?",
+        [String(error).slice(0, 2000), new Date().toISOString(), schemaName]
+      );
+    } else {
+      await controlPlaneDb.run(
+        "UPDATE tenants SET schema_version = ?, schema_migration_error = NULL, schema_migration_error_at = NULL WHERE schema_name = ?",
+        [version, schemaName]
+      );
+    }
+  } catch (err) {
+    require("./logger").warn("Could not record tenant schema status", { schema: schemaName, error: err.message });
+  }
+}
+
 // ---- Tenant status classification - shared by both auth.js branches
 // (API-key and session-token) and by tenantLifecycle.js's own checks, so
 // "is this tenant allowed to authenticate right now" is decided in exactly
@@ -302,8 +328,9 @@ function getTenantPool(schemaName) {
     // Baseline (frozen), then every numbered tenant migration this schema has
     // not recorded yet. A schema created before versioning is adopted here.
     await createSchemaLocked(pool, schemaName, TENANT_SCHEMA_SQL);
-    await migrateSchema(pool, "tenant");
-  })().catch((err) => {
+    const result = await migrateSchema(pool, "tenant");
+    await recordSchemaStatus(schemaName, { version: result.version });
+  })().catch(async (err) => {
     // Do not cache a failure forever: it used to leave this tenant answering
     // 500 until the process restarted. Forget the entry so a later request
     // retries (after the backoff window above), and release this attempt's
@@ -316,6 +343,7 @@ function getTenantPool(schemaName) {
       // One line per ATTEMPT, not per request: requests inside the window
       // are answered from the remembered error and do not log again.
       require("./logger").error("Tenant schema initialization failed", { schema: schemaName, error: err.message });
+      await recordSchemaStatus(schemaName, { error: err.message });
     }
     pool.end().catch(() => {});
     throw wrapped;
@@ -504,6 +532,7 @@ module.exports = {
   controlPlaneSchema,
   initControlPlane,
   getTenantDb,
+  recordSchemaStatus,
   createTenant,
   createTenantApiKey,
   resolveTenantApiKey,

@@ -39,6 +39,16 @@ All notable changes to this project, newest first.
   tenant never delays another. Each attempt logs one error line; requests in the window do not.
 
 ### Added
+- **`npm run migrate-tenants`** (H1b). Migrates the control plane and then every tenant up front, one tenant
+  at a time (connections stay at one tenant's pool plus the control plane), instead of waiting for each
+  tenant's first request after a deploy. A failure on a tenant is printed with its id, schema and reason,
+  recorded, and does not stop the others; exit code 1 if any failed (2 for usage errors). Re-running only does
+  what is still behind. `--dry-run` shows what is pending and applies and records nothing, `--tenant <id>`,
+  `--json`. Deleted tenants are skipped; a tenant whose schema is missing is reported as failed and is never
+  recreated empty. Control-plane migration 2 adds `tenants.schema_version`, `schema_migration_error` and
+  `schema_migration_error_at` (additive, nullable); the lazy first-open path keeps them current too, as a
+  best-effort write that can never fail or delay a request. Rollback: revert; the columns are unused by older
+  builds. Not verified at hundreds of tenants.
 - **`FINOPS_TRUST_PROXY`** (RFC 0001, phase A2). Opt-in setting passed to Express `trust proxy`: a hop count
   (1-32) or a comma-separated list of proxy IPs/CIDRs. Behind a load balancer every client used to share the
   balancer's address, so the login (10 per 15 min) and forgot-password (5 per 15 min) limits, the only users of

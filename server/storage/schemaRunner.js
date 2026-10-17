@@ -29,4 +29,11 @@ function migrateSchema(pool, kind, opts = {}) {
   });
 }
 
-module.exports = { migrateSchema };
+// The registered list for a kind, for tooling that plans without applying.
+function migrationsFor(kind) {
+  const entry = KINDS[kind];
+  if (!entry) throw new Error(`Unknown schema kind '${kind}' (expected 'tenant' or 'controlPlane')`);
+  return entry.list();
+}
+
+module.exports = { migrateSchema, migrationsFor };

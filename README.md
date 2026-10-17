@@ -177,7 +177,7 @@ Less common tuning variables:
 
 **Backups.** SQLite: a verified snapshot at startup and every 6 hours. Postgres: `pg_dump` snapshots in single-tenant mode, verified by restoring into a throwaway database. Commands: `npm run backup`, `npm run backup:verify`, `npm run restore`. In multi-tenant mode backups are manual, because a restore replaces every tenant at once. Procedure and measured recovery times: [docs/backup-restore-runbook.md](docs/backup-restore-runbook.md) and [docs/reliability.md](docs/reliability.md).
 
-**Migrations.** Schema changes are numbered, checksummed migrations applied at startup. SQLite takes a verified snapshot first. **On Postgres, take your own `pg_dump` before upgrading.** The multi-tenant control-plane and per-tenant schemas are versioned the same way, when each is first opened ([how](server/storage/migrations/README.md)).
+**Migrations.** Schema changes are numbered, checksummed migrations applied at startup. SQLite takes a verified snapshot first. **On Postgres, take your own `pg_dump` before upgrading.** The multi-tenant control-plane and per-tenant schemas are versioned the same way, when each is first opened, and `npm run migrate-tenants` migrates every tenant up front and tells you which failed ([how](server/storage/migrations/README.md)).
 
 **Metering spool.** If recording a usage event fails after a successful provider call, the event is written to the spool file and an alert is raised. Recover it with `npm run replay-spool`.
 

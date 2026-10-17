@@ -15,7 +15,8 @@
     "backup:verify": "node scripts/verify-backup.js",
     "restore": "node scripts/restore.js",
     "loadtest": "node scripts/loadtest.js",
-    "replay-spool": "node scripts/replay-spool.js"
+    "replay-spool": "node scripts/replay-spool.js",
+    "migrate-tenants": "node scripts/migrate-tenants.js"
   },
   "dependencies": {
     "chart.js": "^4.4.4",
