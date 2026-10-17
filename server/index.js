@@ -54,6 +54,14 @@ const { checkCommitmentAlerts } = require("./commitments");
 const { checkWeeklyBriefing } = require("./weeklyBriefing");
 
 const app = express();
+
+// Drain support (see shutdown.js): once SIGTERM arrives, every response says
+// "Connection: close" so keep-alive clients reconnect elsewhere.
+const shutdown = require("./shutdown");
+app.use((req, res, next) => {
+  if (shutdown.isShuttingDown()) res.set("Connection", "close");
+  next();
+});
 const PORT = process.env.PORT || 4000;
 
 // Bind to localhost only by default. Without an explicit host, Node's
@@ -166,7 +174,7 @@ app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISO
 async function start() {
   await storage.ready;
 
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     logger.info(`FinOps platform running at http://${HOST}:${PORT}`);
     console.log(`Dashboard:    http://${HOST}:${PORT}`);
     if (HOST === "0.0.0.0") {
@@ -178,6 +186,29 @@ async function start() {
       );
     }
   });
+  installShutdown(server);
+}
+
+// Graceful shutdown: stop accepting, let in-flight requests finish and be
+// metered, close the database, then exit. See shutdown.js and RFC 0001.
+function installShutdown(server) {
+  const graceMs = shutdown.parseGraceMs(process.env.FINOPS_SHUTDOWN_GRACE_MS);
+  const handle = shutdown.createShutdown({
+    server,
+    graceMs,
+    log: logger,
+    closers: [
+      async () => {
+        if (tenancy.MULTI_TENANT) await tenancy.closeAll();
+      },
+      async () => {
+        if (storage.dialect === "postgres") await storage.pool.end();
+        else storage.raw.close();
+      },
+    ],
+    exit: (code) => process.exit(code),
+  });
+  for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => handle.begin(sig));
 }
 
 start().catch((err) => {
@@ -194,6 +225,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 setInterval(() => {
+  if (shutdown.isShuttingDown()) return; // draining: do not start new work
   if (tenancy.MULTI_TENANT) {
     // Runs the same four checks once PER TENANT instead of once against a
     // single global database - see tenantJobs.js's header comment for why

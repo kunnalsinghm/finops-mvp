@@ -15,6 +15,10 @@
 services:
   app:
     build: .
+    # SIGTERM starts a graceful drain (FINOPS_SHUTDOWN_GRACE_MS, default 25s,
+    # see server/shutdown.js). Docker's default 10s stop timeout would SIGKILL
+    # it mid-drain, so give it a little longer than the drain window.
+    stop_grace_period: 30s
     ports:
       - "4000:4000"
     environment:

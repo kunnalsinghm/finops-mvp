@@ -27,6 +27,7 @@ const express = require("express");
 const storage = require("../storage");
 const tenancy = require("../tenancy");
 const { checkDbHealth } = require("../dbHealth");
+const shutdown = require("../shutdown");
 
 const router = express.Router();
 
@@ -85,6 +86,13 @@ router.get("/ready", async (req, res) => {
     // this is here so it shows up BEFORE it becomes a user-visible
     // timeout, not to make a transient queue look like an outage.
     checks.dbPool = { total, idle, waiting, exhausted: total > 0 && idle === 0 && waiting > 0 };
+  }
+
+  // Draining after SIGTERM: report not-ready so a load balancer stops sending
+  // traffic here (liveness, /health, stays 200 - the process is still up).
+  if (shutdown.isShuttingDown()) {
+    checks.shutdown = { ok: false, reason: "shutting down" };
+    return res.status(503).json({ ok: false, time: new Date().toISOString(), checks });
   }
 
   res.status(dbResult.ok ? 200 : 503).json({ ok: dbResult.ok, time: new Date().toISOString(), checks });
