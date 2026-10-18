@@ -17,8 +17,22 @@ const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const express = require("express");
 
+// loginRateLimit loads the storage layer, which opens SQLite at FINOPS_DB_PATH.
+// Left alone that is the repo's own data/finops.db (the one `npm start` uses), which
+// this test would then open and migrate. Point this process at a scratch database
+// (test/testDbHygiene.test.js enforces that). The servers spawned further down get
+// their own scratch directory through serverEnv().
+const SCRATCH_DB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "finops-trustproxy-db-"));
+process.env.FINOPS_DB_PATH = path.join(SCRATCH_DB_DIR, "t.db");
+process.env.FINOPS_BACKUP_DIR = path.join(SCRATCH_DB_DIR, "backups");
+
 const { parseTrustProxy, applyTrustProxy } = require("../server/trustProxy");
 const { createRateLimit } = require("../server/loginRateLimit");
+
+test.after(() => {
+  try { require("../server/db").close(); } catch { /* never opened, or already closed */ }
+  fs.rmSync(SCRATCH_DB_DIR, { recursive: true, force: true });
+});
 
 const ROOT = path.join(__dirname, "..");
 
