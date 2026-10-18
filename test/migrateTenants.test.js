@@ -39,7 +39,9 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
   const CLI_CWD = fs.mkdtempSync(path.join(os.tmpdir(), "finops-migtenants-"));
   const tenantReal = [...tenantList];
   const cpReal = [...cpList];
-  const tBase = tenantReal.length ? tenantReal[tenantReal.length - 1].version : 1;
+  const T0 = [1, ...tenantReal.map((m) => m.version)]; // a tenant with only the real migrations applied
+  const tTop = T0[T0.length - 1];
+  const tBase = tTop;
   const cpBase = cpReal.length ? cpReal[cpReal.length - 1].version : 1;
   const fx = (version, name, up) => ({ version, name, up: { postgres: up } });
 
@@ -96,13 +98,13 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
 
   test("the lazy path keeps the record current: version on success, error on failure, cleared on recovery", async () => {
     const [t] = await makeTenants(1);
-    assert.equal((await cpTenant(t.id)).schema_version, 1, "a new tenant records its baseline version");
+    assert.equal((await cpTenant(t.id)).schema_version, tTop, "a new tenant records the version it was created at");
 
     let broken = true;
     tenantList.push(fx(tBase + 1, "lazyrecord", async () => { if (broken) throw new Error("lazy boom"); }));
     await assert.rejects(() => tenancy.getTenantDb(t.schema_name), /lazy boom/);
     let row = await cpTenant(t.id);
-    assert.equal(row.schema_version, 1, "last good version is kept");
+    assert.equal(row.schema_version, tTop, "last good version is kept");
     assert.match(row.schema_migration_error, /lazy boom/);
     assert.ok(row.schema_migration_error_at);
 
@@ -122,10 +124,10 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
     const r = byId(report);
     for (const t of ts) {
       assert.equal(r[t.id].outcome, "migrated");
-      assert.equal(r[t.id].from, 1);
+      assert.equal(r[t.id].from, tTop);
       assert.equal(r[t.id].to, tBase + 1);
       assert.deepEqual(r[t.id].applied, [tBase + 1]);
-      assert.deepEqual(await versionsOf(t.schema_name), [1, tBase + 1]);
+      assert.deepEqual(await versionsOf(t.schema_name), [...T0, tBase + 1]);
       const row = await cpTenant(t.id);
       assert.equal(row.schema_version, tBase + 1);
       assert.equal(row.schema_migration_error, null);
@@ -158,13 +160,13 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
     assert.match(r[victim.id].error, /tenant 3 is broken/);
     for (const t of ts.filter((x) => x.id !== victim.id)) {
       assert.equal(r[t.id].outcome, "migrated", "tenants after the failure are still migrated");
-      assert.deepEqual(await versionsOf(t.schema_name), [1, tBase + 1]);
+      assert.deepEqual(await versionsOf(t.schema_name), [...T0, tBase + 1]);
     }
     const bad = await cpTenant(victim.id);
-    assert.equal(bad.schema_version, 1, "last good version kept");
+    assert.equal(bad.schema_version, tTop, "last good version kept");
     assert.match(bad.schema_migration_error, /tenant 3 is broken/);
     assert.ok(bad.schema_migration_error_at);
-    assert.deepEqual(await versionsOf(victim.schema_name), [1], "failed migration rolled back");
+    assert.deepEqual(await versionsOf(victim.schema_name), T0, "failed migration rolled back");
     assert.equal(tenancy._tenantPools.size, 0);
 
     failFor = null; // fixed and redeployed; the 60s retry window must not get in the way
@@ -204,8 +206,8 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
       const r = byId(report)[t.id];
       assert.equal(r.outcome, "pending");
       assert.deepEqual(r.pending, [tBase + 1]);
-      assert.deepEqual(await versionsOf(t.schema_name), [1], "nothing applied");
-      assert.equal((await cpTenant(t.id)).schema_version, 1, "nothing recorded");
+      assert.deepEqual(await versionsOf(t.schema_name), T0, "nothing applied");
+      assert.equal((await cpTenant(t.id)).schema_version, tTop, "nothing recorded");
     }
     const cpVersions = (await q(`SELECT version FROM ${CP_SCHEMA}.schema_migrations ORDER BY version`)).map((x) => x.version);
     assert.ok(!cpVersions.includes(cpBase + 1), "the control plane was not migrated either");
@@ -241,7 +243,7 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
     tenantList.push(fx(tBase + 1, "fleet_skip", async () => {}));
     const report = await migrateAllTenants();
     assert.deepEqual(report.results.map((r) => r.tenant_id), [b.id]);
-    assert.deepEqual(await versionsOf(a.schema_name), [1], "the deleted tenant's schema is untouched");
+    assert.deepEqual(await versionsOf(a.schema_name), T0, "the deleted tenant's schema is untouched");
   });
 
   test("tenantId limits the run to one tenant; an unknown id is an error", async () => {
@@ -249,7 +251,7 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
     tenantList.push(fx(tBase + 1, "fleet_one", async () => {}));
     const report = await migrateAllTenants({ tenantId: b.id });
     assert.deepEqual(report.results.map((r) => r.tenant_id), [b.id]);
-    assert.deepEqual(await versionsOf(a.schema_name), [1]);
+    assert.deepEqual(await versionsOf(a.schema_name), T0);
     await assert.rejects(() => migrateAllTenants({ tenantId: 987654 }), /No tenant with id 987654/);
   });
 
@@ -258,7 +260,7 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
     cpList.push(fx(cpBase + 1, "cp_fail", async () => { throw new Error("cp is broken"); }));
     tenantList.push(fx(tBase + 1, "fleet_never", async () => {}));
     await assert.rejects(() => migrateAllTenants(), /Control-plane schema initialization failed.*cp is broken/s);
-    assert.deepEqual(await versionsOf(t.schema_name), [1]);
+    assert.deepEqual(await versionsOf(t.schema_name), T0);
   });
 
   // ---- the command ----------------------------------------------------------

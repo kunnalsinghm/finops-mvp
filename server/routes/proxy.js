@@ -15,7 +15,7 @@ const express = require("express");
 const defaultDb = require("../storage");
 const { currentMonthBounds } = require("../storage/dialectSql");
 const { computeCost, getRate } = require("../pricing");
-const { insertUsageEvent } = require("../usageStore");
+const { insertUsageEvent, newEventId } = require("../usageStore");
 const { resolveIdentity, realKeyId } = require("../keyIdentity");
 const { spoolEvent } = require("../meteringSpool");
 const logger = require("../logger");
@@ -123,6 +123,9 @@ async function noteUnpricedModel(provider, model, db = defaultDb, tenantKey = nu
 function buildUsageRow({ providerName, effectiveModel, team, environment, gitBranch, featureId, customerId, projectId, costCenter, clientRegion, agentId, sessionId, taskId, taskStatus, workloadType, rateLimitKey, input_tokens, output_tokens, degraded, requestedModel, piiFindings, streamed, partial }, costInfo) {
   const { cost_usd, rate_found, approximate, costComputeFailed } = costInfo;
   return {
+    // The idempotency key: minted once, here, when the event is first built, and
+    // carried unchanged into the spool if the write fails (see usageStore.js).
+    event_id: newEventId(),
     event_time: new Date().toISOString(),
     provider: providerName,
     model: effectiveModel,
@@ -212,7 +215,7 @@ async function logUsageEvent(params) {
     throw err;
   }
 
-  if (!team) {
+  if (!team && insertedId !== null && insertedId !== undefined) {
     try {
       await inferTag({ key_id: rateLimitKey, usage_event_id: insertedId, db });
     } catch (err) {
@@ -715,6 +718,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       const { input_tokens, output_tokens } = endpoint.extractUsage(cachedResponse);
       const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens, db: req.db });
       await insertUsageEvent({
+        event_id: newEventId(),
         event_time: new Date().toISOString(),
         provider: providerName,
         model: effectiveModel,
@@ -745,6 +749,7 @@ router.post("/:provider", requireAuth("write"), async (req, res) => {
       const { input_tokens, output_tokens } = endpoint.extractUsage(match.value);
       const { cost_usd: wouldHaveCost } = await computeCost({ provider: providerName, model: effectiveModel, input_tokens, output_tokens, db: req.db });
       await insertUsageEvent({
+        event_id: newEventId(),
         event_time: new Date().toISOString(),
         provider: providerName,
         model: effectiveModel,

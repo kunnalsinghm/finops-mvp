@@ -206,44 +206,17 @@ function wrapPool(pool) {
   return { get, all, run, exec, transaction, pool };
 }
 
-// `CREATE SCHEMA IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` are NOT safe
-// against a concurrent identical statement from another session: Postgres can
-// raise "duplicate key value violates unique constraint
-// pg_type_typname_nsp_index" (or pg_namespace_nspname_index / "already
-// exists"). For the control plane that is two replicas booting together; for a
-// tenant it is two replicas both serving the first request for a brand-new
-// tenant. Same bug class, same fix as storage/postgres.js's
-// createBaselineSchema().
-//
-// Session-level advisory lock on a DEDICATED connection, released in `finally`
-// (and released by Postgres itself if the connection dies, so a crashed booter
-// can never wedge the others). The key is derived from the schema NAME, not
-// current_schema(), because current_schema() is NULL until the schema exists -
-// exactly the moment this lock matters. The "finops_tenancy_schema:" prefix
-// keeps it distinct from the baseline lock and the migrator's lock.
-async function createSchemaLocked(pool, schemaName, schemaSql) {
-  const lockKey = `finops_tenancy_schema:${schemaName}`;
-  const client = await pool.connect();
-  let broken = false;
-  try {
-    await client.query("SELECT pg_advisory_lock(hashtext($1))", [lockKey]);
-    try {
-      await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-      await client.query(schemaSql);
-    } finally {
-      try {
-        await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]);
-      } catch {
-        // Could not unlock cleanly: destroy this connection rather than hand
-        // a lock-holding client back to the pool. Postgres drops the lock
-        // when the session ends.
-        broken = true;
-      }
-    }
-  } finally {
-    client.release(broken ? true : undefined);
-  }
-}
+// Creating a schema and its tables is NOT safe against a concurrent identical
+// statement from another session (Postgres can raise "duplicate key value
+// violates unique constraint pg_type_typname_nsp_index" or "already exists"):
+// for the control plane that is two replicas booting together, for a tenant two
+// replicas both serving the first request for a brand-new tenant. The fix is
+// that creation happens INSIDE the migrator's per-schema lock (runPostgres with
+// `schema` + `baseline`, see storage/schemaRunner.js baselineFor): one lock for
+// the baseline and the migrations, waited on by polling, and the baseline script
+// runs only for a schema that has no schema_migrations table yet. (It used to
+// be re-run on every first open behind a separate blocking lock; its ALTER TABLE
+// statements then deadlocked with a running CREATE INDEX CONCURRENTLY.)
 
 // ---- Control plane: one schema, shared by every tenant, holds ONLY
 // tenants/api_keys/users (see schema.controlPlane.js for why). ----
@@ -279,13 +252,12 @@ function initControlPlane() {
   });
   controlPlaneDb = wrapPool(controlPlanePool);
   const { CONTROL_PLANE_SCHEMA_SQL } = require("./storage/schema.controlPlane");
-  const { migrateSchema } = require("./storage/schemaRunner");
+  const { migrateSchema, baselineFor } = require("./storage/schemaRunner");
   const pool = controlPlanePool;
   const ready = (async () => {
-    // Baseline (frozen), then every numbered control-plane migration the
-    // schema has not recorded yet. See storage/schemaRunner.js.
-    await createSchemaLocked(pool, controlPlaneSchema, CONTROL_PLANE_SCHEMA_SQL);
-    await migrateSchema(pool, "controlPlane");
+    // Baseline (frozen, only if the schema is not versioned yet), then every
+    // numbered control-plane migration it has not recorded. One lock, see above.
+    await migrateSchema(pool, "controlPlane", { schema: controlPlaneSchema, baseline: baselineFor(controlPlaneSchema, CONTROL_PLANE_SCHEMA_SQL) });
   })().catch((err) => {
     // Do not cache a failure forever: forget this attempt so a later call
     // retries (see the backoff note above), and release its connections.
@@ -323,12 +295,12 @@ function getTenantPool(schemaName) {
   });
   const db = wrapPool(pool);
   const { TENANT_SCHEMA_SQL } = require("./storage/schema.tenant");
-  const { migrateSchema } = require("./storage/schemaRunner");
+  const { migrateSchema, baselineFor } = require("./storage/schemaRunner");
   const ready = (async () => {
-    // Baseline (frozen), then every numbered tenant migration this schema has
-    // not recorded yet. A schema created before versioning is adopted here.
-    await createSchemaLocked(pool, schemaName, TENANT_SCHEMA_SQL);
-    const result = await migrateSchema(pool, "tenant");
+    // Baseline (frozen, only if the schema is not versioned yet), then every
+    // numbered tenant migration it has not recorded. A schema created before
+    // versioning is adopted here. One lock, see above.
+    const result = await migrateSchema(pool, "tenant", { schema: schemaName, baseline: baselineFor(schemaName, TENANT_SCHEMA_SQL) });
     await recordSchemaStatus(schemaName, { version: result.version });
   })().catch(async (err) => {
     // Do not cache a failure forever: it used to leave this tenant answering
@@ -339,11 +311,18 @@ function getTenantPool(schemaName) {
     if (tenantPools.get(schemaName)?.ready === ready) {
       tenantPools.delete(schemaName);
       const ms = initRetryMs();
-      if (ms > 0) initFailures.set(schemaName, { error: wrapped, until: Date.now() + ms });
+      // Remember the failure at once (so a request arriving while it is still
+      // being recorded is answered from it and does not start another attempt),
+      // but only start the window's clock when it is fully handled: recording on
+      // the control plane can take a while the first time, and that time must
+      // not be spent out of the window.
+      const failure = ms > 0 ? { error: wrapped, until: Number.MAX_SAFE_INTEGER } : null;
+      if (failure) initFailures.set(schemaName, failure);
       // One line per ATTEMPT, not per request: requests inside the window
       // are answered from the remembered error and do not log again.
       require("./logger").error("Tenant schema initialization failed", { schema: schemaName, error: err.message });
       await recordSchemaStatus(schemaName, { error: err.message });
+      if (failure) failure.until = Date.now() + ms;
     }
     pool.end().catch(() => {});
     throw wrapped;

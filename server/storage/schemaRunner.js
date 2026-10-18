@@ -36,4 +36,17 @@ function migrationsFor(kind) {
   return entry.list();
 }
 
-module.exports = { migrateSchema, migrationsFor };
+// The baseline hook for runPostgres: create the schema, then run its frozen
+// version-1 script. runPostgres calls it only for a schema with no
+// schema_migrations table yet, under the same lock as the migrations. The name is
+// interpolated into DDL, so it is checked here as well as by the callers.
+const SAFE_SCHEMA = /^[a-z_][a-z0-9_]{0,62}$/;
+function baselineFor(schema, sql) {
+  if (!SAFE_SCHEMA.test(schema)) throw new Error(`Refusing unsafe schema name ${JSON.stringify(schema)}`);
+  return async (client) => {
+    await client.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+    await client.query(sql);
+  };
+}
+
+module.exports = { migrateSchema, migrationsFor, baselineFor };

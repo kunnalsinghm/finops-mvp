@@ -10,4 +10,6 @@
 // Each migration only needs `up.postgres`; there is no SQLite tenant schema.
 // A change that also affects single-tenant needs a migration in ../index.js
 // too; test/tenantMigrations.test.js (PARITY) fails if the two diverge.
-module.exports = [];
+module.exports = [
+  require("./0002_usage_event_id"),
+];

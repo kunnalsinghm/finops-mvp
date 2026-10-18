@@ -69,6 +69,9 @@ function validateMigrations(list, { dialects = ALL_DIALECTS } = {}) {
     if (typeof m.name !== "string" || !/^[a-z0-9_]+$/.test(m.name)) {
       throw new MigrationError(`Migration ${m.version} has an invalid name '${m.name}' (lowercase letters, digits, underscores)`);
     }
+    if (m.transaction !== undefined && typeof m.transaction !== "boolean") {
+      throw new MigrationError(`Migration ${m.version} (${m.name}): transaction must be true or false when present`);
+    }
     if (!dialects.every((d) => typeof m.up?.[d] === "function")) {
       throw new MigrationError(
         dialects.length === ALL_DIALECTS.length
@@ -278,6 +281,40 @@ function postgresCtx(client) {
   };
 }
 
+// Takes the per-schema migration lock by POLLING pg_try_advisory_lock instead of
+// blocking in pg_advisory_lock. A blocked statement is an open transaction, and
+// CREATE INDEX CONCURRENTLY (used by `transaction: false` migrations) waits for
+// every open transaction to finish: the instance holding the lock would wait for
+// the instance waiting for the lock, and Postgres resolves that deadlock by
+// killing one of them. Polling keeps a waiter between short statements, never
+// inside a transaction. It waits as long as the blocking call did (a long build
+// holds the lock for its whole duration); it just says so after a while.
+//
+// The key is derived from the schema NAME when one is given (the schema may not
+// exist yet, and current_schema() is NULL until it does - exactly when the lock
+// matters), else from current_schema(). Both spell the same string for an
+// existing schema, so instances of different builds still exclude each other.
+function lockSql(fn, schema) {
+  return schema
+    ? { sql: `SELECT ${fn}(hashtext($1)) AS got`, params: [`finops_migrations:${schema}`] }
+    : { sql: `SELECT ${fn}(hashtext('finops_migrations:' || current_schema())) AS got`, params: [] };
+}
+
+async function acquireMigrationLock(client, log, schema) {
+  const started = Date.now();
+  let told = false;
+  for (;;) {
+    const q = lockSql("pg_try_advisory_lock", schema);
+    const r = await client.query(q.sql, q.params);
+    if (r.rows[0].got) return;
+    if (!told && Date.now() - started > 10000) {
+      told = true;
+      log.warn("Waiting for another instance to finish migrating this schema", { waitedMs: Date.now() - started });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function runPostgres(pool, opts = {}) {
   const {
     migrations = loadDefaultMigrations(),
@@ -285,17 +322,31 @@ async function runPostgres(pool, opts = {}) {
     log = { info() {}, warn() {} },
     now = () => new Date(),
     dialects = ALL_DIALECTS, // ["postgres"] for the multi-tenant schemas (see schemaRunner.js)
+    // `schema` + `baseline` fold schema creation into the same lock as the
+    // migrations. `baseline(client)` creates the frozen version-1 tables and runs
+    // ONLY for a schema with no schema_migrations table yet (a brand-new one, or
+    // one created before versioning, which is thereby adopted); an already
+    // versioned schema never has it re-run. Re-running it on every boot used to
+    // issue ALTER TABLE / CREATE INDEX statements that queue behind, and
+    // deadlock with, a running CREATE INDEX CONCURRENTLY.
+    schema = null,
+    baseline = null,
   } = opts;
   validateMigrations(migrations, { dialects });
 
   const client = await pool.connect();
-  const lockSql = "SELECT pg_advisory_lock(hashtext('finops_migrations:' || current_schema()))";
-  const unlockSql = "SELECT pg_advisory_unlock(hashtext('finops_migrations:' || current_schema()))";
   try {
     // Held for the whole run, per schema: two instances booting together
     // serialize here, and the second finds nothing pending.
-    await client.query(lockSql);
+    await acquireMigrationLock(client, log, schema);
     try {
+      if (baseline) {
+        // Qualified when the schema is named, so a same-named table in another
+        // schema on the search_path (e.g. public) cannot make this look versioned.
+        const target = schema ? `${schema}.${MIGRATIONS_TABLE}` : MIGRATIONS_TABLE;
+        const versioned = (await client.query("SELECT to_regclass($1) AS t", [target])).rows[0].t;
+        if (!versioned) await baseline(client);
+      }
       await client.query(
         `CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
            version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`
@@ -314,23 +365,38 @@ async function runPostgres(pool, opts = {}) {
       const ctx = postgresCtx(client);
       const applied = [];
       for (const m of pending) {
-        await client.query("BEGIN");
+        // `transaction: false` is for statements Postgres refuses inside a
+        // transaction (CREATE INDEX CONCURRENTLY). Such a migration is NOT
+        // atomic: a failure can leave partial work, and it is recorded only
+        // after it succeeds, so it must be written to be re-run. The advisory
+        // lock is still held, so no other instance runs it meanwhile.
+        const transactional = m.transaction !== false;
+        if (transactional) await client.query("BEGIN");
         try {
           await m.up.postgres(ctx);
           await client.query(`INSERT INTO ${MIGRATIONS_TABLE} (version, name, checksum, applied_at) VALUES ($1, $2, $3, $4)`, [
             m.version, m.name, checksum(m, dialects), now().toISOString(),
           ]);
-          await client.query("COMMIT");
+          if (transactional) await client.query("COMMIT");
         } catch (err) {
-          try { await client.query("ROLLBACK"); } catch { /* connection may already be gone */ }
-          throw new MigrationError(`Migration ${m.version} (${m.name}) failed and was rolled back: ${err.message}`, { version: m.version, cause: err });
+          if (transactional) {
+            try { await client.query("ROLLBACK"); } catch { /* connection may already be gone */ }
+            throw new MigrationError(`Migration ${m.version} (${m.name}) failed and was rolled back: ${err.message}`, { version: m.version, cause: err });
+          }
+          throw new MigrationError(
+            `Migration ${m.version} (${m.name}) failed (it is not transactional, so it may have left partial work; it is written to be re-run, and was not recorded): ${err.message}`,
+            { version: m.version, cause: err }
+          );
         }
         applied.push({ version: m.version, name: m.name });
         log.info("Applied migration", { version: m.version, name: m.name });
       }
       return { applied, version: pending[pending.length - 1].version };
     } finally {
-      try { await client.query(unlockSql); } catch { /* released with the session anyway */ }
+      try {
+        const q = lockSql("pg_advisory_unlock", schema);
+        await client.query(q.sql, q.params);
+      } catch { /* released with the session anyway */ }
     }
   } finally {
     client.release();

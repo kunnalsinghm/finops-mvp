@@ -16,6 +16,18 @@ All notable changes to this project, newest first.
 ## [Unreleased]
 
 ### Changed
+- **One per-schema lock for the baseline and the migrations, polled instead of blocked on.** Creating a
+  schema and its tables used to run under a separate blocking advisory lock, and the whole baseline script was
+  re-run by every process that booted or first opened a tenant. Now `runPostgres` takes `schema` and
+  `baseline` options: it takes one lock keyed by the schema name, waits for it by polling
+  `pg_try_advisory_lock` (a waiter is never inside a statement), and runs the baseline script only for a
+  schema that has no `schema_migrations` table yet (a new one, or one from before versioning, which is thereby
+  adopted). An already versioned schema no longer has its baseline re-run on boot. Preparation for migrations
+  that build indexes `CONCURRENTLY`, which wait for every other open statement and would otherwise deadlock
+  with a process queued behind the lock or re-running `ALTER TABLE ... IF NOT EXISTS` (reproduced with a test
+  migration: 8 processes started together, most failed with `deadlock detected`). The lock key is spelled the
+  same as before for an existing schema, so builds of both kinds still exclude each other. Removed:
+  `createBaselineSchema()` (single-tenant) and `createSchemaLocked()` (tenancy). Rollback: revert.
 - **Multi-tenant schemas are versioned** (H1a). The control-plane schema and every tenant schema now go
   through the same migrator as single-tenant mode: numbered, checksummed, ordered and advisory-locked per
   schema, applied when the schema is first opened. `schema.tenant.js` and `schema.controlPlane.js` are now the
@@ -29,6 +41,11 @@ All notable changes to this project, newest first.
   `schema_migrations` table per schema, which older builds ignore.
 
 ### Fixed
+- **The init-retry window now starts after a failure has been recorded, not when it happened.** Recording a
+  failed tenant init on the control plane can take a while the first time (a cold control plane initializes
+  and migrates); with the window measured from the failure, that time could use it up and the very next
+  request re-ran the migration. The failure is remembered immediately (so nothing starts a second attempt
+  meanwhile) and the clock starts when it has been fully handled.
 - **A failed tenant (or control-plane) schema init is no longer cached.** The rejected promise stayed in the
   pool map, so one failure left that tenant answering 500 until the process restarted. The entry is now dropped
   and its connections released, so a later request retries. The retry is rate-limited: a failure is
@@ -39,6 +56,26 @@ All notable changes to this project, newest first.
   tenant never delays another. Each attempt logs one error line; requests in the window do not.
 
 ### Added
+- **Idempotent usage events** (S2, RFC 0001 phase A3). `usage_events` gains a nullable `event_id` (a UUID
+  minted once, where the event is first built, and carried through the spool) with a unique index, and the
+  insert ignores a second event with the same id. Before, the same event could be stored twice, so a call was
+  billed twice: a spool replay run twice, a replay after a crash between the insert and the spool rewrite, or an
+  insert that committed but whose acknowledgement was lost (so the proxy spooled an event that was already
+  stored). `npm run replay-spool` now reports `N already in the database` and is safe to re-run. Covers the proxy
+  (non-streaming, streaming, exact-cache hit, semantic-cache hit) and `POST /api/ingest`. Rows and spool lines
+  from before this change keep `event_id` NULL and behave as they did (no dedupe). Single-tenant migration 14
+  and tenant migration 2; both add the column with no default (no table rewrite) and build the unique index
+  `CONCURRENTLY` (using the previous change's `transaction: false`), so a large `usage_events` keeps metering
+  during the upgrade. The spool rewrite is now atomic (temp file + rename), so a crash mid-rewrite no longer
+  loses the lines that were being kept. `replaySpool()` now also returns `duplicates`. Upgrade note: while
+  migration 14 is building the index (seconds to minutes on a large table), do not restart an instance running
+  an OLDER build against that database; it still runs its baseline on boot and can block behind the build or
+  deadlock with it. Rollback: the column is additive and nullable, an older build keeps working and leaves it
+  NULL; to remove it, drop the index and the column.
+- **Migrations may declare `transaction: false`** (Postgres only; SQLite ignores it). For statements Postgres
+  refuses inside a transaction, chiefly `CREATE INDEX CONCURRENTLY`, which adds an index to a large table
+  without blocking writes. Such a migration is not atomic: it is recorded only after it succeeds and must be
+  written to be re-run (the rules are in `server/storage/migrations/README.md`). No existing migration uses it.
 - **`npm run migrate-tenants`** (H1b). Migrates the control plane and then every tenant up front, one tenant
   at a time (connections stay at one tenant's pool plus the control plane), instead of waiting for each
   tenant's first request after a deploy. A failure on a tenant is printed with its id, schema and reason,

@@ -43,6 +43,11 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
 
   // The real control-plane list is no longer empty (migration 2, H1b): fixtures
   // build on top of it and the real entries are restored after each test.
+  // Same for the tenant list (tenant migration 2, S2): fixtures build on top of
+  // the real entries, and the real entries are restored after each test.
+  const tenantReal = [...tenantList];
+  const tenantRealVersions = [1, ...tenantReal.map((m) => m.version)];
+  const nextT = tenantRealVersions[tenantRealVersions.length - 1] + 1;
   const cpReal = [...cpList];
   const cpRealVersions = [1, ...cpReal.map((m) => m.version)];
   const cpBase = cpRealVersions[cpRealVersions.length - 1];
@@ -71,7 +76,7 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
   }
 
   test.afterEach(() => {
-    tenantList.length = 0;
+    tenantList.splice(0, tenantList.length, ...tenantReal);
     cpList.splice(0, cpList.length, ...cpReal);
   });
 
@@ -84,10 +89,10 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
 
   test("fresh tenant: baseline row, then each registered migration exactly once", async () => {
     const schema = name("fresh");
-    tenantList.push(marker(2));
+    tenantList.push(marker(nextT));
     await tenancy.getTenantDb(schema);
     await withAdmin(async (admin) => {
-      assert.deepEqual((await versionsOf(admin, schema)).map((r) => r.version), [1, 2]);
+      assert.deepEqual((await versionsOf(admin, schema)).map((r) => r.version), [...tenantRealVersions, nextT]);
       assert.equal(await count(admin, schema, "h1a_marker"), 1);
     });
   });
@@ -101,12 +106,12 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
       );
       assert.equal((await admin.query("SELECT to_regclass($1) AS t", [`${schema}.schema_migrations`])).rows[0].t, null, "precondition: no version table");
     });
-    tenantList.push(marker(2));
+    tenantList.push(marker(nextT));
     await tenancy.getTenantDb(schema);
     let first;
     await withAdmin(async (admin) => {
       first = await versionsOf(admin, schema);
-      assert.deepEqual(first.map((r) => r.version), [1, 2]);
+      assert.deepEqual(first.map((r) => r.version), [...tenantRealVersions, nextT]);
       assert.equal(await count(admin, schema, "usage_events"), 1, "existing data must survive adoption");
       assert.equal(await count(admin, schema, "h1a_marker"), 1);
     });
@@ -118,32 +123,32 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
     });
   });
 
-  test("with the real (empty) list an old tenant just gets its baseline row", async () => {
+  test("with only the real migrations, an old tenant gets its baseline row and every real migration", async () => {
     const schema = name("emptylist");
     await withAdmin((admin) => legacyTenant(admin, schema));
     await tenancy.getTenantDb(schema);
     await withAdmin(async (admin) => {
-      assert.deepEqual((await versionsOf(admin, schema)).map((r) => r.version), [1]);
+      assert.deepEqual((await versionsOf(admin, schema)).map((r) => r.version), tenantRealVersions);
     });
   });
 
   test("an edited applied migration is refused for that schema only", async () => {
     const a = name("tamperA");
     const b = name("tamperB");
-    const original = fx(2, "tamper", async (db) => { await db.exec("CREATE TABLE IF NOT EXISTS h1a_t (n INTEGER)"); });
-    const edited = fx(2, "tamper", async (db) => { await db.exec("CREATE TABLE IF NOT EXISTS h1a_t (n INTEGER, extra TEXT)"); });
+    const original = fx(nextT, "tamper", async (db) => { await db.exec("CREATE TABLE IF NOT EXISTS h1a_t (n INTEGER)"); });
+    const edited = fx(nextT, "tamper", async (db) => { await db.exec("CREATE TABLE IF NOT EXISTS h1a_t (n INTEGER, extra TEXT)"); });
 
     tenantList.push(original);
     await tenancy.getTenantDb(a);
     await tenancy.closeTenantPool(a);
 
-    tenantList.length = 0;
+    tenantList.splice(0, tenantList.length, ...tenantReal);
     tenantList.push(edited);
     await assert.rejects(() => tenancy.getTenantDb(a), /Tenant schema initialization failed for .*modified after it was applied/s);
     await tenancy.getTenantDb(b); // a tenant that never applied it is unaffected
-    await withAdmin(async (admin) => assert.deepEqual((await versionsOf(admin, b)).map((r) => r.version), [1, 2]));
+    await withAdmin(async (admin) => assert.deepEqual((await versionsOf(admin, b)).map((r) => r.version), [...tenantRealVersions, nextT]));
 
-    tenantList.length = 0;
+    tenantList.splice(0, tenantList.length, ...tenantReal);
     tenantList.push(original); // revert the edit: A opens again, so the failure was not cached
     await tenancy.getTenantDb(a);
   });
@@ -151,28 +156,28 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
   test("a failing migration rolls back, leaves other tenants alone, is not cached, and the next request retries", async () => {
     const good = name("failgood");
     const bad = name("failbad");
-    tenantList.push(marker(2));
+    tenantList.push(marker(nextT));
     const goodDb = await tenancy.getTenantDb(good);
     await withAdmin((admin) => legacyTenant(admin, bad));
 
-    tenantList.push(fx(3, "boom", async (db) => {
+    tenantList.push(fx(nextT + 1, "boom", async (db) => {
       await db.exec("CREATE TABLE h1a_half (n INTEGER)");
       throw new Error("boom");
     }));
     const attempt = tenancy.getTenantDb(bad);
     const failedEntry = tenancy._tenantPools.get(bad);
-    await assert.rejects(() => attempt, /Tenant schema initialization failed for .*Migration 3 \(boom\) failed and was rolled back/s);
+    await assert.rejects(() => attempt, new RegExp(`Tenant schema initialization failed for .*Migration ${nextT + 1} \\(boom\\) failed and was rolled back`, "s"));
     assert.equal(tenancy._tenantPools.has(bad), false, "a failed init must not stay cached");
     assert.equal(failedEntry.pool.ended, true, "the failed attempt's connections must be released, not leaked");
     await withAdmin(async (admin) => {
-      assert.deepEqual((await versionsOf(admin, bad)).map((r) => r.version), [1, 2], "v2 committed, v3 recorded nowhere");
+      assert.deepEqual((await versionsOf(admin, bad)).map((r) => r.version), [...tenantRealVersions, nextT], "the earlier migration committed, the failing one is recorded nowhere");
       assert.equal((await admin.query("SELECT to_regclass($1) AS t", [`${bad}.h1a_half`])).rows[0].t, null, "partial DDL rolled back");
     });
     assert.equal((await goodDb.get("SELECT count(*)::int AS n FROM h1a_marker")).n, 1, "the healthy tenant keeps working");
 
     tenantList.pop(); // the bug is fixed and deployed
     await tenancy.getTenantDb(bad);
-    await withAdmin(async (admin) => assert.deepEqual((await versionsOf(admin, bad)).map((r) => r.version), [1, 2]));
+    await withAdmin(async (admin) => assert.deepEqual((await versionsOf(admin, bad)).map((r) => r.version), [...tenantRealVersions, nextT]));
   });
 
   test("concurrent runners: each migration runs exactly once per schema", async () => {

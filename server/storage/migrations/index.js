@@ -13,4 +13,5 @@ module.exports = [
   require("./0011_usage_events_user_time_index"),
   require("./0012_usage_events_team_and_model_time_indexes"),
   require("./0013_invites"),
+  require("./0014_usage_event_id"),
 ];
