@@ -92,38 +92,26 @@ const { SCHEMA_SQL } = require("./schema.postgres");
 // raise "duplicate key value violates unique constraint
 // pg_type_typname_nsp_index" (or pg_class_relname_nsp_index /
 // pg_namespace_nspname_index / "relation ... already exists"). That is two
-// replicas booting together against a fresh database - and it crashed startup
-// for all but one of them. The migrator already serializes its own step with an
-// advisory lock; this serializes the baseline step that runs just before it.
+// replicas booting together against a fresh database, and it crashed startup
+// for all but one of them.
 //
-// Session-level lock on a dedicated connection, released in `finally` (and
-// released by Postgres itself if the connection dies, so a crashed booter can
-// never wedge the others). The key is derived from the schema NAME, not
-// current_schema(), because current_schema() is NULL until the schema exists -
-// which is exactly the moment this lock matters. It is a different key from the
-// migrator's, so the two never deadlock: this lock is released before
-// runPostgres() takes its own.
-async function createBaselineSchema() {
-  const lockKey = `finops_schema_baseline:${schemaName || "public"}`;
-  const client = await pool.connect();
-  try {
-    await client.query("SELECT pg_advisory_lock(hashtext($1))", [lockKey]);
-    try {
-      if (schemaName) {
-        await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-      }
-      await client.query(SCHEMA_SQL); // frozen version-1 baseline
-    } finally {
-      await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]);
-    }
-  } finally {
-    client.release();
-  }
-}
-
+// So creation happens INSIDE the migrator's per-schema lock (runPostgres with
+// `baseline`): one lock for the baseline and the migrations, waited on by
+// polling, and the baseline script runs only for a database that has no
+// schema_migrations table yet (a fresh one, or one from before versioning, which
+// is thereby adopted). It used to be re-run on every boot behind a separate
+// blocking lock; its CREATE INDEX IF NOT EXISTS statements then queued behind,
+// and deadlocked with, a running CREATE INDEX CONCURRENTLY (migration 14).
 const ready = (async () => {
-  await createBaselineSchema();
-  await require("./migrator").runPostgres(pool, { log: require("../logger") });
+  await require("./migrator").runPostgres(pool, {
+    log: require("../logger"),
+    // Null = the connection's default schema; the key then comes from current_schema().
+    schema: schemaName || null,
+    baseline: async (client) => {
+      if (schemaName) await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+      await client.query(SCHEMA_SQL); // frozen version-1 baseline
+    },
+  });
 })().catch((err) => {
   throw new Error(`Postgres schema initialization failed: ${err.message}`);
 });

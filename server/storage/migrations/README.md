@@ -25,6 +25,29 @@ Rules that keep customer data safe:
 - Postgres: **take a `pg_dump` or snapshot before you deploy** - there is no
   automatic one.
 
+## Migrations that cannot run in a transaction (`transaction: false`)
+
+Each Postgres migration normally runs in one transaction with its bookkeeping row,
+so it is all-or-nothing. A few statements are refused inside a transaction, the
+main one being `CREATE INDEX CONCURRENTLY`, which is how you add an index to a big
+table without blocking writes. A migration may declare `transaction: false`
+(Postgres only; SQLite always uses its single transaction and ignores the flag).
+
+The trade-off is that it is **not atomic**. Rules for writing one:
+
+- It must be safe to re-run from the start. It is recorded only after it
+  succeeds, so a crash or failure anywhere runs it again on the next start, on top
+  of whatever the first attempt left behind.
+- A failed `CREATE INDEX CONCURRENTLY` leaves an INVALID index with the same name,
+  and `IF NOT EXISTS` then skips it forever. Drop an invalid one first (see
+  `0014_usage_event_id.js`).
+- Keep it to one logical change. The error says it may have left partial work.
+- The per-schema advisory lock is still held, so no other instance runs it at the
+  same time. Waiters poll `pg_try_advisory_lock`; they must never block inside a
+  statement, because `CREATE INDEX CONCURRENTLY` waits for every open statement to
+  finish and would deadlock with a waiter. The same lock covers the baseline
+  script, which runs only for a schema with no `schema_migrations` table yet.
+
 ## Multi-tenant schemas
 
 The multi-tenant control-plane schema and every per-tenant schema are versioned

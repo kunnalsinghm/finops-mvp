@@ -77,6 +77,25 @@ if (process.env.FINOPS_DB_DRIVER !== "postgres") {
     assert.match(messages[0], /Tenant schema initialization failed for .*tenantflaky is broken/s);
   });
 
+  test("tenant: the window starts after the failure is fully recorded, not when it happened", async () => {
+    // Recording the failure on the control plane can take a while the first time
+    // (a cold control plane initializes and migrates). If the window were
+    // measured from the moment of failure, that time would eat it and the very
+    // next request would re-run the migration.
+    process.env.FINOPS_TENANT_INIT_RETRY_MS = "400";
+    const { state, m } = flaky(tenantBase + 1, "tenantslowrecord");
+    tenantList.push(m);
+    cpList.push(fx(cpBase + 1, "cp_slow_first_use", async (db) => { await db.exec("SELECT pg_sleep(0.8)"); }));
+    const schema = schemaName("slowrecord");
+    await assert.rejects(() => tenancy.getTenantDb(schema), /tenantslowrecord is broken/);
+    await assert.rejects(() => tenancy.getTenantDb(schema), /tenantslowrecord is broken/);
+    assert.equal(state.attempts, 1, "the second request came right after the first and must still be answered from the window");
+    // The slow fixture is now recorded in the control-plane schema; start the next test from a clean one.
+    await tenancy.closeAll();
+    const admin = new Pool({ connectionString: process.env.FINOPS_POSTGRES_URL });
+    try { await admin.query(`DROP SCHEMA IF EXISTS ${CP_SCHEMA} CASCADE`); } finally { await admin.end(); }
+  });
+
   test("tenant: after the window the next request retries, and succeeds once the cause is fixed", async () => {
     process.env.FINOPS_TENANT_INIT_RETRY_MS = "200";
     const { state, m } = flaky(tenantBase + 1, "tenantrecover");
