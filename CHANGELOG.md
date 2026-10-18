@@ -56,6 +56,22 @@ All notable changes to this project, newest first.
   tenant never delays another. Each attempt logs one error line; requests in the window do not.
 
 ### Added
+- **Idempotent usage events** (S2, RFC 0001 phase A3). `usage_events` gains a nullable `event_id` (a UUID
+  minted once, where the event is first built, and carried through the spool) with a unique index, and the
+  insert ignores a second event with the same id. Before, the same event could be stored twice, so a call was
+  billed twice: a spool replay run twice, a replay after a crash between the insert and the spool rewrite, or an
+  insert that committed but whose acknowledgement was lost (so the proxy spooled an event that was already
+  stored). `npm run replay-spool` now reports `N already in the database` and is safe to re-run. Covers the proxy
+  (non-streaming, streaming, exact-cache hit, semantic-cache hit) and `POST /api/ingest`. Rows and spool lines
+  from before this change keep `event_id` NULL and behave as they did (no dedupe). Single-tenant migration 14
+  and tenant migration 2; both add the column with no default (no table rewrite) and build the unique index
+  `CONCURRENTLY` (using the previous change's `transaction: false`), so a large `usage_events` keeps metering
+  during the upgrade. The spool rewrite is now atomic (temp file + rename), so a crash mid-rewrite no longer
+  loses the lines that were being kept. `replaySpool()` now also returns `duplicates`. Upgrade note: while
+  migration 14 is building the index (seconds to minutes on a large table), do not restart an instance running
+  an OLDER build against that database; it still runs its baseline on boot and can block behind the build or
+  deadlock with it. Rollback: the column is additive and nullable, an older build keeps working and leaves it
+  NULL; to remove it, drop the index and the column.
 - **Migrations may declare `transaction: false`** (Postgres only; SQLite ignores it). For statements Postgres
   refuses inside a transaction, chiefly `CREATE INDEX CONCURRENTLY`, which adds an index to a large table
   without blocking writes. Such a migration is not atomic: it is recorded only after it succeeds and must be

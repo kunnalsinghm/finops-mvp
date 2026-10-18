@@ -45,14 +45,21 @@ function spoolEvent(row, reason, { tenantSchema = null } = {}) {
 // Replays every spooled row through the normal insert. Rows that still fail are
 // kept in the file; rows that succeed are removed. Returns counts so the CLI
 // (and tests) can report exactly what happened.
+//
+// Safe to run twice, and after a crash at any point: the insert is idempotent on
+// the row's event_id (see usageStore.js), so a row that is already stored counts
+// as `duplicates`, is NOT inserted again, and leaves the spool. The worst a crash
+// can do is leave lines in the spool that the next run recognises as duplicates.
+// Rows from before event_id existed (no id) are inserted once per run, as before.
 async function replaySpool() {
   const file = spoolPath();
-  if (!fs.existsSync(file)) return { total: 0, replayed: 0, remaining: 0 };
+  if (!fs.existsSync(file)) return { total: 0, replayed: 0, duplicates: 0, remaining: 0 };
   const { insertUsageEvent } = require("./usageStore");
 
   const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
   const kept = [];
   let replayed = 0;
+  let duplicates = 0;
   for (const line of lines) {
     let entry;
     try {
@@ -77,15 +84,29 @@ async function replaySpool() {
         if (!known) throw new Error(`unknown tenant schema '${entry.tenant_schema}'`);
         targetDb = await tenancy.getTenantDb(entry.tenant_schema);
       }
-      await insertUsageEvent(entry.row, targetDb);
-      replayed++;
+      const insertedId = await insertUsageEvent(entry.row, targetDb);
+      if (insertedId === null) duplicates++;
+      else replayed++;
     } catch {
       kept.push(line);
     }
   }
-  if (kept.length === 0) fs.unlinkSync(file);
-  else fs.writeFileSync(file, kept.join("\n") + "\n");
-  return { total: lines.length, replayed, remaining: kept.length };
+  if (kept.length === 0) {
+    fs.unlinkSync(file);
+  } else {
+    // Write the kept lines to a temp file and rename it over the spool: rename is
+    // atomic, so a crash mid-rewrite leaves the ORIGINAL file intact. (Rewriting
+    // in place truncates first, so a crash there used to lose every kept line.)
+    const tmp = `${file}.tmp`;
+    try {
+      fs.writeFileSync(tmp, kept.join("\n") + "\n");
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+      throw err;
+    }
+  }
+  return { total: lines.length, replayed, duplicates, remaining: kept.length };
 }
 
 module.exports = { spoolEvent, replaySpool, spoolPath };

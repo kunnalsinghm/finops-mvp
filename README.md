@@ -179,7 +179,7 @@ Less common tuning variables:
 
 **Migrations.** Schema changes are numbered, checksummed migrations applied at startup. SQLite takes a verified snapshot first. **On Postgres, take your own `pg_dump` before upgrading.** The multi-tenant control-plane and per-tenant schemas are versioned the same way, when each is first opened, and `npm run migrate-tenants` migrates every tenant up front and tells you which failed ([how](server/storage/migrations/README.md)).
 
-**Metering spool.** If recording a usage event fails after a successful provider call, the event is written to the spool file and an alert is raised. Recover it with `npm run replay-spool`.
+**Metering spool.** If recording a usage event fails after a successful provider call, the event is written to the spool file and an alert is raised. Recover it with `npm run replay-spool`; it is safe to re-run, because each event carries an id and one that is already stored is skipped, not inserted twice.
 
 **Behind a reverse proxy.** By default the server ignores `X-Forwarded-For`, so every client appears to come from the proxy's address and the login and password-reset rate limits become one global bucket for everyone. Set `FINOPS_TRUST_PROXY` to fix that: use the number of proxies between the internet and the server (`1` for a single load balancer), or list the proxy addresses (`10.0.0.0/8`). Count carefully. A hop count higher than the real number of proxies, or a range wider than your proxies, lets any client choose its own address by sending the header, which defeats the rate limits. The server refuses to start on `true`, on ranges that match every address, and on anything it cannot parse.
 

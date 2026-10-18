@@ -487,7 +487,7 @@ test("METERING: the spool replays through the normal insert, and is removed once
   assert.ok(fs.existsSync(SPOOL), "previous test left one spooled event");
   const before = Number((await storage.get("SELECT COUNT(*) AS n FROM usage_events")).n);
   const result = await replaySpool();
-  assert.deepEqual(result, { total: 1, replayed: 1, remaining: 0 });
+  assert.deepEqual(result, { total: 1, replayed: 1, duplicates: 0, remaining: 0 });
   assert.equal(Number((await storage.get("SELECT COUNT(*) AS n FROM usage_events")).n), before + 1);
   assert.equal(fs.existsSync(SPOOL), false);
 });
@@ -500,7 +500,7 @@ test("METERING: a replay that still fails keeps the event in the spool rather th
     return realRun(sql, params);
   });
   const result = await replaySpool();
-  assert.deepEqual(result, { total: 2, replayed: 0, remaining: 2 });
+  assert.deepEqual(result, { total: 2, replayed: 0, duplicates: 0, remaining: 2 });
   assert.equal(fs.readFileSync(SPOOL, "utf8").trim().split("\n").length, 2, "both the failed row and the unparseable line are preserved");
   fs.unlinkSync(SPOOL);
 });

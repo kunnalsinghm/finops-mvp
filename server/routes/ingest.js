@@ -6,7 +6,7 @@
 // in an "untagged spend" view rather than silently vanishing or breaking traffic.
 
 const express = require("express");
-const defaultDb = require("../storage");
+const { insertUsageEvent, newEventId } = require("../usageStore");
 const { computeCost } = require("../pricing");
 const { requireAuth } = require("../auth");
 const { checkRateLimit } = require("../governance");
@@ -23,46 +23,8 @@ const { checkMonthlyEventQuota } = require("../tenantQuota");
 
 const router = express.Router();
 
-// Was a db.prepare(...) statement with named (@col) params under the old
-// sync db.js. Positional params + await, same pattern as every other
-// migrated insert in this codebase (see shadowTest.js/seed.js).
-async function insertUsageEvent(row, db = defaultDb) {
-  const result = await db.run(
-    `INSERT INTO usage_events
-       (event_time, provider, model, team, environment, git_branch, user_id, key_id,
-        feature_id, customer_id, project_id, cost_center, client_region, agent_id, session_id, task_id,
-        task_status, workload_type, input_tokens, output_tokens, cost_usd, tagged, raw_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     RETURNING id`,
-    [
-      row.event_time,
-      row.provider,
-      row.model,
-      row.team,
-      row.environment,
-      row.git_branch,
-      row.user_id,
-      row.key_id || null,
-      row.feature_id,
-      row.customer_id,
-      row.project_id,
-      row.cost_center,
-      row.client_region,
-      row.agent_id,
-      row.session_id,
-      row.task_id,
-      row.task_status,
-      row.workload_type,
-      row.input_tokens,
-      row.output_tokens,
-      row.cost_usd,
-      row.tagged,
-      row.raw_json,
-    ]
-  );
-  return result.lastInsertRowid;
-}
-
+// The INSERT lives in ../usageStore.js, shared with the proxy and the spool replay, so
+// every path is idempotent on event_id the same way (it used to be a private copy here).
 // Same governance rate limiter used by the proxy - the ingest webhook is
 // just as capable of being flooded (by a bug, a misconfigured retry loop,
 // or bad actor with a leaked key) as the proxy is.
@@ -201,6 +163,8 @@ router.post("/", requireAuth("write"), async (req, res) => {
     cost_usd: cost_usd ?? 0,
     tagged,
     raw_json: JSON.stringify(storedBody),
+    // Minted here, once, when the event is first built (see usageStore.newEventId).
+    event_id: newEventId(),
   };
 
   // Anomaly and fraud checks both run against the baseline BEFORE this event

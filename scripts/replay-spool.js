@@ -8,7 +8,7 @@ const { replaySpool, spoolPath } = require("../server/meteringSpool");
   await storage.ready;
   const result = await replaySpool();
   console.log(`Spool file: ${spoolPath()}`);
-  console.log(`Replayed ${result.replayed} of ${result.total} event(s); ${result.remaining} remaining.`);
+  console.log(`Replayed ${result.replayed} of ${result.total} event(s); ${result.duplicates} already in the database (not inserted again); ${result.remaining} remaining.`);
   process.exit(result.remaining > 0 ? 1 : 0);
 })().catch((err) => {
   console.error("Replay failed:", err.message);
