@@ -41,6 +41,17 @@ All notable changes to this project, newest first.
   `schema_migrations` table per schema, which older builds ignore.
 
 ### Fixed
+- **`npm run replay-spool` no longer loses an event the server spools while it is running.** It read the whole
+  spool, replayed it, then rewrote or deleted the same file, so a line appended in between vanished: a billed
+  call with no usage record (reproduced: one spooled event, a second spooled during its insert; afterwards the
+  spool was gone and only the first event had reached the database). A replay now claims the spool by renaming
+  it to `<spool>.replaying.<pid>` (atomic; the server's next append creates a fresh file), re-reads the claimed
+  file until it stops growing (a write that landed just before the rename), hands failures back by appending
+  them to the live spool, and only then deletes the claimed file. A crash at any point leaves the claimed file,
+  which the next run claims first; the insert is idempotent on `event_id`, so a line seen twice is a
+  `duplicate`, not a second row. `remaining` now means the lines in the live spool afterwards. Rows from
+  before `event_id` existed have no such protection if a crash lands in the narrow window between handing
+  failures back and deleting the claimed file. Rollback: revert.
 - **The init-retry window now starts after a failure has been recorded, not when it happened.** Recording a
   failed tenant init on the control plane can take a while the first time (a cold control plane initializes
   and migrates); with the window measured from the failure, that time could use it up and the very next
