@@ -41,6 +41,16 @@ All notable changes to this project, newest first.
   `schema_migrations` table per schema, which older builds ignore.
 
 ### Fixed
+- **Fire-once alerts can no longer be sent twice by a race.** Budget tiers, burn-rate, commitment tiers,
+  the weekly briefing and the two per-request anomaly checks (daily spend, retry rate) all did "SELECT whether
+  it fired; send; INSERT a marker", so two callers could both pass the SELECT and both send. Reproduced in all
+  six paths with concurrent calls (one alert per caller). It needs no second instance: the anomaly checks run per
+  request, so two concurrent requests for the same team in ONE process both logged the alert. The INSERT is now
+  the arbiter (`server/fireOnce.js`): `INSERT ... ON CONFLICT DO NOTHING` on the state table's existing primary
+  key, and only the caller whose insert created the row sends. If sending fails the claim is released, so the next
+  check retries it, as before. Trade-off: a process killed between the claim and the send loses that one alert
+  for the period (the old order could not lose it but could send it twice). Only the request that wins the claim
+  reports an anomaly in its response. Rollback: revert (no schema change).
 - **`npm run replay-spool` no longer loses an event the server spools while it is running.** It read the whole
   spool, replayed it, then rewrote or deleted the same file, so a line appended in between vanished: a billed
   call with no usage record (reproduced: one spooled event, a second spooled during its insert; afterwards the

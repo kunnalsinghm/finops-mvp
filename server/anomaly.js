@@ -53,6 +53,7 @@ const defaultDb = require("./storage");
 const { sinceDaysAgo, dayFloorExpr, todayClause, startOfTodayExpr, startOfTomorrowExpr } = require("./storage/dialectSql");
 const { logAlert } = require("./governance");
 const { captureFlaggedTestCase } = require("./flaggedTestCases");
+const { fireOnce } = require("./fireOnce");
 
 // ---- #1: single-event cost spike --------------------------------------
 
@@ -100,16 +101,14 @@ async function hasFiredAnomaly(scope_type, scope_value, period, anomaly_type, db
   return Boolean(row);
 }
 
-// Check-then-insert rather than "INSERT OR IGNORE" (SQLite-only syntax) or
-// an ON CONFLICT clause (needs a matching constraint to target) - same
-// portability tradeoff alerts.js's markFired makes, for the same reason.
-async function markFiredAnomaly(scope_type, scope_value, period, anomaly_type, db) {
-  const already = await hasFiredAnomaly(scope_type, scope_value, period, anomaly_type, db);
-  if (already) return;
-  await db.run(
-    "INSERT INTO anomaly_alert_state (scope_type, scope_value, period, anomaly_type) VALUES (?, ?, ?, ?)",
-    [scope_type, scope_value, period, anomaly_type]
-  );
+// hasFiredAnomaly() above is only a cheap fast path (these checks run on EVERY
+// request, so once an alert has fired the common case is one SELECT and out). The
+// INSERT is the arbiter: fireOnceAnomaly() claims the (scope, period, type) row with
+// INSERT ... ON CONFLICT DO NOTHING and only the caller that created it logs the
+// alert, so two concurrent requests - even in one process - cannot both log it. A
+// failed alert write releases the claim so a later request retries. See fireOnce.js.
+async function fireOnceAnomaly(scope_type, scope_value, period, anomaly_type, db, action) {
+  return fireOnce(db, "anomaly_alert_state", { scope_type, scope_value, period, anomaly_type }, action);
 }
 
 function todayUtc() {
@@ -160,8 +159,8 @@ async function checkDailySpendAnomaly({ team, db = defaultDb }) {
   const pctOfNormal = (todaySpend / avgDailySpend) * 100;
   if (pctOfNormal > DAILY_SPEND_ANOMALY_THRESHOLD_PCT) {
     const message = `Daily spend anomaly: team '${team}' has spent $${todaySpend.toFixed(2)} today - ${Math.round(pctOfNormal)}% of its ${baselineDays}-day average of $${avgDailySpend.toFixed(2)}/day.`;
-    await logAlert("anomaly", message, db);
-    await markFiredAnomaly("team", team, period, "daily-spend", db);
+    const claimed = await fireOnceAnomaly("team", team, period, "daily-spend", db, () => logAlert("anomaly", message, db));
+    if (!claimed.fired) return null; // a concurrent request already reported it
     return { flagged: true, type: "daily-spend", message, pct_of_normal: Math.round(pctOfNormal) };
   }
   return null;
@@ -197,8 +196,8 @@ async function checkRetryRateAnomaly({ agent_id, db = defaultDb }) {
 
   if (retryRate > RETRY_RATE_ANOMALY_THRESHOLD) {
     const message = `Retry-rate anomaly: agent '${agent_id}' needed more than one attempt on ${retriedTasks}/${totalTasks} tasks (${Math.round(retryRate * 100)}%).`;
-    await logAlert("anomaly", message, db);
-    await markFiredAnomaly("agent", agent_id, period, "retry-rate", db);
+    const claimed = await fireOnceAnomaly("agent", agent_id, period, "retry-rate", db, () => logAlert("anomaly", message, db));
+    if (!claimed.fired) return null; // a concurrent request already reported it
     // A8: cheap groundwork for Compass's production-trace-to-test-case
     // pipeline - a high retry rate is itself a signal worth a human
     // glance later, even without a specific prompt/response pair (this is

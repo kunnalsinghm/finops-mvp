@@ -16,6 +16,7 @@ const defaultDb = require("./storage");
 const logger = require("./logger");
 const { sinceDaysAgo } = require("./storage/dialectSql");
 const { deliverAlert } = require("./alertDelivery");
+const { fireOnce } = require("./fireOnce");
 
 const TOP_MOVERS_LIMIT = 3;
 
@@ -103,8 +104,10 @@ async function checkWeeklyBriefing(db = defaultDb) {
   if (await alreadySent(weekKey, db)) return;
 
   try {
-    await sendWeeklyBriefing(db);
-    await db.run("INSERT INTO weekly_briefing_state (week_key) VALUES (?)", [weekKey]);
+    // The weekly_briefing_state row is the arbiter (see fireOnce.js): two replicas (or
+    // overlapping checks) cannot both send. A failed send releases the claim, so the
+    // next check retries it, exactly as before.
+    await fireOnce(db, "weekly_briefing_state", { week_key: weekKey }, () => sendWeeklyBriefing(db));
   } catch (err) {
     logger.error("Weekly briefing delivery failed - will retry on next check", { weekKey, error: err.message });
   }

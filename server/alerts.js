@@ -2,16 +2,19 @@
 // to Slack via an Incoming Webhook (free Slack feature - no paid plan needed).
 // Falls back to logging only if no webhook URL is configured.
 //
-// Delivery ordering: an alert is only marked "fired" in budget_alert_state
-// AFTER deliverAlert() resolves successfully. If delivery throws (network
-// blip, misconfigured webhook, SMTP outage), the tier is left unmarked so
-// the next scheduled check retries it, instead of silently losing that
-// alert for the rest of the month.
+// Delivery ordering: the budget_alert_state row is the arbiter (see fireOnce.js).
+// A check CLAIMS the tier with an INSERT ... ON CONFLICT DO NOTHING and only the
+// caller that created the row delivers, so two replicas (or two overlapping
+// checks) cannot both send. If delivery throws (network blip, misconfigured
+// webhook, SMTP outage) the claim is released, so the next scheduled check
+// retries it, instead of silently losing that alert for the rest of the month.
+// The cheap SELECT below is only a fast path that skips the insert attempt.
 
 const logger = require("./logger");
 const defaultDb = require("./storage");
 const { currentMonthBounds } = require("./storage/dialectSql");
 const { deliverAlert } = require("./alertDelivery");
+const { fireOnce } = require("./fireOnce");
 
 async function hasFired(budgetId, month, tier, db = defaultDb) {
   const row = await db.get(
@@ -19,22 +22,6 @@ async function hasFired(budgetId, month, tier, db = defaultDb) {
     [budgetId, month, tier]
   );
   return Boolean(row);
-}
-
-// "INSERT OR IGNORE" is SQLite-specific syntax. Postgres's equivalent is
-// "INSERT ... ON CONFLICT DO NOTHING" - but that requires a matching UNIQUE
-// constraint on (budget_id, month, tier) to target, same as the
-// pricing_overrides ON CONFLICT clause in pricing.js. Rather than assume
-// that constraint exists without checking the schema, do the same
-// check-then-insert as hasFired() above; a harmless duplicate insert
-// attempt is caught the same way at the call site regardless.
-async function markFired(budgetId, month, tier, db = defaultDb) {
-  const already = await hasFired(budgetId, month, tier, db);
-  if (already) return;
-  await db.run(
-    "INSERT INTO budget_alert_state (budget_id, month, tier) VALUES (?, ?, ?)",
-    [budgetId, month, tier]
-  );
 }
 
 // Call this periodically (e.g. from a cron, or after each ingest) to check
@@ -47,7 +34,7 @@ async function markFired(budgetId, month, tier, db = defaultDb) {
 // whichever schema `db` points at, same as any other tenant-scoped route.
 async function checkBudgetAlerts(db = defaultDb) {
   const budgets = await db.all("SELECT * FROM budgets");
-  const month = new Date().toISOString().slice(0, 7); // 'YYYY-MM' - dedup key for hasFired/markFired below, unrelated to the query fix
+  const month = new Date().toISOString().slice(0, 7); // 'YYYY-MM' - dedup key for hasFired/fireOnce below, unrelated to the query fix
   // Sargable range for the SUM query below, not yearMonthExpr() - see
   // currentMonthBounds's comment in dialectSql.js. Both computed once
   // outside the loop since they're the same for every budget row this pass.
@@ -72,12 +59,13 @@ async function checkBudgetAlerts(db = defaultDb) {
       const already = await hasFired(b.id, month, tier, db);
       if (already) continue;
       try {
-        await deliverAlert(
-          `:warning: Budget alert - *${b.scope_type}:${b.scope_value}* has reached *${tier}* of its $${b.monthly_limit_usd} monthly budget (spent $${spend.spend.toFixed(2)}).`,
-          "budget",
-          db
+        await fireOnce(db, "budget_alert_state", { budget_id: b.id, month, tier }, () =>
+          deliverAlert(
+            `:warning: Budget alert - *${b.scope_type}:${b.scope_value}* has reached *${tier}* of its $${b.monthly_limit_usd} monthly budget (spent $${spend.spend.toFixed(2)}).`,
+            "budget",
+            db
+          )
         );
-        await markFired(b.id, month, tier, db);
       } catch (err) {
         logger.error("Budget alert delivery failed - will retry on next check", {
           budgetId: b.id,
@@ -95,7 +83,7 @@ async function checkBurnRate(db = defaultDb) {
   const now = new Date();
   const dayOfMonth = now.getDate();
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const month = now.toISOString().slice(0, 7); // dedup key (tier string + hasFired/markFired below), unrelated to the query fix
+  const month = now.toISOString().slice(0, 7); // dedup key (tier string + hasFired/fireOnce below), unrelated to the query fix
   // Sargable range for the SUM query below, not yearMonthExpr() - see
   // currentMonthBounds's comment in dialectSql.js. Same UTC semantics
   // `month` already had (toISOString() is always UTC), so this is a
@@ -119,12 +107,13 @@ async function checkBurnRate(db = defaultDb) {
       const already = await hasFired(b.id, month, tier, db);
       if (already) continue;
       try {
-        await deliverAlert(
-          `:fire: Burn-rate alert - *${b.scope_type}:${b.scope_value}* is on pace to spend ~$${projected.toFixed(2)} this month, ${Math.round(overrunPct * 100)}% over its $${b.monthly_limit_usd} budget.`,
-          "budget",
-          db
+        await fireOnce(db, "budget_alert_state", { budget_id: b.id, month, tier }, () =>
+          deliverAlert(
+            `:fire: Burn-rate alert - *${b.scope_type}:${b.scope_value}* is on pace to spend ~$${projected.toFixed(2)} this month, ${Math.round(overrunPct * 100)}% over its $${b.monthly_limit_usd} budget.`,
+            "budget",
+            db
+          )
         );
-        await markFired(b.id, month, tier, db);
       } catch (err) {
         logger.error("Burn-rate alert delivery failed - will retry on next check", {
           budgetId: b.id,

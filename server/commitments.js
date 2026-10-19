@@ -19,6 +19,7 @@
 const defaultDb = require("./storage");
 const logger = require("./logger");
 const { deliverAlert } = require("./alertDelivery");
+const { fireOnce } = require("./fireOnce");
 
 const REMAINING_TIERS = [
   { tier: "20pct-remaining", threshold: 0.2 },
@@ -64,12 +65,6 @@ async function hasFired(commitmentId, tier, db = defaultDb) {
   return Boolean(row);
 }
 
-async function markFired(commitmentId, tier, db = defaultDb) {
-  const already = await hasFired(commitmentId, tier, db);
-  if (already) return;
-  await db.run("INSERT INTO commitment_alert_state (commitment_id, tier) VALUES (?, ?)", [commitmentId, tier]);
-}
-
 // Call periodically (same cadence as checkBudgetAlerts/checkBurnRate) to
 // fire remaining-balance alerts exactly once per tier per commitment - not
 // once per month like budget alerts, since a prepaid commitment doesn't
@@ -90,12 +85,15 @@ async function checkCommitmentAlerts(db = defaultDb) {
       const already = await hasFired(c.id, tier, db);
       if (already) continue;
       try {
-        await deliverAlert(
-          `:money_with_wings: Commitment alert - *${c.label}* (${c.provider}) has $${status.remaining_usd.toFixed(2)} of its $${c.initial_amount_usd.toFixed(2)} prepaid balance left (${status.pct_remaining}% remaining).`,
-          "commitment",
-          db
+        // The commitment_alert_state row is the arbiter (see fireOnce.js): only the
+        // caller that creates it delivers; a failed delivery releases it to retry.
+        await fireOnce(db, "commitment_alert_state", { commitment_id: c.id, tier }, () =>
+          deliverAlert(
+            `:money_with_wings: Commitment alert - *${c.label}* (${c.provider}) has $${status.remaining_usd.toFixed(2)} of its $${c.initial_amount_usd.toFixed(2)} prepaid balance left (${status.pct_remaining}% remaining).`,
+            "commitment",
+            db
+          )
         );
-        await markFired(c.id, tier, db);
       } catch (err) {
         logger.error("Commitment alert delivery failed - will retry on next check", {
           commitmentId: c.id,
