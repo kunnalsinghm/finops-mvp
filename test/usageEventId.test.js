@@ -131,45 +131,10 @@ test("replaySpool run twice on the same spool file yields one row", async () => 
   assert.equal(fs.existsSync(SPOOL), false, "a duplicate is already safe in the database, so it leaves the spool");
 });
 
-test("a crash between the insert and the spool rewrite yields one row after the next replay", async (t) => {
-  const id = eid();
-  fs.writeFileSync(SPOOL, spoolLine(row({ event_id: id })));
-  const realUnlink = fs.unlinkSync;
-  t.mock.method(fs, "unlinkSync", (p, ...rest) => {
-    if (p === SPOOL) throw new Error("simulated crash after the insert, before the spool was cleaned up");
-    return realUnlink(p, ...rest);
-  });
-  await assert.rejects(() => replaySpool(), /simulated crash/);
-  assert.equal(await countBy(id), 1, "the insert had already happened");
-  assert.ok(fs.existsSync(SPOOL), "the spool still holds the line");
-  t.mock.restoreAll();
-
-  const again = await replaySpool();
-  assert.deepEqual(again, { total: 1, replayed: 0, duplicates: 1, remaining: 0 });
-  assert.equal(await countBy(id), 1);
-  assert.equal(fs.existsSync(SPOOL), false);
-});
-
-test("the spool rewrite is atomic: a crash while rewriting leaves the original file intact", async (t) => {
-  const id = eid();
-  const unparseable = "not json at all\n";
-  const original = spoolLine(row({ event_id: id })) + unparseable;
-  fs.writeFileSync(SPOOL, original);
-  const realRename = fs.renameSync;
-  t.mock.method(fs, "renameSync", (from, to, ...rest) => {
-    if (to === SPOOL) throw new Error("simulated crash during the rewrite");
-    return realRename(from, to, ...rest);
-  });
-  await assert.rejects(() => replaySpool(), /simulated crash during the rewrite/);
-  assert.equal(fs.readFileSync(SPOOL, "utf8"), original, "no line may be lost or truncated by a crash mid-rewrite");
-  t.mock.restoreAll();
-
-  const again = await replaySpool();
-  assert.deepEqual(again, { total: 2, replayed: 0, duplicates: 1, remaining: 1 });
-  assert.equal(fs.readFileSync(SPOOL, "utf8"), unparseable, "only the unparseable line is kept");
-  assert.equal(await countBy(id), 1);
-  assert.deepEqual(fs.readdirSync(path.dirname(SPOOL)).filter((f) => f.startsWith(path.basename(SPOOL) + ".")), [], "no temp file is left behind");
-});
+// The two crash-window tests that used to be here (crash between the insert and the spool
+// cleanup; crash while rewriting the kept lines) tested the old in-place rewrite. Replay now
+// claims the spool by renaming it, and those windows are covered against that design in
+// spoolReplayConcurrency.test.js.
 
 test("an old spool line with no event_id still replays (once), as before", async () => {
   const r = row();

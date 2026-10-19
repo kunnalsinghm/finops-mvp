@@ -43,30 +43,62 @@ function spoolEvent(row, reason, { tenantSchema = null } = {}) {
 }
 
 // Replays every spooled row through the normal insert. Rows that still fail are
-// kept in the file; rows that succeed are removed. Returns counts so the CLI
-// (and tests) can report exactly what happened.
+// handed back to the live spool; rows that succeed are gone. Returns counts so the
+// CLI (and tests) can report exactly what happened: `remaining` is how many lines
+// are in the live spool NOW (failures, plus anything spooled while this ran).
 //
-// Safe to run twice, and after a crash at any point: the insert is idempotent on
-// the row's event_id (see usageStore.js), so a row that is already stored counts
-// as `duplicates`, is NOT inserted again, and leaves the spool. The worst a crash
-// can do is leave lines in the spool that the next run recognises as duplicates.
-// Rows from before event_id existed (no id) are inserted once per run, as before.
+// Safe to run while the server is serving, twice, and after a crash at any point.
+//
+//  - It never edits the live spool in place. It CLAIMS it first by renaming it to
+//    `<spool>.replaying.<pid>` (atomic): the server's next append simply creates a
+//    fresh live file. Rewriting the file in place used to delete or overwrite any
+//    line the server appended during the replay - a billed call with no usage row.
+//  - A line written into the claimed file after we read it (spoolEvent opened the
+//    path just before the rename) is caught by re-reading the claimed file until it
+//    stops growing, before it is deleted.
+//  - Failures are appended to the live spool BEFORE the claimed files are deleted,
+//    so a crash in between leaves them in both places rather than in neither.
+//  - A claimed file left by a crashed run is claimed again by the next run, which
+//    is why this starts by looking for `<spool>.replaying.*` as well as the spool.
+//  - The insert is idempotent on the row's event_id (see usageStore.js), so a row
+//    seen twice (the crash window above, two replays at once) counts as
+//    `duplicates` and is NOT inserted again. Rows from before event_id existed (no
+//    id) have no such protection and could be inserted twice in those windows.
 async function replaySpool() {
   const file = spoolPath();
-  if (!fs.existsSync(file)) return { total: 0, replayed: 0, duplicates: 0, remaining: 0 };
+  const dir = path.dirname(file);
+  const claimedPrefix = `${path.basename(file)}.replaying.`;
   const { insertUsageEvent } = require("./usageStore");
 
-  const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+  // Leftovers from a crashed run first, then a fresh claim of the live spool.
+  const claimed = [];
+  if (fs.existsSync(dir)) {
+    for (const name of fs.readdirSync(dir)) {
+      if (name.startsWith(claimedPrefix)) claimed.push(path.join(dir, name));
+    }
+  }
+  if (fs.existsSync(file)) {
+    const mine = `${file}.replaying.${process.pid}`;
+    // Our own pid may already be claimed (a crashed earlier run in this process):
+    // never overwrite it, claim under a unique name instead.
+    const target = claimed.includes(mine) ? `${mine}.${Date.now()}` : mine;
+    fs.renameSync(file, target);
+    claimed.push(target);
+  }
+  if (claimed.length === 0) return { total: 0, replayed: 0, duplicates: 0, remaining: countLines(file) };
+
   const kept = [];
+  let total = 0;
   let replayed = 0;
   let duplicates = 0;
-  for (const line of lines) {
+
+  async function replayLine(line) {
     let entry;
     try {
       entry = JSON.parse(line);
     } catch {
       kept.push(line); // unparseable - keep for a human, never drop silently
-      continue;
+      return;
     }
     try {
       let targetDb;
@@ -91,22 +123,44 @@ async function replaySpool() {
       kept.push(line);
     }
   }
-  if (kept.length === 0) {
-    fs.unlinkSync(file);
-  } else {
-    // Write the kept lines to a temp file and rename it over the spool: rename is
-    // atomic, so a crash mid-rewrite leaves the ORIGINAL file intact. (Rewriting
-    // in place truncates first, so a crash there used to lose every kept line.)
-    const tmp = `${file}.tmp`;
-    try {
-      fs.writeFileSync(tmp, kept.join("\n") + "\n");
-      fs.renameSync(tmp, file);
-    } catch (err) {
-      try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
-      throw err;
+
+  for (const claimedFile of claimed) {
+    // Read, replay, and read again until the file stops growing (see the note above
+    // about a write that lands in the claimed file after the rename).
+    let offset = 0;
+    for (;;) {
+      const buf = fs.readFileSync(claimedFile);
+      if (buf.length <= offset) break;
+      const fresh = buf.subarray(offset).toString("utf8").split("\n").filter((l) => l.trim() !== "");
+      offset = buf.length;
+      for (const line of fresh) {
+        total++;
+        await replayLine(line);
+      }
     }
   }
-  return { total: lines.length, replayed, duplicates, remaining: kept.length };
+
+  // Hand failures back to the live spool first, delete the claimed files after.
+  if (kept.length > 0) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(file, kept.join("\n") + "\n");
+  }
+  for (const claimedFile of claimed) {
+    try {
+      fs.unlinkSync(claimedFile);
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err; // another replay already removed it
+    }
+  }
+  return { total, replayed, duplicates, remaining: countLines(file) };
+}
+
+function countLines(file) {
+  try {
+    return fs.readFileSync(file, "utf8").split("\n").filter((l) => l.trim() !== "").length;
+  } catch {
+    return 0;
+  }
 }
 
 module.exports = { spoolEvent, replaySpool, spoolPath };
