@@ -31,4 +31,8 @@ module.exports = {
   info: (message, meta) => write("info", message, meta),
   warn: (message, meta) => write("warn", message, meta),
   error: (message, meta) => write("error", message, meta),
+  // Off by default (periodic-job lock skips would be noise); FINOPS_LOG_LEVEL=debug turns it on.
+  debug: (message, meta) => {
+    if (process.env.FINOPS_LOG_LEVEL === "debug") write("debug", message, meta);
+  },
 };

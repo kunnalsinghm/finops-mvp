@@ -8,8 +8,8 @@ const helmet = require("helmet");
 
 const storage = require("./storage");
 const logger = require("./logger");
-const { runBackup } = require("./backup");
-const pgBackup = require("./backupPostgres");
+const scheduler = require("./scheduler");
+const jobLock = require("./jobLock");
 
 const ingestRoute = require("./routes/ingest");
 const costsRoute = require("./routes/costs");
@@ -49,9 +49,6 @@ const platformAdminRoute = require("./routes/platformAdmin");
 const healthRoute = require("./routes/health");
 const { NOT_TENANT_AWARE, blockInMultiTenant } = require("./tenantGuard");
 const tenancy = require("./tenancy");
-const { checkBudgetAlerts, checkBurnRate } = require("./alerts");
-const { checkCommitmentAlerts } = require("./commitments");
-const { checkWeeklyBriefing } = require("./weeklyBriefing");
 
 const app = express();
 
@@ -211,6 +208,12 @@ function installShutdown(server) {
     graceMs,
     log: logger,
     closers: [
+      // Let a running periodic job finish before the database closes, and make sure its
+      // advisory lock is released (see jobLock.js). Bounded, so a stuck job cannot hold
+      // the process past the orchestrator's kill timeout.
+      async () => {
+        await jobLock.drain({ timeoutMs: Math.max(1000, Math.floor(graceMs / 2)) });
+      },
       async () => {
         if (tenancy.MULTI_TENANT) await tenancy.closeAll();
       },
@@ -237,54 +240,17 @@ process.on("unhandledRejection", (reason) => {
   logger.error("Unhandled promise rejection", { reason: String(reason) });
 });
 
+// Periodic jobs. What each tick does, and which instance does it, lives in scheduler.js: every
+// tick goes through a per-job Postgres advisory lock, so with several instances a job runs on ONE
+// of them per tick instead of once per instance (see jobLock.js).
 setInterval(() => {
-  if (shutdown.isShuttingDown()) return; // draining: do not start new work
-  if (tenancy.MULTI_TENANT) {
-    // Runs the same four checks once PER TENANT instead of once against a
-    // single global database - see tenantJobs.js's header comment for why
-    // that distinction matters. A tenant-iteration failure (e.g. the
-    // control-plane connection is briefly down) is caught inside
-    // tenantJobs.js per-tenant already; this outer catch only guards
-    // against listActiveTenants() itself failing.
-    require("./tenantJobs")
-      .runPeriodicChecksForAllTenants()
-      .catch((e) => logger.error("Per-tenant periodic check run failed", { error: e.message }));
-    // Trial-expiry + offboarding-purge sweep - see tenantLifecycle.js's
-    // runLifecycleSweep header comment for why this can't just rely on the
-    // reactive per-request check in auth.js alone.
-    require("./tenantLifecycle")
-      .runLifecycleSweep()
-      .catch((e) => logger.error("Tenant lifecycle sweep failed", { error: e.message }));
-  } else {
-    checkBudgetAlerts().catch((e) => logger.error("Budget alert check failed", { error: e.message }));
-    checkBurnRate().catch((e) => logger.error("Burn-rate check failed", { error: e.message }));
-    checkCommitmentAlerts().catch((e) => logger.error("Commitment alert check failed", { error: e.message }));
-    checkWeeklyBriefing().catch((e) => logger.error("Weekly briefing check failed", { error: e.message }));
-  }
+  scheduler.runPeriodicChecks().catch((e) => logger.error("Periodic check run failed", { error: e.message }));
 }, 5 * 60 * 1000);
 
-// A10: dispatches to whichever backup implementation matches
-// FINOPS_DB_DRIVER, so an operator doesn't need to know which backend is
-// active to get automatic periodic backups. Postgres auto-scheduling is
-// deliberately restricted to single-tenant mode for now - see
-// backupPostgres.js's header for why a whole-database restore isn't safe
-// to run unattended against a database serving multiple live tenants yet.
-// A multi-tenant deployment can still run `npm run backup` manually (it
-// works mechanically, since every tenant lives in the same database), it
-// just isn't done automatically on a timer until per-tenant-schema restore
-// exists.
+// A10: automatic backups every 6 hours. Which implementation runs (SQLite file copy, or Postgres
+// dump, single-tenant only) and the once-per-tick lock live in scheduler.js runBackupTick.
 function scheduleBackup() {
-  if (process.env.FINOPS_DB_DRIVER === "postgres") {
-    if (tenancy.MULTI_TENANT) {
-      logger.warn(
-        "Automatic Postgres backup scheduling is scoped to single-tenant mode for now (a whole-database restore would roll back every tenant at once) - run `npm run backup` manually, or your own pg_dump/provider-snapshot schedule, for multi-tenant deployments. See docs/backup-restore-runbook.md."
-      );
-      return;
-    }
-    pgBackup.runBackup().catch((e) => logger.error("Postgres backup failed", { error: e.message }));
-  } else {
-    runBackup();
-  }
+  scheduler.runBackupTick().catch((e) => logger.error("Backup tick failed", { error: e.message }));
 }
 scheduleBackup();
 setInterval(scheduleBackup, 6 * 60 * 60 * 1000);
