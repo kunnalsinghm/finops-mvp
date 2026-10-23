@@ -61,6 +61,7 @@ decisions in §6.
    `schema.tenant.js`. Prerequisite for any at-least-once spool design.
 4. **Run periodic jobs once.** Take a Postgres advisory lock per job tick (`pg_try_advisory_lock`); the
    instance that wins runs it, the rest skip. Under SQLite, behaviour is unchanged. Fixes #6.
+   **Status: done** (`server/jobLock.js`, `server/scheduler.js`; alert-dedupe race closed in `server/fireOnce.js`).
 
 ### Phase B — shared auth state
 

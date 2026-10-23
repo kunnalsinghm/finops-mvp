@@ -41,6 +41,16 @@ All notable changes to this project, newest first.
   `schema_migrations` table per schema, which older builds ignore.
 
 ### Fixed
+- **Fire-once alerts can no longer be sent twice by a race.** Budget tiers, burn-rate, commitment tiers,
+  the weekly briefing and the two per-request anomaly checks (daily spend, retry rate) all did "SELECT whether
+  it fired; send; INSERT a marker", so two callers could both pass the SELECT and both send. Reproduced in all
+  six paths with concurrent calls (one alert per caller). It needs no second instance: the anomaly checks run per
+  request, so two concurrent requests for the same team in ONE process both logged the alert. The INSERT is now
+  the arbiter (`server/fireOnce.js`): `INSERT ... ON CONFLICT DO NOTHING` on the state table's existing primary
+  key, and only the caller whose insert created the row sends. If sending fails the claim is released, so the next
+  check retries it, as before. Trade-off: a process killed between the claim and the send loses that one alert
+  for the period (the old order could not lose it but could send it twice). Only the request that wins the claim
+  reports an anomaly in its response. Rollback: revert (no schema change).
 - **`npm run replay-spool` no longer loses an event the server spools while it is running.** It read the whole
   spool, replayed it, then rewrote or deleted the same file, so a line appended in between vanished: a billed
   call with no usage record (reproduced: one spooled event, a second spooled during its insert; afterwards the
@@ -67,6 +77,19 @@ All notable changes to this project, newest first.
   tenant never delays another. Each attempt logs one error line; requests in the window do not.
 
 ### Added
+- **Periodic jobs run once across instances** (S3, RFC 0001 phase A4). On Postgres every scheduled job tick takes a
+  session-level `pg_try_advisory_lock` keyed by the job name (`server/jobLock.js`); the instance that gets it runs
+  the job, the others skip that tick (a `debug` log line) and try again on the next. Jobs: `periodic-checks`
+  (budget, burn-rate, commitment alerts and the weekly briefing), `tenant-periodic-checks` and
+  `tenant-lifecycle-sweep` (multi-tenant), and `backup` (the Postgres dump, previously one per instance every 6
+  hours). The lock is released when the job finishes or throws; if the unlock itself fails the connection is
+  destroyed, which frees it too. Graceful shutdown now waits for a running job (bounded, half the shutdown grace
+  period) before the database closes, and past the bound destroys the lock connections so a stuck job cannot hold
+  `pool.end()` open. SQLite is unchanged: the job just runs. What each tick does moved to `server/scheduler.js`
+  so it can be tested without a server (`index.js` keeps only the timers). Verified with three real processes
+  contending for one tick: exactly one ran the job, in each of three rounds. New `FINOPS_LOG_LEVEL=debug` turns on
+  debug logging. Not a distributed scheduler: if the holder dies mid-job the others take the next tick, with no
+  catch-up. Rollback: revert.
 - **Idempotent usage events** (S2, RFC 0001 phase A3). `usage_events` gains a nullable `event_id` (a UUID
   minted once, where the event is first built, and carried through the spool) with a unique index, and the
   insert ignores a second event with the same id. Before, the same event could be stored twice, so a call was

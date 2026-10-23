@@ -120,7 +120,7 @@ The proxy calls the provider first and records the usage afterwards, so a record
 
 Multi-tenant mode isolates each tenant in its own Postgres schema with its own connection pool, and routes every request through a shared control-plane schema. Operators manage tenants through `/api/platform/*`, which is gated by `FINOPS_PLATFORM_ADMIN_TOKEN`. How it works, and what it proves: [docs/multi-tenancy.md](docs/multi-tenancy.md).
 
-**Run a single instance for now.** Dashboard sessions, SSO state and rate-limit buckets are held in memory, and there is no shared job lock, so a second instance behind a load balancer breaks logins and runs every scheduled job twice. The plan to lift this is [RFC 0001](docs/rfcs/0001-horizontal-scaling-and-iac.md); graceful shutdown, its first step, is done.
+**Run a single instance for now.** Dashboard sessions, SSO state and rate-limit buckets are held in memory, so a second instance behind a load balancer breaks logins. Scheduled jobs are safe to run on several instances on Postgres: each job tick takes a database lock, so it runs on one instance and the others skip it (under SQLite there is only ever one instance). The plan to lift the remaining limits is [RFC 0001](docs/rfcs/0001-horizontal-scaling-and-iac.md); graceful shutdown and run-once jobs are done.
 
 ## Configuration
 
@@ -131,6 +131,7 @@ Copy `.env.example` to `.env`. Everything works without any of these set. The on
 | `PORT` | `4000` | HTTP port |
 | `FINOPS_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` exposes the server, including bootstrap mode, to your network |
 | `FINOPS_TRUST_PROXY` | none | Trust `X-Forwarded-For` from your load balancer so per-IP rate limits see the real client. A hop count (`1`) or a list of proxy IPs/CIDRs (`10.0.0.0/8,192.168.1.5`). Invalid values, including `true`, stop the server from starting |
+| `FINOPS_LOG_LEVEL` | none | Set to `debug` to also log debug lines, such as a scheduled job being skipped because another instance holds its lock |
 | `FINOPS_TENANT_INIT_RETRY_MS` | `15000` | Multi-tenant: after a tenant's schema fails to initialize or migrate, how long requests for it get the same error before the next retry. `0` retries on every request |
 | `FINOPS_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
 | `FINOPS_POSTGRES_URL` | none | Connection string; required for Postgres |

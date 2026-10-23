@@ -10,7 +10,7 @@ Multi-tenant mode is now feature-complete: every route group is tenant-aware, in
 
 **Dashboard session login works in multi-tenant mode.** Accounts are tenant-scoped (`server/tenantUsers.js`) — usernames are unique *per tenant*, not globally, so login takes a `tenant_id` alongside `username`/`password` (`POST /api/auth/login`), and the resulting `X-Session-Token` resolves to that tenant's own schema on every subsequent request, same as an API key does.
 
-**Background jobs run once per active tenant**, not once against a single global database (`server/tenantJobs.js`) — budget alerts, burn-rate, commitment alerts, and the weekly briefing all fire per tenant, with one tenant's failure isolated from every other tenant's run.
+**Background jobs run once per active tenant**, not once against a single global database (`server/tenantJobs.js`) — budget alerts, burn-rate, commitment alerts, and the weekly briefing all fire per tenant, with one tenant's failure isolated from every other tenant's run. With several instances, each of these jobs (and the lifecycle sweep) runs on one instance per tick, under its own Postgres advisory lock (`server/jobLock.js`, `server/scheduler.js`).
 
 **In-memory rate-limit and quarantine state is partitioned per tenant** (`server/governance.js`), the same `tenantId -> Map` pattern the response caches already used — a noisy tenant's key churn can no longer grow a data structure every other tenant's requests also hash into.
 
