@@ -59,6 +59,19 @@ async function lockIsFree(name) {
   } finally { client.release(); }
 }
 
+// Polls until the advisory lock is free. A destroyed connection is closed
+// asynchronously and Postgres only frees its session lock once it notices the
+// socket is gone, so an immediate check can race. A leaked pooled connection
+// never frees the lock, so this still fails for a real leak.
+async function waitUntilFree(name, ms = 3000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await lockIsFree(name)) return true;
+    await sleep(50);
+  }
+  return false;
+}
+
 // ------------------------------------------------------------- two processes
 function child(env) {
   return new Promise((resolve, reject) => {
@@ -137,7 +150,7 @@ test("if the unlock itself fails, the connection is destroyed rather than pooled
   const r = await jobLock.runExclusive(name, async () => "done");
   t.mock.restoreAll();
   assert.equal(r.ran, true, "the job's own result is not lost to a cleanup failure");
-  assert.equal(await lockIsFree(name), true, "a connection that still held the lock must not go back into the pool");
+  assert.equal(await waitUntilFree(name), true, "a connection that still held the lock must not go back into the pool");
 });
 
 test("different jobs do not exclude each other", pgOnly, async () => {
