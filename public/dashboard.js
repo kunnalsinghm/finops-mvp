@@ -1,3 +1,8 @@
+// HTML is built by render.js (loaded first by index.html): html`` escapes every value, setHtml() is the only
+// innerHTML write. See test/dashboardRender.test.js for the rules this file must keep.
+const R = FinopsRender;
+const { setHtml } = R;
+
 const fmt$ = (n) => `$${Number(n || 0).toFixed(2)}`;
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -56,7 +61,7 @@ function updateLoginStatus() {
   const token = getSessionToken();
   const username = localStorage.getItem("finops_session_username");
   if (token && username) {
-    loginStatus.innerHTML = `Logged in as <strong>${username}</strong> &middot; <a href="#" id="logoutLink" style="color:var(--signal);">log out</a>`;
+    setHtml(loginStatus, R.loginStatusHtml(username));
     document.getElementById("logoutLink")?.addEventListener("click", (e) => {
       e.preventDefault();
       localStorage.removeItem("finops_session_token");
@@ -74,7 +79,7 @@ loginBtn.addEventListener("click", async () => {
   const username = loginUsername.value.trim();
   const password = loginPassword.value;
   if (!username || !password) {
-    loginMsg.innerHTML = `<span style="color:var(--danger);">Enter a username and password</span>`;
+    setHtml(loginMsg, R.messageHtml("danger", "Enter a username and password"));
     return;
   }
   loginMsg.textContent = "Logging in…";
@@ -93,7 +98,7 @@ loginBtn.addEventListener("click", async () => {
     updateLoginStatus();
     loadDashboard();
   } catch (err) {
-    loginMsg.innerHTML = `<span style="color:var(--danger);">${err.message}</span>`;
+    setHtml(loginMsg, R.messageHtml("danger", err.message));
   }
 });
 
@@ -139,12 +144,7 @@ function animateValue(el, endValue, { prefix = "", decimals = 2, duration = 700 
 /* ---------------------------------------------------------------- */
 function renderCards(summary, untagged) {
   const el = document.getElementById("summaryCards");
-  el.innerHTML = `
-    <div class="card live stagger-in" style="animation-delay:0.02s;"><div class="label">Total Spend</div><div class="value" id="v-total">$0.00</div></div>
-    <div class="card stagger-in" style="animation-delay:0.06s;"><div class="label">Spend Today</div><div class="value" id="v-today">$0.00</div></div>
-    <div class="card stagger-in" style="animation-delay:0.10s;"><div class="label">Total Events</div><div class="value" id="v-events">0</div></div>
-    <div class="card stagger-in" style="animation-delay:0.14s;"><div class="label">Untagged Spend</div><div class="value" id="v-untagged">$0.00</div></div>
-  `;
+  setHtml(el, R.cardsHtml());
   animateValue(document.getElementById("v-total"), Number(summary.total_cost || 0), { prefix: "$" });
   animateValue(document.getElementById("v-today"), Number(summary.today_cost || 0), { prefix: "$" });
   animateValue(document.getElementById("v-events"), Number(summary.event_count || 0), { decimals: 0 });
@@ -207,75 +207,27 @@ function renderCharts(byTime, byTeam) {
 
 function renderModelTable(rows) {
   const tbody = document.querySelector("#modelTable tbody");
-  tbody.innerHTML = rows
-    .map((r) => `<tr><td>${r.provider}</td><td>${r.model}</td><td>${r.event_count}</td><td>${fmt$(r.total_cost)}</td></tr>`)
-    .join("");
+  setHtml(tbody, R.modelRowsHtml(rows));
 }
 
 function renderBudgetTable(rows) {
   const tbody = document.querySelector("#budgetTable tbody");
-  if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="4" style="color:var(--text-faint);font-family:var(--font-ui);">No budgets set. POST to /api/budgets to add one.</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = rows
-    .map((r) => `<tr>
-        <td style="font-family:var(--font-ui);">${r.scope_type}: ${r.scope_value}</td>
-        <td>${fmt$(r.spent_this_month)}</td>
-        <td>${fmt$(r.monthly_limit_usd)}</td>
-        <td class="tier-${r.alert_tier}">${r.pct_used}% (${r.alert_tier})</td>
-      </tr>`)
-    .join("");
+  setHtml(tbody, R.budgetRowsHtml(rows));
 }
 
 function renderRecommendations(data) {
   const el = document.getElementById("recommendations");
-  const items = data.model_switch || [];
-  if (!items.length) {
-    el.innerHTML = `<div style="color:var(--text-faint);font-size:13px;">No recommendations yet — need more usage data.</div>`;
-    return;
-  }
-  el.innerHTML = items
-    .map((r) => `<div style="border-bottom:1px solid var(--border);padding:10px 0;font-size:13px;">
-        <strong>${r.current.provider}/${r.current.model}</strong> → <strong>${r.suggested.provider}/${r.suggested.model}</strong>
-        <span style="color:var(--good);font-family:var(--font-data);"> save ~${fmt$(r.estimated_savings_usd)} (${r.estimated_savings_pct}%)</span>
-        <div style="color:var(--text-faint);margin-top:4px;font-size:12px;">${r.caveat}</div>
-      </div>`)
-    .join("");
+  setHtml(el, R.recommendationsHtml(data.model_switch || []));
 }
 
 function renderAlerts(rows) {
   const el = document.getElementById("alerts");
-  if (!rows.length) {
-    el.innerHTML = `<div style="color:var(--text-faint);font-size:13px;">No alerts yet.</div>`;
-    return;
-  }
-  el.innerHTML = rows
-    .slice(0, 10)
-    .map((a) => `<div style="border-bottom:1px solid var(--border);padding:8px 0;font-size:13px;">
-        <span style="color:var(--money);text-transform:uppercase;font-size:10.5px;font-weight:600;letter-spacing:0.04em;">${a.type}</span>
-        <div style="margin-top:2px;">${a.message}</div>
-        <div style="color:var(--text-faint);font-size:11px;font-family:var(--font-data);margin-top:2px;">${a.created_at}</div>
-      </div>`)
-    .join("");
+  setHtml(el, R.alertsHtml(rows));
 }
 
 function renderReconcileTable(rows) {
   const tbody = document.querySelector("#reconcileTable tbody");
-  if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="6" style="color:var(--text-faint);font-family:var(--font-ui);">No billing exports uploaded yet.</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = rows
-    .map((r) => `<tr>
-        <td>${r.day}</td>
-        <td style="font-family:var(--font-ui);">${r.provider}</td>
-        <td>${fmt$(r.reported_cost)}</td>
-        <td>${fmt$(r.tracked_cost)}</td>
-        <td class="${r.flagged ? "tier-exceeded" : "tier-ok"}">${fmt$(r.gap_usd)} (${r.gap_pct}%)</td>
-        <td class="${r.flagged ? "tier-exceeded" : "tier-ok"}" style="font-family:var(--font-ui);">${r.flagged ? "⚠ Shadow spend" : "OK"}</td>
-      </tr>`)
-    .join("");
+  setHtml(tbody, R.reconcileRowsHtml(rows));
 }
 
 async function loadReconcileReport() {
@@ -283,8 +235,7 @@ async function loadReconcileReport() {
     const rows = await getJSON("/api/reconcile/report");
     renderReconcileTable(rows);
   } catch (err) {
-    document.querySelector("#reconcileTable tbody").innerHTML =
-      `<tr><td colspan="6" style="color:var(--danger)">${err.message}</td></tr>`;
+    setHtml(document.querySelector("#reconcileTable tbody"), R.reconcileErrorRowHtml(err.message));
   }
 }
 
@@ -293,7 +244,7 @@ document.getElementById("reconcileUploadBtn").addEventListener("click", async ()
   const status = document.getElementById("reconcileStatus");
   const file = fileInput.files[0];
   if (!file) {
-    status.innerHTML = `<span style="color:var(--danger);">Choose a CSV file first</span>`;
+    setHtml(status, R.messageHtml("danger", "Choose a CSV file first"));
     return;
   }
   status.textContent = "Uploading…";
@@ -306,11 +257,11 @@ document.getElementById("reconcileUploadBtn").addEventListener("click", async ()
     });
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || "Upload failed");
-    status.innerHTML = `<span style="color:var(--good);">Imported ${body.rowCount} rows (${body.replacedDayProviderPairs} day/provider pairs replaced).</span>`;
+    setHtml(status, R.messageHtml("good", `Imported ${body.rowCount} rows (${body.replacedDayProviderPairs} day/provider pairs replaced).`));
     fileInput.value = "";
     loadReconcileReport();
   } catch (err) {
-    status.innerHTML = `<span style="color:var(--danger);">${err.message}</span>`;
+    setHtml(status, R.messageHtml("danger", err.message));
   }
 });
 
@@ -334,18 +285,7 @@ async function loadCacheStats() {
 
 function renderBackupTable(rows) {
   const tbody = document.querySelector("#backupTable tbody");
-  if (!rows || !rows.length) {
-    tbody.innerHTML = `<tr><td colspan="3" style="color:var(--text-faint);font-family:var(--font-ui);">No backups yet, or admin access required to view.</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = rows
-    .slice(0, 5)
-    .map((b) => `<tr>
-        <td style="font-family:var(--font-ui);font-size:12px;">${b.name}</td>
-        <td>${(b.sizeBytes / 1024).toFixed(1)} KB</td>
-        <td style="font-size:11px;">${new Date(b.createdAt).toLocaleString()}</td>
-      </tr>`)
-    .join("");
+  setHtml(tbody, R.backupRowsHtml(rows));
 }
 
 async function loadBackups() {
@@ -364,10 +304,10 @@ document.getElementById("runBackupBtn").addEventListener("click", async () => {
     const res = await fetch("/api/backup/run", { method: "POST", headers: authHeaders() });
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || "Backup failed");
-    status.innerHTML = `<span style="color:var(--good);">Backup created.</span>`;
+    setHtml(status, R.messageHtml("good", "Backup created."));
     loadBackups();
   } catch (err) {
-    status.innerHTML = `<span style="color:var(--danger);">${err.message}</span>`;
+    setHtml(status, R.messageHtml("danger", err.message));
   }
 });
 
@@ -390,18 +330,7 @@ document.getElementById("exportDataBtn").addEventListener("click", () => {
 
 function renderAuditLog(rows) {
   const el = document.getElementById("auditLog");
-  if (!rows || !rows.length) {
-    el.innerHTML = `<div style="color:var(--text-faint);font-size:13px;">No audit entries yet, or admin access required to view.</div>`;
-    return;
-  }
-  el.innerHTML = rows
-    .slice(0, 10)
-    .map((a) => `<div style="border-bottom:1px solid var(--border);padding:8px 0;font-size:13px;">
-        <span style="color:var(--signal);font-family:var(--font-data);font-size:11.5px;">${a.action}</span>
-        <span style="color:var(--text-muted);"> by ${a.actor}${a.target ? ` &rarr; ${a.target}` : ""}</span>
-        <div style="color:var(--text-faint);font-size:11px;font-family:var(--font-data);margin-top:2px;">${a.created_at}</div>
-      </div>`)
-    .join("");
+  setHtml(el, R.auditHtml(rows));
 }
 
 async function loadAuditLog() {
@@ -435,13 +364,11 @@ async function loadAuditLog() {
     loadBackups();
     loadAuditLog();
   } catch (err) {
-    document.getElementById("summaryCards").innerHTML =
-      `<div class="card"><div class="label">Error</div><div class="value" style="font-size:14px;color:var(--danger);font-family:var(--font-ui);">${err.message}</div></div>`;
+    setHtml(document.getElementById("summaryCards"), R.errorCardHtml(err.message));
   }
 }
 
 loadDashboard().catch((err) => {
   console.error(err);
-  document.getElementById("summaryCards").innerHTML =
-    `<div class="card"><div class="label">Error</div><div class="value" style="font-size:14px;color:var(--danger);font-family:var(--font-ui);">${err.message}. Is the server running?</div></div>`;
+  setHtml(document.getElementById("summaryCards"), R.errorCardHtml(err.message, ". Is the server running?"));
 });

@@ -49,15 +49,20 @@ Revisit option C only if B proves insufficient.
 ## 5. Cost of waiting, and what is unverified
 
 - Cost of waiting: none that I can find. The frontend is not blocking any item in this list.
-- **Not verified:** whether any current `innerHTML` render path is exploitable. I have read the structure,
-  not audited each field's source. That audit is a small, separate task and worth doing regardless of the
-  framework decision.
+- **XSS audit: done** (see CHANGELOG, "Dashboard output is escaped"). Result: yes, exploitable markup
+  injection. `dashboard.js` had 25 `innerHTML` writes interpolating strings an API-key holder controls (model
+  name, team, agent id, key label, alert text, audit actor/target); a model name of `<img src=x onerror=...>`
+  became a live element in an administrator's dashboard. The CSP (`script-src 'self'`, `script-src-attr
+  'none'`) would have stopped a browser running the handler, so this was markup injection, not script
+  execution, in a CSP-enforcing browser. Fixed by `public/render.js` (an escaping `html` template plus a single
+  `setHtml` sink), enforced by `test/dashboardRender.test.js`. This is option A from section 3, done, and it
+  makes the framework migration less urgent, not more.
 - **Not measured:** bundle size or load time; there is nothing to compare against until a migration is
   scoped.
 
 ## 6. Decisions needed
 
-None to proceed with A. If you want the XSS audit, say so and I will do it as its own change with tests.
+None. Option A (escaping helper) is implemented; the framework decision is still not forced by any problem found.
 
 ## 7. Rollback
 

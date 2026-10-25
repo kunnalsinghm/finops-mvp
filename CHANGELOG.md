@@ -75,6 +75,20 @@ All notable changes to this project, newest first.
   migration (lock, BEGIN, DDL, ROLLBACK, a new connection pool) once per request: in a reproduction 6 requests
   ran it 6 times, and 5 control-plane calls ran it 5 times; now once each. Applies per tenant, so one broken
   tenant never delays another. Each attempt logs one error line; requests in the window do not.
+- **Dashboard output is escaped** (S4, RFC 0003 section 5). Audit result: `public/dashboard.js` wrote 25 template strings
+  to `innerHTML`, interpolating values that anyone holding an API key chooses: the model name (any string in a proxy
+  or ingest request), team, agent id, key label, the alert message built from them, and the audit actor/target. A
+  model name of `<img src=x onerror=...>` became a live element in an administrator's dashboard (reproduced by
+  running the real render functions against a stub DOM). The Content-Security-Policy (`script-src 'self'`,
+  `script-src-attr 'none'`) stops a browser running an injected handler or script, so in a CSP-enforcing browser this
+  was markup injection (spoofed links and text) rather than script execution, but it is one loosened directive from
+  the latter. New `public/render.js`: an `html` tagged template that escapes every interpolated value unless it is
+  itself `html` output, row builders for each panel (same markup as before), and `setHtml()`, the only `innerHTML`
+  write. `test/dashboardRender.test.js` fails if a template literal containing markup is not `html`-tagged, if any
+  frontend file writes HTML another way, or if the CSP is loosened (the options moved unchanged to
+  `server/securityHeaders.js` so they can be pinned). The CSP itself is NOT changed. Not verified: behaviour in a
+  real browser (there is none in the test environment); the tests check the HTML strings and the source. Rollback:
+  revert.
 
 ### Added
 - **Periodic jobs run once across instances** (S3, RFC 0001 phase A4). On Postgres every scheduled job tick takes a
