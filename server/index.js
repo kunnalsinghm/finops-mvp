@@ -97,6 +97,7 @@ app.use(express.json({ limit: "2mb" }));
 
 app.use(express.static(path.join(__dirname, "..", "public")));
 app.use("/vendor/chart.js", express.static(path.join(__dirname, "..", "node_modules", "chart.js", "dist")));
+app.use("/vendor/fontsource", express.static(path.join(__dirname, "..", "node_modules", "@fontsource")));
 
 // Deliberately unauthenticated and before any /api mount - this is a
 // liveness probe for Docker's HEALTHCHECK / a load balancer / an uptime

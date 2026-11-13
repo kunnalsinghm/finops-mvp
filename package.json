@@ -19,6 +19,8 @@
     "migrate-tenants": "node scripts/migrate-tenants.js"
   },
   "dependencies": {
+    "@fontsource/fira-code": "^5.3.0",
+    "@fontsource/fira-sans": "^5.3.0",
     "chart.js": "^4.4.4",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

@@ -2,20 +2,33 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8" />
-<title>FinOps</title>
+<title>FinOps · API spend console</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#020617" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0f1f'/%3E%3Cpath d='M6 22l6-7 5 4 9-11' fill='none' stroke='%2322c55e' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<script src="theme-init.js"></script>
+<link rel="preload" href="/vendor/fontsource/fira-sans/files/fira-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/vendor/fontsource/fira-code/files/fira-code-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin />
 <script src="/vendor/chart.js/chart.umd.min.js"></script>
 <link rel="stylesheet" href="dashboard.css" />
 </head>
 <body>
+<div class="shell">
 
-  <div class="topbar">
+  <header class="topbar">
     <div class="brand">
-      <h1>FinOps</h1>
-      <span class="sub">Free/local stack &middot; Node + SQLite</span>
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--surface-2)" stroke="var(--border-strong)"/><path d="M6 22l6-7 5 4 9-11" fill="none" stroke="var(--good)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div>
+        <h1>FinOps</h1>
+        <span class="sub">API spend console &middot; Node + SQLite</span>
+      </div>
     </div>
     <div class="topbar-right">
-      <div id="loginStatus" style="color:var(--text-muted);font-size:12.5px;"></div>
+      <div id="loginStatus"></div>
+      <div class="sync" id="syncPill" role="status" aria-live="polite"><span class="dot"></span><span id="syncText">Loading…</span></div>
+      <button class="icon-btn" id="refreshBtn" aria-label="Refresh data" title="Refresh data">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+      </button>
       <div class="theme-toggle" id="themeToggle">
         <button id="themeLight" aria-label="Light mode" title="Light mode">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
@@ -25,131 +38,143 @@
         </button>
       </div>
     </div>
-  </div>
+  </header>
 
-  <div class="panel stagger-in" style="margin-bottom:16px;animation-delay:0.02s;">
-    <h2 class="panel-title">Access</h2>
-    <div class="tick-rule"></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
-      <div>
-        <div style="color:var(--text-muted);font-size:12px;margin-bottom:8px;">Login (dashboard users)</div>
-        <input id="loginUsername" type="text" placeholder="username" style="margin-bottom:8px;" />
-        <input id="loginPassword" type="password" placeholder="password" style="margin-bottom:10px;" />
-        <button id="loginBtn" class="primary" style="width:100%;">Log in</button>
-        <div id="loginMsg" style="color:var(--text-muted);font-size:12px;margin-top:8px;"></div>
-        <a href="reset-password.html" style="color:var(--text-faint);font-size:11.5px;margin-top:6px;display:inline-block;">Forgot password?</a>
-      </div>
-      <div>
-        <div style="color:var(--text-muted);font-size:12px;margin-bottom:8px;">Or paste an API key (service/proxy access)</div>
-        <input id="apiKeyInput" type="text" placeholder="fk_..." style="font-family:var(--font-data);font-size:12px;" />
-        <div style="color:var(--text-faint);font-size:11px;margin-top:8px;">Create one via <code>POST /api/keys</code> once logged in as admin.</div>
+  <details class="panel reveal" id="accessPanel" open>
+    <summary>
+      <span class="left">Access <span class="badge warn" id="accessState">Not signed in</span></span>
+      <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+    </summary>
+    <div class="body">
+      <div class="tick-rule"></div>
+      <div class="access-grid">
+        <div>
+          <div class="field-label">Login (dashboard users)</div>
+          <input id="loginUsername" type="text" placeholder="username" autocomplete="username" aria-label="Username" />
+          <input id="loginPassword" type="password" placeholder="password" autocomplete="current-password" aria-label="Password" />
+          <button id="loginBtn" class="primary w-full">Log in</button>
+          <div id="loginMsg" class="status-line" style="margin-top:8px;" aria-live="polite"></div>
+          <a href="reset-password.html" class="hint">Forgot password?</a>
+        </div>
+        <div>
+          <div class="field-label">Or paste an API key (service/proxy access)</div>
+          <input id="apiKeyInput" type="text" placeholder="fk_…" autocomplete="off" spellcheck="false" aria-label="API key" style="font-family:var(--font-data);font-size:12px;" />
+          <div class="hint">Create one via <code>POST /api/keys</code> once logged in as admin.</div>
+        </div>
       </div>
     </div>
-  </div>
+  </details>
 
-  <div class="cards" id="summaryCards"></div>
+  <section class="cards" id="summaryCards" aria-label="Spend summary">
+    <div class="card loading"><div class="label">Total Spend</div><div class="value"><span class="skeleton"></span></div></div>
+    <div class="card loading"><div class="label">Spend Today</div><div class="value"><span class="skeleton"></span></div></div>
+    <div class="card loading"><div class="label">Total Events</div><div class="value"><span class="skeleton"></span></div></div>
+    <div class="card loading"><div class="label">Untagged Spend</div><div class="value"><span class="skeleton"></span></div></div>
+  </section>
 
-  <div class="grid stagger-in" style="animation-delay:0.08s;">
-    <div class="panel">
+  <div class="grid">
+    <section class="panel spot reveal" style="--d:.04s">
       <h2 class="panel-title">Cost Over Time</h2>
       <div class="tick-rule"></div>
-      <canvas id="timeChart" height="90"></canvas>
-    </div>
-    <div class="panel">
+      <div class="chart-box"><canvas id="timeChart" role="img" aria-label="Line chart of daily API cost in US dollars"></canvas></div>
+    </section>
+    <section class="panel spot reveal" style="--d:.1s">
       <h2 class="panel-title">Cost by Team</h2>
       <div class="tick-rule"></div>
-      <canvas id="teamChart" height="90"></canvas>
-    </div>
+      <div class="chart-box"><canvas id="teamChart" role="img" aria-label="Doughnut chart of cost share by team"></canvas></div>
+    </section>
   </div>
 
-  <div class="grid stagger-in" style="animation-delay:0.14s;">
-    <div class="panel">
+  <div class="grid even">
+    <section class="panel spot reveal">
       <h2 class="panel-title">Cost by Provider / Model</h2>
       <div class="tick-rule"></div>
-      <table id="modelTable">
-        <thead><tr><th>Provider</th><th>Model</th><th>Events</th><th>Cost</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div class="panel">
+      <div class="table-wrap">
+        <table id="modelTable">
+          <thead><tr><th>Provider</th><th>Model</th><th class="num">Events</th><th class="num">Cost</th><th>Share</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel spot reveal" style="--d:.06s">
       <h2 class="panel-title">Budget Status</h2>
       <div class="tick-rule"></div>
-      <table id="budgetTable">
-        <thead><tr><th>Scope</th><th>Spent</th><th>Limit</th><th>Status</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
+      <div class="table-wrap">
+        <table id="budgetTable">
+          <thead><tr><th>Scope</th><th class="num">Spent</th><th class="num">Limit</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
   </div>
 
-  <div class="grid stagger-in" style="animation-delay:0.20s;">
-    <div class="panel">
+  <div class="grid even">
+    <section class="panel spot reveal">
       <h2 class="panel-title">Optimization Recommendations</h2>
       <div class="tick-rule"></div>
       <div id="recommendations"></div>
-    </div>
-    <div class="panel">
+    </section>
+    <section class="panel spot reveal" style="--d:.06s">
       <h2 class="panel-title">Recent Alerts</h2>
       <div class="tick-rule"></div>
       <div id="alerts"></div>
-    </div>
+    </section>
   </div>
 
-  <div class="panel stagger-in" style="margin-bottom:16px;animation-delay:0.26s;">
+  <section class="panel spot reveal">
     <h2 class="panel-title">Shadow-Spend Reconciliation</h2>
     <div class="tick-rule"></div>
-    <div style="color:var(--text-muted);font-size:12px;margin-bottom:12px;">
+    <p class="muted" style="font-size:12.5px;margin:0 0 12px;">
       Upload a billing CSV from your provider (columns: <code>date,provider,cost</code>) to compare against what this platform tracked.
+    </p>
+    <div class="actions" style="flex-wrap:nowrap;">
+      <input id="reconcileFile" type="file" accept=".csv,text/csv" aria-label="Billing CSV" style="flex:1;margin:0;" />
+      <button id="reconcileUploadBtn" class="primary" style="flex:none;">Upload</button>
     </div>
-    <div style="display:flex;gap:8px;margin-bottom:14px;">
-      <input id="reconcileFile" type="file" accept=".csv,text/csv" style="flex:1;" />
-      <button id="reconcileUploadBtn" class="primary">Upload</button>
-    </div>
-    <table id="reconcileTable">
-      <thead><tr><th>Day</th><th>Provider</th><th>Reported</th><th>Tracked</th><th>Gap</th><th>Status</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-
-  <div class="grid stagger-in" style="animation-delay:0.30s;">
-    <div class="panel">
-      <h2 class="panel-title">Cache &amp; Backups</h2>
-      <div class="tick-rule"></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px;">
-        <div>
-          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Cache Hit Rate</div>
-          <div id="cacheHitRate" style="font-family:var(--font-data);font-size:20px;font-weight:600;margin-top:4px;">—</div>
-        </div>
-        <div>
-          <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Cached Entries</div>
-          <div id="cacheSize" style="font-family:var(--font-data);font-size:20px;font-weight:600;margin-top:4px;">—</div>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:12px;">
-        <button id="runBackupBtn" class="primary" style="flex:1;">Run Backup Now</button>
-        <button id="exportDataBtn" class="primary" style="flex:1;background:var(--surface-2);color:var(--text);border:1px solid var(--border);">Export Data (CSV)</button>
-      </div>
-      <div id="backupStatus" style="color:var(--text-muted);font-size:12px;margin-bottom:10px;"></div>
-      <table id="backupTable">
-        <thead><tr><th>Backup</th><th>Size</th><th>Created</th></tr></thead>
+    <div id="reconcileStatus" class="status-line" aria-live="polite"></div>
+    <div class="table-wrap">
+      <table id="reconcileTable">
+        <thead><tr><th>Day</th><th>Provider</th><th class="num">Reported</th><th class="num">Tracked</th><th class="num">Gap</th><th>Status</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
-    <div class="panel">
+  </section>
+
+  <div class="grid even">
+    <section class="panel spot reveal">
+      <h2 class="panel-title">Cache &amp; Backups</h2>
+      <div class="tick-rule"></div>
+      <div class="kpi-mini">
+        <div><div class="k">Cache Hit Rate</div><div class="v" id="cacheHitRate">—</div></div>
+        <div><div class="k">Cached Entries</div><div class="v" id="cacheSize">—</div></div>
+      </div>
+      <div class="actions">
+        <button id="runBackupBtn" class="primary">Run Backup Now</button>
+        <button id="exportDataBtn" class="ghost">Export Data (CSV)</button>
+      </div>
+      <div id="backupStatus" class="status-line" aria-live="polite"></div>
+      <div class="table-wrap">
+        <table id="backupTable">
+          <thead><tr><th>Backup</th><th class="num">Size</th><th>Created</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel spot reveal" style="--d:.06s">
       <h2 class="panel-title">Audit Log</h2>
       <div class="tick-rule"></div>
       <div id="auditLog"></div>
-    </div>
+    </section>
   </div>
 
-  <div class="footer">
-
-  <div class="footer">
+  <footer class="footer">
     Ingest: <code>POST /api/ingest</code> &middot; Proxy: <code>POST /api/proxy/:provider</code> &middot;
     Pricing override: <code>POST /api/pricing/override</code> &middot; Sample data: <code>npm run seed</code>
     <br/>Every request after your first key/user needs an <code>X-API-Key</code> or <code>X-Session-Token</code> header.
-  </div>
+  </footer>
+</div>
 
-<script src="render.js"></script>
+<div id="toasts" aria-live="polite"></div>
 <script src="dashboard.js"></script>
 </body>
 </html>
