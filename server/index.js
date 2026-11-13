@@ -82,19 +82,9 @@ const PORT = process.env.PORT || 4000;
 // to wider exposure once you understand the risk.
 const HOST = process.env.FINOPS_HOST || "127.0.0.1";
 
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        scriptSrc: ["'self'"],
-        imgSrc: ["'self'", "data:"],
-        connectSrc: ["'self'"],
-      },
-    },
-  })
-);
+// The Content-Security-Policy and the other Helmet defaults live in securityHeaders.js so a
+// test can pin them (script-src stays 'self'; nothing here may be loosened).
+app.use(helmet(require("./securityHeaders").helmetOptions));
 app.use(cors());
 
 // MUST be registered before app.use(express.json()) below - the Stripe
